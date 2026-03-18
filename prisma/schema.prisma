@@ -1,0 +1,305 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────
+
+enum MediaType {
+  MOVIE
+  BOOK
+  TV_SHOW
+  BOARD_GAME
+  VIDEO_GAME
+}
+
+enum ReviewVisibility {
+  PUBLIC
+  FRIENDS_ONLY
+  PRIVATE
+}
+
+enum FriendStatus {
+  PENDING
+  ACCEPTED
+  BLOCKED
+}
+
+// ─── MEDIA ITEM ──────────────────────────────────────────
+
+model MediaItem {
+  id              String     @id @default(cuid())
+  mediaType       MediaType
+  title           String
+  slug            String     @unique  // URL-safe title, e.g. "the-godfather-1972"
+  releaseYear     Int?
+  description     String?    @db.Text
+  imageUrl        String?    // poster / cover art
+
+  // Genre stored as array of strings (e.g. ["Drama", "Crime"])
+  genres          String[]
+
+  // External ratings — nullable, fetched via external APIs and cached
+  imdbRating      Float?     // 0.0–10.0
+  imdbId          String?    // tt1234567
+  rtScore         Int?       // 0–100  (Tomatometer)
+  rtAudienceScore Int?       // 0–100
+  goodreadsRating Float?     // 0.0–5.0
+  goodreadsId     String?
+  openCriticScore Int?       // 0–100, games only
+  openCriticId    String?
+  metacriticScore Int?       // 0–100
+  externalRatingsUpdatedAt DateTime?
+
+  // ── Movie / TV-specific ──
+  directors       Person[]   @relation("DirectedBy")
+  cast            Person[]   @relation("AppearedIn")
+  studio          String?
+  runtime         Int?       // minutes (movie) or avg episode minutes (TV)
+  seasons         Int?       // TV only
+  episodes        Int?       // TV only
+  streamingOn     String[]   // ["Netflix", "HBO Max"]
+  mpaaRating      String?    // "PG-13", "R", etc.
+
+  // ── Book-specific ──
+  authors         Person[]   @relation("AuthoredBy")
+  isbn            String?
+  publisher       String?
+  pageCount       Int?
+
+  // ── Game-specific ──
+  designers       Person[]   @relation("DesignedBy")
+  publishers      String[]   // game publishers
+  minPlayers      Int?
+  maxPlayers      Int?
+  playTimeMinutes Int?
+  platforms       String[]   // ["PS5", "PC"] for video games / physical for board
+
+  reviews         Review[]
+  listItems       ListItem[]
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([mediaType])
+  @@index([title])
+  @@index([releaseYear])
+}
+
+// ─── PERSON (directors, actors, authors, designers) ──────
+
+model Person {
+  id          String      @id @default(cuid())
+  name        String
+  slug        String      @unique
+  imageUrl    String?
+  bio         String?     @db.Text
+  birthYear   Int?
+
+  directed    MediaItem[] @relation("DirectedBy")
+  appeared    MediaItem[] @relation("AppearedIn")
+  authored    MediaItem[] @relation("AuthoredBy")
+  designed    MediaItem[] @relation("DesignedBy")
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([name])
+}
+
+// ─── USER ─────────────────────────────────────────────────
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  username        String    @unique
+  displayName     String
+  bio             String?
+  avatarUrl       String?
+  isVerified      Boolean   @default(false)
+
+  // Auth — local password OR google OAuth (or both)
+  passwordHash    String?   // null if Google-only account
+  googleId        String?   @unique
+  googleEmail     String?
+
+  // Privacy defaults
+  defaultVisibility ReviewVisibility @default(PUBLIC)
+  profilePublic   Boolean   @default(true)
+
+  reviews         Review[]
+  reactions       Reaction[]
+  comments        Comment[]
+
+  // Friend graph — both directions stored for easy querying
+  friendsInitiated  Friendship[] @relation("FriendInitiator")
+  friendsReceived   Friendship[] @relation("FriendReceiver")
+
+  lists           MediaList[]
+  notifications   Notification[]
+
+  refreshTokens   RefreshToken[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([email])
+  @@index([username])
+}
+
+model RefreshToken {
+  id          String   @id @default(cuid())
+  token       String   @unique
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+}
+
+// ─── FRIENDSHIP ───────────────────────────────────────────
+
+model Friendship {
+  id          String       @id @default(cuid())
+  initiatorId String
+  receiverId  String
+  status      FriendStatus @default(PENDING)
+
+  initiator   User @relation("FriendInitiator", fields: [initiatorId], references: [id], onDelete: Cascade)
+  receiver    User @relation("FriendReceiver",  fields: [receiverId],  references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([initiatorId, receiverId])
+  @@index([receiverId])
+  @@index([status])
+}
+
+// ─── REVIEW ───────────────────────────────────────────────
+
+model Review {
+  id            String           @id @default(cuid())
+  userId        String
+  mediaItemId   String
+
+  // Core rating 1–10
+  rating        Int              // 1–10, validated in app layer
+
+  // Is this a re-review? (changed verdict)
+  isRevisit     Boolean          @default(false)
+  previousRating Int?
+
+  // Written review (both optional)
+  reviewText    String?          @db.Text
+  spoilerText   String?          @db.Text  // shown behind a spoiler gate
+
+  // Verdict (computed from rating but stored for fast querying)
+  // 1-3 = Not Good, 4-6 = Mixed, 7-8 = Still Good, 9-10 = Timeless
+  verdict       String?          // "TIMELESS" | "STILL_GOOD" | "MIXED" | "NOT_GOOD"
+
+  visibility    ReviewVisibility @default(PUBLIC)
+
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaItem     MediaItem  @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+
+  reactions     Reaction[]
+  comments      Comment[]
+
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  // One review per user per media item (can update/revisit, but one active record)
+  @@unique([userId, mediaItemId])
+  @@index([userId])
+  @@index([mediaItemId])
+  @@index([visibility])
+  @@index([createdAt])
+}
+
+// ─── REACTION (like / emoji on a review) ─────────────────
+
+model Reaction {
+  id        String   @id @default(cuid())
+  userId    String
+  reviewId  String
+  emoji     String   @default("❤️")  // extensible to any emoji
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, reviewId, emoji])
+}
+
+// ─── COMMENT ─────────────────────────────────────────────
+
+model Comment {
+  id        String   @id @default(cuid())
+  userId    String
+  reviewId  String
+  body      String   @db.Text
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  parentId  String?  // for nested replies
+  parent    Comment? @relation("Replies", fields: [parentId], references: [id])
+  replies   Comment[] @relation("Replies")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([reviewId])
+}
+
+// ─── MEDIA LIST (Watchlist, etc.) ─────────────────────────
+
+model MediaList {
+  id          String     @id @default(cuid())
+  userId      String
+  title       String     // "Want to Watch", "All-Time Faves", etc.
+  description String?
+  isPublic    Boolean    @default(true)
+
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items       ListItem[]
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model ListItem {
+  id          String    @id @default(cuid())
+  listId      String
+  mediaItemId String
+  note        String?
+  position    Int       @default(0)
+
+  list        MediaList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  mediaItem   MediaItem @relation(fields: [mediaItemId], references: [id])
+
+  addedAt     DateTime  @default(now())
+
+  @@unique([listId, mediaItemId])
+}
+
+// ─── NOTIFICATIONS ────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // "FRIEND_REQUEST" | "REVIEW_REACTION" | "COMMENT" | "NEW_FRIEND_REVIEW"
+  payload   Json     // flexible per type
+  read      Boolean  @default(false)
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+}
