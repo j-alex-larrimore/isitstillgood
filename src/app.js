@@ -43,13 +43,15 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-app.use('/api/auth',   require('./routes/auth'));
-app.use('/api/users',  require('./routes/users'));
-app.use('/api/media',  require('./routes/media'));
-app.use('/api/reviews',require('./routes/reviews'));
-app.use('/api/friends',require('./routes/friends'));
-app.use('/api/feed',   require('./routes/feed'));
-app.use('/api/lists',  require('./routes/lists'));
+app.use('/api/auth',    require('./routes/auth'));
+app.use('/api/users',   require('./routes/users'));
+app.use('/api/media',   require('./routes/media'));
+app.use('/api/reviews', require('./routes/reviews'));
+app.use('/api/friends', require('./routes/friends'));
+app.use('/api/feed',    require('./routes/feed'));
+app.use('/api/lists',   require('./routes/lists'));
+app.use('/api/admin',   require('./routes/admin'));
+app.use('/api/requests',require('./routes/requests'));
 
 // ─── Health check ────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date() }));

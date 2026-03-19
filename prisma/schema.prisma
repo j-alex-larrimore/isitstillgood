@@ -7,8 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ─── ENUMS ───────────────────────────────────────────────
-
 enum MediaType {
   MOVIE
   BOOK
@@ -29,68 +27,51 @@ enum FriendStatus {
   BLOCKED
 }
 
-// ─── MEDIA ITEM ──────────────────────────────────────────
-
 model MediaItem {
   id              String     @id @default(cuid())
   mediaType       MediaType
   title           String
-  slug            String     @unique  // URL-safe title, e.g. "the-godfather-1972"
+  slug            String     @unique
   releaseYear     Int?
   description     String?    @db.Text
-  imageUrl        String?    // poster / cover art
-
-  // Genre stored as array of strings (e.g. ["Drama", "Crime"])
+  imageUrl        String?
   genres          String[]
-
-  // External ratings — nullable, fetched via external APIs and cached
-  imdbRating      Float?     // 0.0–10.0
-  imdbId          String?    // tt1234567
-  rtScore         Int?       // 0–100  (Tomatometer)
-  rtAudienceScore Int?       // 0–100
-  goodreadsRating Float?     // 0.0–5.0
+  imdbRating      Float?
+  imdbId          String?
+  rtScore         Int?
+  rtAudienceScore Int?
+  goodreadsRating Float?
   goodreadsId     String?
-  openCriticScore Int?       // 0–100, games only
+  openCriticScore Int?
   openCriticId    String?
-  metacriticScore Int?       // 0–100
+  metacriticScore Int?
   externalRatingsUpdatedAt DateTime?
-
-  // ── Movie / TV-specific ──
   directors       Person[]   @relation("DirectedBy")
   cast            Person[]   @relation("AppearedIn")
   studio          String?
-  runtime         Int?       // minutes (movie) or avg episode minutes (TV)
-  seasons         Int?       // TV only
-  episodes        Int?       // TV only
-  streamingOn     String[]   // ["Netflix", "HBO Max"]
-  mpaaRating      String?    // "PG-13", "R", etc.
-
-  // ── Book-specific ──
+  runtime         Int?
+  seasons         Int?
+  episodes        Int?
+  streamingOn     String[]
+  mpaaRating      String?
   authors         Person[]   @relation("AuthoredBy")
   isbn            String?
   publisher       String?
   pageCount       Int?
-
-  // ── Game-specific ──
   designers       Person[]   @relation("DesignedBy")
-  publishers      String[]   // game publishers
+  publishers      String[]
   minPlayers      Int?
   maxPlayers      Int?
   playTimeMinutes Int?
-  platforms       String[]   // ["PS5", "PC"] for video games / physical for board
-
+  platforms       String[]
   reviews         Review[]
   listItems       ListItem[]
-
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
-
   @@index([mediaType])
   @@index([title])
   @@index([releaseYear])
 }
-
-// ─── PERSON (directors, actors, authors, designers) ──────
 
 model Person {
   id          String      @id @default(cuid())
@@ -99,19 +80,14 @@ model Person {
   imageUrl    String?
   bio         String?     @db.Text
   birthYear   Int?
-
   directed    MediaItem[] @relation("DirectedBy")
   appeared    MediaItem[] @relation("AppearedIn")
   authored    MediaItem[] @relation("AuthoredBy")
   designed    MediaItem[] @relation("DesignedBy")
-
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
-
   @@index([name])
 }
-
-// ─── USER ─────────────────────────────────────────────────
 
 model User {
   id              String    @id @default(cuid())
@@ -121,32 +97,24 @@ model User {
   bio             String?
   avatarUrl       String?
   isVerified      Boolean   @default(false)
-
-  // Auth — local password OR google OAuth (or both)
-  passwordHash    String?   // null if Google-only account
+  isAdmin         Boolean   @default(false)
+  passwordHash    String?
   googleId        String?   @unique
   googleEmail     String?
-
-  // Privacy defaults
   defaultVisibility ReviewVisibility @default(PUBLIC)
   profilePublic   Boolean   @default(true)
-
+  feedTimeframeDays Int?    // admin-set global timeframe; null = all time
   reviews         Review[]
   reactions       Reaction[]
   comments        Comment[]
-
-  // Friend graph — both directions stored for easy querying
   friendsInitiated  Friendship[] @relation("FriendInitiator")
   friendsReceived   Friendship[] @relation("FriendReceiver")
-
   lists           MediaList[]
   notifications   Notification[]
-
+  mediaRequests   MediaRequest[]
   refreshTokens   RefreshToken[]
-
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
-
   @@index([email])
   @@index([username])
 }
@@ -160,59 +128,37 @@ model RefreshToken {
   createdAt   DateTime @default(now())
 }
 
-// ─── FRIENDSHIP ───────────────────────────────────────────
-
 model Friendship {
   id          String       @id @default(cuid())
   initiatorId String
   receiverId  String
   status      FriendStatus @default(PENDING)
-
   initiator   User @relation("FriendInitiator", fields: [initiatorId], references: [id], onDelete: Cascade)
   receiver    User @relation("FriendReceiver",  fields: [receiverId],  references: [id], onDelete: Cascade)
-
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-
   @@unique([initiatorId, receiverId])
   @@index([receiverId])
   @@index([status])
 }
 
-// ─── REVIEW ───────────────────────────────────────────────
-
 model Review {
   id            String           @id @default(cuid())
   userId        String
   mediaItemId   String
-
-  // Core rating 1–10
-  rating        Int              // 1–10, validated in app layer
-
-  // Is this a re-review? (changed verdict)
+  rating        Int
   isRevisit     Boolean          @default(false)
   previousRating Int?
-
-  // Written review (both optional)
   reviewText    String?          @db.Text
-  spoilerText   String?          @db.Text  // shown behind a spoiler gate
-
-  // Verdict (computed from rating but stored for fast querying)
-  // 1-3 = Not Good, 4-6 = Mixed, 7-8 = Still Good, 9-10 = Timeless
-  verdict       String?          // "TIMELESS" | "STILL_GOOD" | "MIXED" | "NOT_GOOD"
-
+  spoilerText   String?          @db.Text
+  verdict       String?
   visibility    ReviewVisibility @default(PUBLIC)
-
   user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   mediaItem     MediaItem  @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
-
   reactions     Reaction[]
   comments      Comment[]
-
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
-
-  // One review per user per media item (can update/revisit, but one active record)
   @@unique([userId, mediaItemId])
   @@index([userId])
   @@index([mediaItemId])
@@ -220,55 +166,40 @@ model Review {
   @@index([createdAt])
 }
 
-// ─── REACTION (like / emoji on a review) ─────────────────
-
 model Reaction {
   id        String   @id @default(cuid())
   userId    String
   reviewId  String
-  emoji     String   @default("❤️")  // extensible to any emoji
-
+  emoji     String   @default("❤️")
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
-
   createdAt DateTime @default(now())
-
   @@unique([userId, reviewId, emoji])
 }
-
-// ─── COMMENT ─────────────────────────────────────────────
 
 model Comment {
   id        String   @id @default(cuid())
   userId    String
   reviewId  String
   body      String   @db.Text
-
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
-
-  parentId  String?  // for nested replies
+  parentId  String?
   parent    Comment? @relation("Replies", fields: [parentId], references: [id])
   replies   Comment[] @relation("Replies")
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
   @@index([reviewId])
 }
-
-// ─── MEDIA LIST (Watchlist, etc.) ─────────────────────────
 
 model MediaList {
   id          String     @id @default(cuid())
   userId      String
-  title       String     // "Want to Watch", "All-Time Faves", etc.
+  title       String
   description String?
   isPublic    Boolean    @default(true)
-
   user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   items       ListItem[]
-
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 }
@@ -279,27 +210,48 @@ model ListItem {
   mediaItemId String
   note        String?
   position    Int       @default(0)
-
   list        MediaList @relation(fields: [listId], references: [id], onDelete: Cascade)
   mediaItem   MediaItem @relation(fields: [mediaItemId], references: [id])
-
   addedAt     DateTime  @default(now())
-
   @@unique([listId, mediaItemId])
 }
-
-// ─── NOTIFICATIONS ────────────────────────────────────────
 
 model Notification {
   id        String   @id @default(cuid())
   userId    String
-  type      String   // "FRIEND_REQUEST" | "REVIEW_REACTION" | "COMMENT" | "NEW_FRIEND_REVIEW"
-  payload   Json     // flexible per type
+  type      String
+  payload   Json
   read      Boolean  @default(false)
-
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
   createdAt DateTime @default(now())
-
   @@index([userId, read])
+}
+
+// ─── MEDIA REQUESTS ──────────────────────────────────────
+
+model MediaRequest {
+  id           String    @id @default(cuid())
+  userId       String
+  title        String
+  mediaType    MediaType
+  directorOrAuthor String?   // optional hint for movies/books
+  notes        String?
+  requestCount Int       @default(1)  // incremented when others request the same
+  flagged      Boolean   @default(false)
+  flagNote     String?   // shown to user who requested: "couldn't find this title"
+  resolved     Boolean   @default(false)  // true once admin adds the media
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  @@index([mediaType])
+  @@index([requestCount])
+  @@index([resolved])
+}
+
+// ─── ADMIN SETTINGS ──────────────────────────────────────
+
+model AdminSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }

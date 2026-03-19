@@ -33,7 +33,7 @@ async function requireAuth(req, res, next) {
       select: {
         id: true, email: true, username: true,
         displayName: true, avatarUrl: true, profilePublic: true,
-        defaultVisibility: true,
+        defaultVisibility: true, isAdmin: true,
       },
     });
 
