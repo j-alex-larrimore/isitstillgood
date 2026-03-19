@@ -14,9 +14,24 @@ app.use(helmet());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
+// ─── CORS ────────────────────────────────────────────────────────────────────
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5500',
+  ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
+  ...(process.env.CLIENT_URL ? [
+    process.env.CLIENT_URL.replace('https://www.', 'https://'),
+    process.env.CLIENT_URL.replace('https://', 'https://www.'),
+  ] : []),
+];
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  credentials: true,          // required for cookies / sessions
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
 }));
 
