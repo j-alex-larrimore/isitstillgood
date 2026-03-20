@@ -54,8 +54,14 @@ model MediaItem {
   mpaaRating      String?
 
   // TV Show-specific
-  seasons         Int?
-  // NOTE: episodes and runtime removed from TV shows per spec
+  // parentId links a season entry back to its parent show MediaItem.
+  // A parent show row has parentId = null and seasons = total count.
+  // Each season row has parentId = show's id and seasonNumber = which season.
+  parentId        String?
+  parent          MediaItem?  @relation("ShowSeasons", fields: [parentId], references: [id])
+  seasonEntries   MediaItem[] @relation("ShowSeasons")  // reverse — all seasons of this show
+  seasonNumber    Int?        // which season this entry represents (1, 2, 3…)
+  seasons         Int?        // total season count — stored on the parent show row only
 
   // Book-specific
   authors         Person[]   @relation("AuthoredBy")
