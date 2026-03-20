@@ -133,7 +133,10 @@ router.get('/:username/reviews', optionalAuth, [
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/users/search?q= ─── Find users ──────────────────────────────
+// ─── GET /api/users/search?q= ─── Find users by username, name, or email ──
+// Email search lets existing users find each other even if they don't know
+// each other's username. We search email but never expose it in the results —
+// the response only returns public profile fields.
 router.get('/search', requireAuth, [
   query('q').trim().isLength({ min: 2 }),
 ], async (req, res, next) => {
@@ -142,11 +145,20 @@ router.get('/search', requireAuth, [
     const users = await prisma.user.findMany({
       where: {
         OR: [
+          // Search by username (partial match, case-insensitive)
           { username:    { contains: req.query.q, mode: 'insensitive' } },
+          // Search by display name
           { displayName: { contains: req.query.q, mode: 'insensitive' } },
+          // Search by email — allows finding friends who haven't set a username yet
+          // or when you only know someone's email address
+          { email:       { contains: req.query.q, mode: 'insensitive' } },
         ],
+        // Never return the searching user in their own results
         NOT: { id: req.user.id },
       },
+      // Only return public-safe fields — never return passwordHash, googleId, etc.
+      // We intentionally omit email from results to protect user privacy;
+      // the search matches on email but doesn't reveal it
       select: { id: true, username: true, displayName: true, avatarUrl: true },
       take: 20,
     });

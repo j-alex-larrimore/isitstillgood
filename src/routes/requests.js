@@ -13,7 +13,7 @@ function ok(req, res) {
 // ─── POST /api/requests ─── Submit a title request ───────────────────────
 router.post('/', requireAuth, [
   body('title').trim().notEmpty().isLength({ max: 200 }),
-  body('mediaType').isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
+  body('mediaType').isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'VIDEO_GAME']),
   body('directorOrAuthor').optional().trim().isLength({ max: 200 }),
   body('notes').optional().trim().isLength({ max: 500 }),
 ], async (req, res, next) => {

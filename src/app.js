@@ -15,17 +15,22 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
 const allowedOrigins = [
-  'https://isitstillgood.com',
-  'https://www.isitstillgood.com',
   'http://localhost:3000',
   'http://localhost:5500',
+  ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
+  // Always allow both www and non-www variants automatically
+  ...(process.env.CLIENT_URL ? [
+    process.env.CLIENT_URL.replace('https://www.', 'https://'),
+    process.env.CLIENT_URL.replace('https://', 'https://www.'),
+  ] : []),
 ];
 
 app.use(cors({
   origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error(`CORS blocked: ${origin}`));
+    callback(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -44,7 +49,7 @@ app.use(session({
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
-    maxAge: 1000 * 60 * 10,   // 10 min — only used during OAuth handshake
+    maxAge: 1000 * 60 * 10,
   },
 }));
 
@@ -63,6 +68,7 @@ app.use('/api/feed',    require('./routes/feed'));
 app.use('/api/lists',   require('./routes/lists'));
 app.use('/api/admin',   require('./routes/admin'));
 app.use('/api/requests',require('./routes/requests'));
+app.use('/api/invites', require('./routes/invites'));  // email invite system
 
 // ─── Health check ────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date() }));

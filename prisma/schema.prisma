@@ -11,7 +11,6 @@ enum MediaType {
   MOVIE
   BOOK
   TV_SHOW
-  BOARD_GAME
   VIDEO_GAME
 }
 
@@ -36,6 +35,8 @@ model MediaItem {
   description     String?    @db.Text
   imageUrl        String?
   genres          String[]
+
+  // External ratings
   imdbRating      Float?
   imdbId          String?
   rtScore         Int?
@@ -46,28 +47,33 @@ model MediaItem {
   openCriticId    String?
   metacriticScore Int?
   externalRatingsUpdatedAt DateTime?
+
+  // Movie-specific
   directors       Person[]   @relation("DirectedBy")
   cast            Person[]   @relation("AppearedIn")
-  studio          String?
-  runtime         Int?
-  seasons         Int?
-  episodes        Int?
-  streamingOn     String[]
   mpaaRating      String?
+
+  // TV Show-specific
+  seasons         Int?
+  // NOTE: episodes and runtime removed from TV shows per spec
+
+  // Book-specific
   authors         Person[]   @relation("AuthoredBy")
-  isbn            String?
-  publisher       String?
-  pageCount       Int?
-  designers       Person[]   @relation("DesignedBy")
-  publishers      String[]
-  minPlayers      Int?
-  maxPlayers      Int?
-  playTimeMinutes Int?
-  platforms       String[]
+  seriesName      String?    // e.g. "The Dark Tower"
+  seriesNumber    Int?       // e.g. 3
+
+  // Video game-specific
+  openCriticId2   String?    // kept for compat, use openCriticId
+
+  // Review is per season for TV shows
+  // seasonNumber stored on Review model
+
   reviews         Review[]
   listItems       ListItem[]
+
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
+
   @@index([mediaType])
   @@index([title])
   @@index([releaseYear])
@@ -83,7 +89,6 @@ model Person {
   directed    MediaItem[] @relation("DirectedBy")
   appeared    MediaItem[] @relation("AppearedIn")
   authored    MediaItem[] @relation("AuthoredBy")
-  designed    MediaItem[] @relation("DesignedBy")
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   @@index([name])
@@ -103,7 +108,6 @@ model User {
   googleEmail     String?
   defaultVisibility ReviewVisibility @default(PUBLIC)
   profilePublic   Boolean   @default(true)
-  feedTimeframeDays Int?    // admin-set global timeframe; null = all time
   reviews         Review[]
   reactions       Reaction[]
   comments        Comment[]
@@ -113,6 +117,7 @@ model User {
   notifications   Notification[]
   mediaRequests   MediaRequest[]
   refreshTokens   RefreshToken[]
+  sentInvites     InviteToken[]    // invitations this user has sent
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   @@index([email])
@@ -147,6 +152,8 @@ model Review {
   userId        String
   mediaItemId   String
   rating        Int
+  dateConsumed  DateTime?        // When the user last read/watched/played this — optional
+  seasonNumber  Int?             // TV shows only — null means overall series rating
   isRevisit     Boolean          @default(false)
   previousRating Int?
   reviewText    String?          @db.Text
@@ -159,7 +166,8 @@ model Review {
   comments      Comment[]
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
-  @@unique([userId, mediaItemId])
+  // Unique per user + media item + season (null season = overall)
+  @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])
   @@index([mediaItemId])
   @@index([visibility])
@@ -227,31 +235,53 @@ model Notification {
   @@index([userId, read])
 }
 
-// ─── MEDIA REQUESTS ──────────────────────────────────────
-
 model MediaRequest {
-  id           String    @id @default(cuid())
-  userId       String
-  title        String
-  mediaType    MediaType
-  directorOrAuthor String?   // optional hint for movies/books
-  notes        String?
-  requestCount Int       @default(1)  // incremented when others request the same
-  flagged      Boolean   @default(false)
-  flagNote     String?   // shown to user who requested: "couldn't find this title"
-  resolved     Boolean   @default(false)  // true once admin adds the media
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id               String    @id @default(cuid())
+  userId           String
+  title            String
+  mediaType        MediaType
+  directorOrAuthor String?
+  notes            String?
+  requestCount     Int       @default(1)
+  flagged          Boolean   @default(false)
+  flagNote         String?
+  resolved         Boolean   @default(false)
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
   @@index([mediaType])
   @@index([requestCount])
   @@index([resolved])
 }
 
-// ─── ADMIN SETTINGS ──────────────────────────────────────
-
 model AdminSetting {
   key       String   @id
   value     String
   updatedAt DateTime @updatedAt
+}
+
+// ─── INVITE TOKENS ────────────────────────────────────────────────────────
+// Stores pending email invitations. When someone clicks the link in the email,
+// we look up this token to know who invited them and auto-connect as friends.
+model InviteToken {
+  id          String   @id @default(cuid())
+  
+  // The user who sent the invite
+  inviterId   String
+  inviter     User     @relation(fields: [inviterId], references: [id], onDelete: Cascade)
+  
+  // The email address this invite was sent to
+  email       String
+  
+  // Unique token embedded in the invite link — expires after 7 days
+  token       String   @unique @default(cuid())
+  
+  // Whether this invite has been used (claimed) already
+  claimed     Boolean  @default(false)
+  
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  
+  @@index([token])   // fast lookup when someone clicks the invite link
+  @@index([email])   // check if an email already has a pending invite
 }

@@ -1,55 +1,60 @@
 // src/routes/media.js
 const router = require('express').Router();
-const { body, query, validationResult } = require('express-validator');
+const { query } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
 
-function ok(req, res) {
-  const e = validationResult(req);
-  if (!e.isEmpty()) { res.status(422).json({ errors: e.array() }); return false; }
-  return true;
-}
-
-// ─── GET /api/media ─── Search / browse with unreviewed filter ───────────
-router.get('/', optionalAuth, [
-  query('q').optional().trim(),
-  query('type').optional().isIn(['MOVIE','BOOK','TV_SHOW','BOARD_GAME','VIDEO_GAME']),
-  query('genre').optional().trim(),
-  query('year').optional().isInt({ min: 1800, max: 2200 }),
-  query('person').optional().trim(),   // director, actor, author name search
-  query('excludeReviewed').optional().isBoolean(),
-  query('sort').optional().isIn(['rating', 'recent', 'title', 'year']),
-  query('page').optional().isInt({ min: 1 }),
-], async (req, res, next) => {
+// ─── GET /api/media ───────────────────────────────────────────────────────
+router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
   const excludeReviewed = req.query.excludeReviewed === 'true' && req.user;
   const take = 24;
 
   try {
-    // If person search, find matching person IDs first
+    // Person search — look up matching person IDs
     let personFilter = undefined;
-    if (person) {
+    if (person && person.trim().length > 0) {
       const persons = await prisma.person.findMany({
-        where: { name: { contains: person, mode: 'insensitive' } },
+        where: { name: { contains: person.trim(), mode: 'insensitive' } },
         select: { id: true },
       });
-      const ids = persons.map(p => p.id);
-      if (ids.length) {
-        personFilter = {
-          OR: [
-            { directors: { some: { id: { in: ids } } } },
-            { cast:      { some: { id: { in: ids } } } },
-            { authors:   { some: { id: { in: ids } } } },
-          ],
-        };
-      } else {
-        // No matching persons — return empty
+      if (!persons.length) {
         return res.json({ items: [], total: 0, page: parseInt(page), pages: 0 });
       }
+      const ids = persons.map(p => p.id);
+      personFilter = {
+        OR: [
+          { directors: { some: { id: { in: ids } } } },
+          { cast:      { some: { id: { in: ids } } } },
+          { authors:   { some: { id: { in: ids } } } },
+        ],
+      };
     }
 
-    // Get IDs of items the user has already reviewed
+    // Genre search — check both genres array and title/description
+    let genreFilter = undefined;
+    if (genre && genre.trim().length > 0) {
+      genreFilter = { genres: { has: genre.trim() } };
+    }
+
+    // Text search across title, description, series name
+    let textFilter = undefined;
+    if (q && q.trim().length > 0) {
+      textFilter = {
+        OR: [
+          { title:       { contains: q.trim(), mode: 'insensitive' } },
+          { description: { contains: q.trim(), mode: 'insensitive' } },
+          { seriesName:  { contains: q.trim(), mode: 'insensitive' } },
+          // Also search via person names in the same query
+          { directors: { some: { name: { contains: q.trim(), mode: 'insensitive' } } } },
+          { cast:      { some: { name: { contains: q.trim(), mode: 'insensitive' } } } },
+          { authors:   { some: { name: { contains: q.trim(), mode: 'insensitive' } } } },
+        ],
+      };
+    }
+
+    // Excluded already-reviewed items
     let reviewedIds = [];
     if (excludeReviewed) {
       const reviewed = await prisma.review.findMany({
@@ -62,13 +67,8 @@ router.get('/', optionalAuth, [
     const where = {
       ...(type  && { mediaType: type }),
       ...(year  && { releaseYear: parseInt(year) }),
-      ...(genre && { genres: { has: genre } }),
-      ...(q && {
-        OR: [
-          { title:       { contains: q, mode: 'insensitive' } },
-          { description: { contains: q, mode: 'insensitive' } },
-        ],
-      }),
+      ...(genreFilter),
+      ...(textFilter),
       ...(personFilter),
       ...(excludeReviewed && reviewedIds.length && { id: { notIn: reviewedIds } }),
     };
@@ -96,7 +96,7 @@ router.get('/', optionalAuth, [
       prisma.mediaItem.count({ where }),
     ]);
 
-    // For each item, compute community avg rating
+    // Compute avg rating per item
     const itemIds = items.map(i => i.id);
     const ratings = await prisma.review.groupBy({
       by: ['mediaItemId'],
@@ -107,7 +107,9 @@ router.get('/', optionalAuth, [
 
     res.json({
       items: items.map(i => ({ ...i, avgRating: ratingMap[i.id] || null })),
-      total, page: parseInt(page), pages: Math.ceil(total / take),
+      total,
+      page: parseInt(page),
+      pages: Math.ceil(total / take),
     });
   } catch (err) { next(err); }
 });
@@ -121,7 +123,6 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         directors: { select: { id: true, name: true, slug: true, imageUrl: true } },
         cast:       { select: { id: true, name: true, slug: true, imageUrl: true } },
         authors:    { select: { id: true, name: true, slug: true, imageUrl: true } },
-        designers:  { select: { id: true, name: true, slug: true, imageUrl: true } },
         _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
       },
     });
@@ -129,8 +130,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
 
     const stats = await prisma.review.aggregate({
       where: { mediaItemId: item.id, visibility: 'PUBLIC' },
-      _avg: { rating: true },
-      _count: { rating: true },
+      _avg: { rating: true }, _count: { rating: true },
     });
 
     const verdicts = await prisma.review.groupBy({
@@ -141,8 +141,8 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
 
     let userReview = null;
     if (req.user) {
-      userReview = await prisma.review.findUnique({
-        where: { userId_mediaItemId: { userId: req.user.id, mediaItemId: item.id } },
+      userReview = await prisma.review.findFirst({
+        where: { userId: req.user.id, mediaItemId: item.id, seasonNumber: null },
       });
     }
 
@@ -159,28 +159,24 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
 });
 
 // ─── GET /api/media/:slug/reviews ─────────────────────────────────────────
-router.get('/:slug/reviews', optionalAuth, [
-  query('page').optional().isInt({ min: 1 }),
-  query('sort').optional().isIn(['recent', 'top']),
-], async (req, res, next) => {
+router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
   try {
     const item = await prisma.mediaItem.findUnique({ where: { slug: req.params.slug } });
     if (!item) return res.status(404).json({ error: 'Not found' });
     const page = parseInt(req.query.page) || 1;
     const take = 20;
+    const seasonFilter = req.query.season ? { seasonNumber: parseInt(req.query.season) } : {};
     const [reviews, total] = await Promise.all([
       prisma.review.findMany({
-        where: { mediaItemId: item.id, visibility: 'PUBLIC' },
+        where: { mediaItemId: item.id, visibility: 'PUBLIC', ...seasonFilter },
         include: {
           user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
           _count: { select: { reactions: true, comments: true } },
         },
-        orderBy: req.query.sort === 'top'
-          ? [{ reactions: { _count: 'desc' } }]
-          : [{ createdAt: 'desc' }],
+        orderBy: req.query.sort === 'top' ? [{ reactions: { _count: 'desc' } }] : [{ createdAt: 'desc' }],
         skip: (page - 1) * take, take,
       }),
-      prisma.review.count({ where: { mediaItemId: item.id, visibility: 'PUBLIC' } }),
+      prisma.review.count({ where: { mediaItemId: item.id, visibility: 'PUBLIC', ...seasonFilter } }),
     ]);
     res.json({ reviews, total, page, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }

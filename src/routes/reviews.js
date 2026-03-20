@@ -1,6 +1,6 @@
 // src/routes/reviews.js
 const router = require('express').Router();
-const { body, query, param, validationResult } = require('express-validator');
+const { body, validationResult } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 
@@ -10,15 +10,14 @@ function ok(req, res) {
   return true;
 }
 
-/** Map a numeric rating 1-10 to a verdict label */
-function ratingToVerdict(rating) {
-  if (rating >= 9) return 'TIMELESS';
-  if (rating >= 7) return 'STILL_GOOD';
-  if (rating >= 4) return 'MIXED';
+function ratingToVerdict(r) {
+  if (r >= 9) return 'TIMELESS';
+  if (r >= 7) return 'STILL_GOOD';
+  if (r >= 4) return 'MIXED';
   return 'NOT_GOOD';
 }
 
-// ─── GET /api/reviews/:id ─── Single review ─────────────────────────────
+// ─── GET /api/reviews/:id ─────────────────────────────────────────────────
 router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
     const review = await prisma.review.findUnique({
@@ -26,22 +25,15 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
       include: {
         user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
         mediaItem: {
-          select: {
-            id: true, title: true, mediaType: true, releaseYear: true,
-            imageUrl: true, slug: true, genres: true,
-          },
+          select: { id: true, title: true, mediaType: true, releaseYear: true, imageUrl: true, slug: true, genres: true },
         },
-        reactions: {
-          select: { userId: true, emoji: true },
-        },
+        reactions: { select: { userId: true, emoji: true } },
         comments: {
           where: { parentId: null },
           include: {
             user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
             replies: {
-              include: {
-                user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
-              },
+              include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
               orderBy: { createdAt: 'asc' },
             },
           },
@@ -52,20 +44,16 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
 
     if (!review) return res.status(404).json({ error: 'Review not found' });
 
-    // Visibility check
     if (review.visibility === 'PRIVATE' && review.userId !== req.user?.id) {
       return res.status(403).json({ error: 'This review is private' });
     }
     if (review.visibility === 'FRIENDS_ONLY' && review.userId !== req.user?.id) {
       if (!req.user) return res.status(403).json({ error: 'Friends only' });
       const areFriends = await prisma.friendship.findFirst({
-        where: {
-          status: 'ACCEPTED',
-          OR: [
-            { initiatorId: req.user.id, receiverId: review.userId },
-            { initiatorId: review.userId, receiverId: req.user.id },
-          ],
-        },
+        where: { status: 'ACCEPTED', OR: [
+          { initiatorId: req.user.id, receiverId: review.userId },
+          { initiatorId: review.userId, receiverId: req.user.id },
+        ]},
       });
       if (!areFriends) return res.status(403).json({ error: 'Friends only' });
     }
@@ -74,61 +62,62 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ─── POST /api/reviews ─── Create or update review ──────────────────────
+// ─── POST /api/reviews ─── Create or update ───────────────────────────────
 router.post('/', requireAuth, [
   body('mediaItemId').notEmpty(),
   body('rating').isInt({ min: 1, max: 10 }),
+  body('seasonNumber').optional({ nullable: true }).isInt({ min: 1 }),
+  // dateConsumed is when they last watched/read/played it — optional ISO date string
+  body('dateConsumed').optional({ nullable: true }).isISO8601().withMessage('dateConsumed must be a valid date'),
   body('reviewText').optional().trim().isLength({ max: 5000 }),
   body('spoilerText').optional().trim().isLength({ max: 3000 }),
-  body('visibility').optional().isIn(['PUBLIC','FRIENDS_ONLY','PRIVATE']),
+  body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
   body('isRevisit').optional().isBoolean(),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
-  const { mediaItemId, rating, reviewText, spoilerText, visibility, isRevisit } = req.body;
+  const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit } = req.body;
   try {
     const media = await prisma.mediaItem.findUnique({ where: { id: mediaItemId } });
     if (!media) return res.status(404).json({ error: 'Media item not found' });
 
-    // Check for existing review
-    const existing = await prisma.review.findUnique({
-      where: { userId_mediaItemId: { userId: req.user.id, mediaItemId } },
-    });
-
     const verdict = ratingToVerdict(parseInt(rating));
     const vis = visibility || req.user.defaultVisibility || 'PUBLIC';
+    const season = seasonNumber ? parseInt(seasonNumber) : null;
+
+    // Convert dateConsumed string to a real Date object if provided,
+    // otherwise leave as null — the field is optional
+    const consumed = dateConsumed ? new Date(dateConsumed) : null;
+
+    // For TV shows, unique key includes seasonNumber
+    const uniqueKey = { userId: req.user.id, mediaItemId, seasonNumber: season };
+    const existing = await prisma.review.findUnique({ where: { userId_mediaItemId_seasonNumber: uniqueKey } });
 
     let review;
     if (existing) {
-      // Update / revisit
+      // Update existing review — preserve previous rating for revisit tracking
       review = await prisma.review.update({
         where: { id: existing.id },
         data: {
           rating: parseInt(rating),
-          reviewText,
-          spoilerText,
-          visibility: vis,
-          verdict,
-          isRevisit: isRevisit || (existing.rating !== parseInt(rating)),
-          previousRating: isRevisit ? existing.rating : existing.previousRating,
+          dateConsumed: consumed,        // update the date they last consumed it
+          reviewText, spoilerText, visibility: vis, verdict,
+          isRevisit: true,
+          previousRating: existing.rating,
         },
         include: reviewInclude,
       });
     } else {
+      // Create a brand new review
       review = await prisma.review.create({
         data: {
-          userId: req.user.id,
-          mediaItemId,
+          userId: req.user.id, mediaItemId,
           rating: parseInt(rating),
-          reviewText,
-          spoilerText,
-          visibility: vis,
-          verdict,
-          isRevisit: false,
+          seasonNumber: season,
+          dateConsumed: consumed,        // store when they consumed it
+          reviewText, spoilerText, visibility: vis, verdict, isRevisit: false,
         },
         include: reviewInclude,
       });
-
-      // Notify friends of the new review
       await notifyFriends(req.user.id, review.id, media.title).catch(console.error);
     }
 
@@ -136,7 +125,7 @@ router.post('/', requireAuth, [
   } catch (err) { next(err); }
 });
 
-// ─── DELETE /api/reviews/:id ─────────────────────────────────────────────
+// ─── DELETE /api/reviews/:id ──────────────────────────────────────────────
 router.delete('/:id', requireAuth, async (req, res, next) => {
   try {
     const review = await prisma.review.findUnique({ where: { id: req.params.id } });
@@ -147,26 +136,25 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ─── POST /api/reviews/:id/react ─── Toggle emoji reaction ──────────────
+// ─── POST /api/reviews/:id/react ──────────────────────────────────────────
 router.post('/:id/react', requireAuth, [
   body('emoji').trim().notEmpty().isLength({ max: 8 }),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
-  const { emoji } = req.body;
   try {
-    const key = { userId: req.user.id, reviewId: req.params.id, emoji };
+    const key = { userId: req.user.id, reviewId: req.params.id, emoji: req.body.emoji };
     const existing = await prisma.reaction.findUnique({ where: { userId_reviewId_emoji: key } });
     if (existing) {
       await prisma.reaction.delete({ where: { userId_reviewId_emoji: key } });
-      res.json({ action: 'removed', emoji });
+      res.json({ action: 'removed', emoji: req.body.emoji });
     } else {
       await prisma.reaction.create({ data: key });
-      res.json({ action: 'added', emoji });
+      res.json({ action: 'added', emoji: req.body.emoji });
     }
   } catch (err) { next(err); }
 });
 
-// ─── POST /api/reviews/:id/comments ─── Add a comment ───────────────────
+// ─── POST /api/reviews/:id/comments ──────────────────────────────────────
 router.post('/:id/comments', requireAuth, [
   body('body').trim().isLength({ min: 1, max: 2000 }),
   body('parentId').optional().trim(),
@@ -174,15 +162,8 @@ router.post('/:id/comments', requireAuth, [
   if (!ok(req, res)) return;
   try {
     const comment = await prisma.comment.create({
-      data: {
-        userId: req.user.id,
-        reviewId: req.params.id,
-        body: req.body.body,
-        parentId: req.body.parentId || null,
-      },
-      include: {
-        user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
-      },
+      data: { userId: req.user.id, reviewId: req.params.id, body: req.body.body, parentId: req.body.parentId || null },
+      include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
     });
     res.status(201).json(comment);
   } catch (err) { next(err); }
@@ -199,28 +180,20 @@ router.delete('/:reviewId/comments/:commentId', requireAuth, async (req, res, ne
   } catch (err) { next(err); }
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
 const reviewInclude = {
-  mediaItem: {
-    select: { id: true, title: true, mediaType: true, releaseYear: true, imageUrl: true, slug: true },
-  },
+  mediaItem: { select: { id: true, title: true, mediaType: true, releaseYear: true, imageUrl: true, slug: true } },
   _count: { select: { reactions: true, comments: true } },
 };
 
 async function notifyFriends(userId, reviewId, mediaTitle) {
   const friendships = await prisma.friendship.findMany({
-    where: {
-      status: 'ACCEPTED',
-      OR: [{ initiatorId: userId }, { receiverId: userId }],
-    },
+    where: { status: 'ACCEPTED', OR: [{ initiatorId: userId }, { receiverId: userId }] },
   });
   const friendIds = friendships.map(f => f.initiatorId === userId ? f.receiverId : f.initiatorId);
   if (!friendIds.length) return;
-
   await prisma.notification.createMany({
     data: friendIds.map(fid => ({
-      userId: fid,
-      type: 'NEW_FRIEND_REVIEW',
+      userId: fid, type: 'NEW_FRIEND_REVIEW',
       payload: { reviewId, mediaTitle, fromUserId: userId },
     })),
   });
