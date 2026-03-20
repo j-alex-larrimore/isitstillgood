@@ -21,12 +21,25 @@ async function sendAuthResponse(res, user) {
   const accessToken  = signAccessToken(user.id);
   const refreshToken = await issueRefreshToken(user.id);
   setAuthCookies(res, accessToken, refreshToken);
-  res.json({
-    user: {
-      id: user.id, email: user.email, username: user.username,
-      displayName: user.displayName, avatarUrl: user.avatarUrl,
+
+  // Fetch the full user record to ensure we have isAdmin and all fields.
+  // We do this because the user object passed in may come from passport
+  // or prisma.user.create which may not always include all fields.
+  const fullUser = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: {
+      id: true, email: true, username: true,
+      displayName: true, avatarUrl: true, isAdmin: true,
+      defaultVisibility: true, profilePublic: true,
     },
-    accessToken,  // also returned in body for non-browser clients
+  });
+
+  res.json({
+    user: fullUser,
+    accessToken,
+    // Also return the refresh token in the body as a fallback for clients
+    // where the cookie cannot be set cross-site (e.g. some browser configs)
+    refreshToken,
   });
 }
 

@@ -113,7 +113,7 @@ model User {
   googleId        String?   @unique
   googleEmail     String?
   defaultVisibility ReviewVisibility @default(PUBLIC)
-  profilePublic   Boolean   @default(true)
+  profilePublic   Boolean   @default(false)  // false = friends only, true = public
   reviews         Review[]
   reactions       Reaction[]
   comments        Comment[]

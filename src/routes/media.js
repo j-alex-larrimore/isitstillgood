@@ -8,10 +8,39 @@ const { fetchExternalRatings } = require('../services/externalRatings');
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
+  // reviewedBy: a username — filter to only items reviewed by that specific user
+  const reviewedBy = req.query.reviewedBy?.trim();
   const excludeReviewed = req.query.excludeReviewed === 'true' && req.user;
   const take = 24;
 
   try {
+    // reviewedBy filter — look up the user and get their reviewed item IDs
+    let reviewedByIds = undefined;
+    if (reviewedBy) {
+      const reviewedByUser = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { username:    { equals: reviewedBy, mode: 'insensitive' } },
+            { displayName: { contains: reviewedBy, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
+      });
+      if (reviewedByUser) {
+        // Get all media IDs this user has reviewed publicly
+        const theirReviews = await prisma.review.findMany({
+          where: { userId: reviewedByUser.id, visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } },
+          select: { mediaItemId: true, rating: true },
+        });
+        reviewedByIds = theirReviews.map(r => r.mediaItemId);
+        // Store ratings for enriching results later
+        req.reviewedByRatings = Object.fromEntries(theirReviews.map(r => [r.mediaItemId, r.rating]));
+      } else {
+        // User not found — return empty results rather than ignoring the filter
+        return res.json({ items: [], total: 0, page: parseInt(page), pages: 0, reviewedByNotFound: true });
+      }
+    }
+
     // Person search — look up matching person IDs
     let personFilter = undefined;
     if (person && person.trim().length > 0) {
@@ -66,11 +95,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     const where = {
       ...(type  && { mediaType: type }),
-      ...(year  && { releaseYear: parseInt(year) }),
+      // Exact year match (legacy) OR year range if from/to are provided
+      ...(year && !req.query.yearFrom && !req.query.yearTo
+        ? { releaseYear: parseInt(year) }
+        : {}),
+      // Year range — yearFrom and yearTo can be used independently
+      ...(req.query.yearFrom || req.query.yearTo ? {
+        releaseYear: {
+          ...(req.query.yearFrom ? { gte: parseInt(req.query.yearFrom) } : {}),
+          ...(req.query.yearTo   ? { lte: parseInt(req.query.yearTo)   } : {}),
+        }
+      } : {}),
       ...(genreFilter),
       ...(textFilter),
       ...(personFilter),
       ...(excludeReviewed && reviewedIds.length && { id: { notIn: reviewedIds } }),
+      // If reviewedBy is set, restrict to items that user has reviewed
+      ...(reviewedByIds !== undefined && { id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } }),
     };
 
     const orderBy = {
@@ -88,6 +129,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
           directors: { select: { id: true, name: true, slug: true } },
           authors:   { select: { id: true, name: true, slug: true } },
           cast:      { select: { id: true, name: true, slug: true } },
+          // Include parent show info so season entries can display their show name
+          // and so the frontend can identify seasons vs parent shows
+          parent:    { select: { id: true, title: true, slug: true } },
         },
         orderBy,
         skip: (parseInt(page) - 1) * take,
@@ -106,7 +150,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const ratingMap = Object.fromEntries(ratings.map(r => [r.mediaItemId, r._avg.rating]));
 
     res.json({
-      items: items.map(i => ({ ...i, avgRating: ratingMap[i.id] || null })),
+      items: items.map(i => ({
+        ...i,
+        avgRating: ratingMap[i.id] || null,
+        // If filtering by reviewedBy, include that user's personal rating on each item
+        // so the search page can show "Marco rated this 8/10" alongside community avg
+        reviewedByRating: req.reviewedByRatings?.[i.id] || null,
+      })),
       total,
       page: parseInt(page),
       pages: Math.ceil(total / take),
