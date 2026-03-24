@@ -223,6 +223,8 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
         where: { mediaItemId: item.id, visibility: 'PUBLIC', ...seasonFilter },
         include: {
           user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          // Include reactions with userId so we can compute myReaction for the logged-in user
+          reactions: { select: { userId: true, emoji: true } },
           _count: { select: { reactions: true, comments: true } },
         },
         orderBy: req.query.sort === 'top' ? [{ reactions: { _count: 'desc' } }] : [{ createdAt: 'desc' }],
@@ -230,7 +232,16 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
       }),
       prisma.review.count({ where: { mediaItemId: item.id, visibility: 'PUBLIC', ...seasonFilter } }),
     ]);
-    res.json({ reviews, total, page, pages: Math.ceil(total / take) });
+    // Enrich each review with the current user's reaction (if logged in)
+    const enriched = reviews.map(r => ({
+      ...r,
+      myReaction: req.user
+        ? (r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null)
+        : null,
+      // Keep _count accurate regardless
+    }));
+
+    res.json({ reviews: enriched, total, page, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }
 });
 

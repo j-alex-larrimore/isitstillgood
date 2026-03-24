@@ -431,6 +431,42 @@ router.get('/lookup/tmdb/:id', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ─── Open Library genre filter ────────────────────────────────────────────────
+// Open Library subjects are very noisy — they include things like
+// "Protected DAISY", "In library", "Large type books", "Internet Archive Wishlist"
+// alongside real genres. This filter strips non-genre entries and returns
+// only clean, short, recognisable genre-like terms.
+// Returns empty array if no clean genres found — better than garbage data.
+function filterOpenLibraryGenres(subjects) {
+  // Terms to always exclude — these are metadata tags not genres
+  const blocklist = [
+    'in library', 'protected daisy', 'accessible book', 'internet archive',
+    'large type', 'open library', 'overdrive', 'nglc', 'reading level',
+    'homeschool', 'libraries', 'lending library', 'new york times',
+    'bestseller', 'award', 'prize', 'banned', 'challenged', 'banned books',
+    'juvenile', 'young adult fiction', 'children', 'daisy',
+    'wishlist', 'favourites', 'favorites', 'to read', 'owned',
+    'currently reading', 'read', 'unread',
+  ];
+
+  return subjects
+    .filter(s => {
+      if (!s || typeof s !== 'string') return false;
+      const lower = s.toLowerCase();
+      // Skip if it matches any blocklist term
+      if (blocklist.some(b => lower.includes(b))) return false;
+      // Skip if too long — real genres are short (max 4 words / 30 chars)
+      if (s.length > 30) return false;
+      // Skip if it looks like a place name used as a subject
+      if (/^\d/.test(s)) return false;
+      // Skip if it has parentheses — usually "(Fictitious character)" etc
+      if (s.includes('(') || s.includes(')')) return false;
+      return true;
+    })
+    .slice(0, 5); // return max 5 clean genres
+}
+
 // ─── GET /api/admin/lookup/openlibrary ───────────────────────────────────────
 // Searches Open Library by title and returns candidates for books.
 router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
@@ -453,7 +489,7 @@ router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
       imageUrl:      item.cover_i
         ? `https://covers.openlibrary.org/b/id/${item.cover_i}-L.jpg`
         : null,
-      genres: (item.subject || []).slice(0, 5),
+      genres: filterOpenLibraryGenres(item.subject || []),
     }));
 
     res.json(results);
@@ -464,11 +500,19 @@ router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
 // Fetches full details for a specific Open Library work ID.
 router.get('/lookup/openlibrary/:id', requireAdmin, async (req, res, next) => {
   try {
-    const workRes = await fetch(`https://openlibrary.org/works/${req.params.id}.json`);
-    if (!workRes.ok) throw new Error('Open Library fetch failed');
-    const data = await workRes.json();
+    // Fetch work details and editions in parallel for speed.
+    // The work endpoint has description and subjects but often lacks publish year.
+    // The editions endpoint reliably has publish_date on individual editions.
+    const [workRes, editionsRes] = await Promise.all([
+      fetch(`https://openlibrary.org/works/${req.params.id}.json`),
+      fetch(`https://openlibrary.org/works/${req.params.id}/editions.json?limit=10`),
+    ]);
 
-    // Fetch author details separately
+    if (!workRes.ok) throw new Error('Open Library fetch failed');
+    const data     = await workRes.json();
+    const editions = editionsRes.ok ? await editionsRes.json() : null;
+
+    // Fetch author names separately — the work only has author key IDs
     const authorIds = (data.authors || []).map(a => a.author?.key).filter(Boolean);
     const authorNames = await Promise.all(
       authorIds.slice(0, 3).map(async key => {
@@ -480,26 +524,53 @@ router.get('/lookup/openlibrary/:id', requireAdmin, async (req, res, next) => {
       })
     );
 
-    // Description can be a string or an object with a value property
+    // Description can be a plain string or { value: "..." } object
     const description = typeof data.description === 'string'
       ? data.description
       : data.description?.value || '';
 
-    // Get cover from covers array
+    // Cover ID from the work record
     const coverId = data.covers?.[0];
+
+    // ── Determine release year ────────────────────────────────────────────────
+    // Priority order:
+    // 1. first_publish_year passed from the search result (most reliable)
+    // 2. first_publish_date on the work record (often missing or malformed)
+    // 3. Earliest publish_date from editions (reliable but needs parsing)
+    let releaseYear = null;
+
+    // 1. Year passed from search as query param (e.g. ?year=1954)
+    if (req.query.year) {
+      releaseYear = parseInt(req.query.year);
+    }
+
+    // 2. first_publish_date on work — extract 4-digit year from string
+    if (!releaseYear && data.first_publish_date) {
+      const match = String(data.first_publish_date).match(/\d{4}/);
+      if (match) releaseYear = parseInt(match[0]);
+    }
+
+    // 3. Earliest year from editions
+    if (!releaseYear && editions?.entries?.length) {
+      const years = editions.entries
+        .map(e => {
+          const m = String(e.publish_date || '').match(/\d{4}/);
+          return m ? parseInt(m[0]) : null;
+        })
+        .filter(y => y && y > 1000 && y < 2100);
+      if (years.length) releaseYear = Math.min(...years);
+    }
 
     res.json({
       openLibraryId: req.params.id,
       title:         data.title,
-      description:   description.slice(0, 1000), // truncate very long descriptions
+      description:   description.slice(0, 1000),
       authors:       authorNames.filter(Boolean),
-      releaseYear:   data.first_publish_date
-        ? parseInt(data.first_publish_date)
-        : null,
+      releaseYear,
       imageUrl:      coverId
         ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
         : null,
-      genres: (data.subjects || []).slice(0, 8),
+      genres: filterOpenLibraryGenres(data.subjects || []),
     });
   } catch (err) { next(err); }
 });
@@ -558,6 +629,32 @@ router.get('/lookup/igdb', requireAdmin, async (req, res, next) => {
     }));
 
     res.json(results);
+  } catch (err) { next(err); }
+});
+
+
+// ─── GET /api/admin/check-duplicate ──────────────────────────────────────────
+// Quick check before adding a title — returns any existing items with the
+// same title (case-insensitive) and optionally the same media type.
+// Used by the admin form to warn before submitting a duplicate.
+router.get('/check-duplicate', requireAdmin, async (req, res, next) => {
+  try {
+    const { title, type } = req.query;
+    if (!title) return res.json({ duplicates: [] });
+
+    const duplicates = await prisma.mediaItem.findMany({
+      where: {
+        title: { equals: title.trim(), mode: 'insensitive' },
+        ...(type ? { mediaType: type } : {}),
+      },
+      select: {
+        id: true, title: true, mediaType: true,
+        releaseYear: true, slug: true, imageUrl: true,
+      },
+      take: 5,
+    });
+
+    res.json({ duplicates });
   } catch (err) { next(err); }
 });
 
