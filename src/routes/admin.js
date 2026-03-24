@@ -155,6 +155,8 @@ router.post('/media', requireAdmin, [
         description:     description || null,
         imageUrl:        imageUrl    || null,
         genres:          genres      || [],
+        // Tags — franchise, studio, network etc. e.g. "Marvel", "HBO", "Star Wars"
+        tags:            tags        || [],
         tmdbId:          tmdbId      || null,
         goodreadsId:     goodreadsId || null,
         openCriticId:    openCriticId || ocId || null,
