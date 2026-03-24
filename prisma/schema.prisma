@@ -35,23 +35,20 @@ model MediaItem {
   description     String?    @db.Text
   imageUrl        String?
   genres          String[]
+  tags            String[]  // freeform tags e.g. Marvel, Star Wars, HBO, Disney
 
-  // External ratings
-  imdbRating      Float?
-  imdbId          String?
-  rtScore         Int?
-  rtAudienceScore Int?
-  goodreadsRating Float?
-  goodreadsId     String?
-  openCriticScore Int?
-  openCriticId    String?
-  metacriticScore Int?
+  // External ratings — IMDb and RT removed (licensing concerns)
+  // Community ratings stored here, fetched via TMDB, Open Library, IGDB
+  tmdbId          String?   // TMDB movie/show ID
+  tmdbRating      Float?    // TMDB community rating (0-10)
+  goodreadsId     String?   // Open Library / Goodreads ID for books
+  openCriticId    String?   // IGDB ID for games (repurposed field)
+  openCriticScore Int?      // IGDB rating for games (repurposed field)
   externalRatingsUpdatedAt DateTime?
 
   // Movie-specific
   directors       Person[]   @relation("DirectedBy")
   cast            Person[]   @relation("AppearedIn")
-  mpaaRating      String?
 
   // TV Show-specific
   // parentId links a season entry back to its parent show MediaItem.

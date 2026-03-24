@@ -107,6 +107,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
         }
       } : {}),
       ...(genreFilter),
+      // Tag filter — same pattern as genre, checks if the tags array contains the value
+      ...(req.query.tag ? { tags: { has: req.query.tag } } : {}),
       ...(textFilter),
       ...(personFilter),
       ...(excludeReviewed && reviewedIds.length && { id: { notIn: reviewedIds } }),

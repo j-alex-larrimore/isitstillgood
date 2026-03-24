@@ -116,16 +116,15 @@ router.post('/media', requireAdmin, [
   try {
     const {
       mediaType, title, releaseYear, description, imageUrl, genres,
-      imdbId, goodreadsId, openCriticId,
+      tmdbId, goodreadsId, openCriticId, tags,
       // Movie
-      directorNames, castNames, mpaaRating,
+      directorNames, castNames,
       // TV Show — parent show fields (seasons = total count on parent row)
       seasons,
       // TV Season — used when adding a season linked to a parent show
       parentId,        // ID of the parent show MediaItem row
       seasonNumber,    // which season this entry represents (1, 2, 3…)
-      rtScore,         // manual RT critics score 0–100
-      rtAudienceScore, // manual RT audience score 0–100
+
       // Book
       authorNames, seriesName, seriesNumber,
       // Video game
@@ -156,18 +155,16 @@ router.post('/media', requireAdmin, [
         description:     description || null,
         imageUrl:        imageUrl    || null,
         genres:          genres      || [],
-        imdbId:          imdbId      || null,
+        tmdbId:          tmdbId      || null,
         goodreadsId:     goodreadsId || null,
         openCriticId:    openCriticId || ocId || null,
-        mpaaRating:      mpaaRating  || null,
+
         // TV parent show — total season count
         seasons:         seasons     ? parseInt(seasons)      : null,
         // TV season — link to parent and record season number
         parentId:        parentId    || null,
         seasonNumber:    seasonNumber ? parseInt(seasonNumber) : null,
-        // RT scores entered manually
-        rtScore:         rtScore         ? parseInt(rtScore)         : null,
-        rtAudienceScore: rtAudienceScore ? parseInt(rtAudienceScore) : null,
+
         // Book
         seriesName:      seriesName  || null,
         seriesNumber:    seriesNumber ? parseInt(seriesNumber) : null,
@@ -179,7 +176,7 @@ router.post('/media', requireAdmin, [
       include: { directors: true, cast: true, authors: true },
     });
 
-    if (imdbId || goodreadsId || openCriticId) {
+    if (tmdbId || goodreadsId || openCriticId) {
       fetchExternalRatings(item.id).catch(console.error);
     }
 
@@ -192,9 +189,9 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
   try {
     const allowed = [
       'title','description','imageUrl','genres','releaseYear',
-      'imdbId','imdbRating','rtScore','rtAudienceScore',
-      'goodreadsId','goodreadsRating','openCriticId','openCriticScore',
-      'metacriticScore','mpaaRating','seasons',
+      'tmdbId','tmdbRating','tags',
+      'goodreadsId','openCriticId','openCriticScore',
+      'seasons',
       'seriesName','seriesNumber',
     ];
     const data = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
@@ -351,6 +348,216 @@ router.get('/season-data', requireAdmin, async (req, res, next) => {
       imageUrl: previousSeason.imageUrl || null,    // previous season's poster
     });
 
+  } catch (err) { next(err); }
+});
+
+
+// ─── GET /api/admin/lookup/tmdb ───────────────────────────────────────────────
+// Searches TMDB by title and returns candidates so the admin can pick one.
+// Used in the admin form to auto-fill movie/TV show data.
+// Query params: q (title), type (movie or tv)
+router.get('/lookup/tmdb', requireAdmin, async (req, res, next) => {
+  const token = process.env.TMDB_READ_ACCESS_TOKEN;
+  if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured in Railway Variables' });
+
+  const { q, type = 'movie' } = req.query;
+  if (!q) return res.status(400).json({ error: 'q is required' });
+
+  try {
+    // Search TMDB for matching titles
+    const endpoint = type === 'tv' ? 'tv' : 'movie';
+    const searchRes = await fetch(
+      `https://api.themoviedb.org/3/search/${endpoint}?query=${encodeURIComponent(q)}&include_adult=false`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    if (!searchRes.ok) throw new Error('TMDB search failed');
+    const searchData = await searchRes.json();
+
+    // Return top 5 candidates with enough info to identify them
+    const results = (searchData.results || []).slice(0, 5).map(item => ({
+      tmdbId:      String(item.id),
+      title:       item.title || item.name,
+      releaseYear: (item.release_date || item.first_air_date || '').split('-')[0],
+      overview:    item.overview,
+      // TMDB poster URL — w500 is a good size for admin preview
+      posterUrl:   item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+      rating:      item.vote_average,
+    }));
+
+    res.json(results);
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/lookup/tmdb/:id ──────────────────────────────────────────
+// Fetches full details for a specific TMDB ID to populate all form fields.
+router.get('/lookup/tmdb/:id', requireAdmin, async (req, res, next) => {
+  const token = process.env.TMDB_READ_ACCESS_TOKEN;
+  if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured' });
+
+  const { type = 'movie' } = req.query;
+  try {
+    const endpoint = type === 'tv' ? 'tv' : 'movie';
+    const detailRes = await fetch(
+      `https://api.themoviedb.org/3/${endpoint}/${req.params.id}?append_to_response=credits`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    if (!detailRes.ok) throw new Error('TMDB detail fetch failed');
+    const data = await detailRes.json();
+
+    // Extract and normalise the fields we care about
+    const directors = (data.credits?.crew || [])
+      .filter(p => p.job === 'Director')
+      .map(p => p.name);
+
+    const cast = (data.credits?.cast || [])
+      .slice(0, 10) // top 10 cast members
+      .map(p => p.name);
+
+    // For TV shows, get creators instead of directors
+    const creators = (data.created_by || []).map(p => p.name);
+
+    res.json({
+      tmdbId:      String(data.id),
+      title:       data.title || data.name,
+      releaseYear: (data.release_date || data.first_air_date || '').split('-')[0],
+      description: data.overview,
+      imageUrl:    data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+      genres:      (data.genres || []).map(g => g.name),
+      directors:   directors.length ? directors : creators,
+      cast,
+      seasons:     data.number_of_seasons || null,
+      tmdbRating:  data.vote_average || null,
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/lookup/openlibrary ───────────────────────────────────────
+// Searches Open Library by title and returns candidates for books.
+router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: 'q is required' });
+
+  try {
+    const searchRes = await fetch(
+      `https://openlibrary.org/search.json?title=${encodeURIComponent(q)}&limit=5&fields=key,title,author_name,first_publish_year,cover_i,subject`
+    );
+    if (!searchRes.ok) throw new Error('Open Library search failed');
+    const data = await searchRes.json();
+
+    const results = (data.docs || []).slice(0, 5).map(item => ({
+      openLibraryId: item.key?.replace('/works/', ''), // e.g. OL45804W
+      title:         item.title,
+      authors:       item.author_name || [],
+      releaseYear:   item.first_publish_year || null,
+      // Cover art URL using cover_i (cover ID)
+      imageUrl:      item.cover_i
+        ? `https://covers.openlibrary.org/b/id/${item.cover_i}-L.jpg`
+        : null,
+      genres: (item.subject || []).slice(0, 5),
+    }));
+
+    res.json(results);
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/lookup/openlibrary/:id ────────────────────────────────────
+// Fetches full details for a specific Open Library work ID.
+router.get('/lookup/openlibrary/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const workRes = await fetch(`https://openlibrary.org/works/${req.params.id}.json`);
+    if (!workRes.ok) throw new Error('Open Library fetch failed');
+    const data = await workRes.json();
+
+    // Fetch author details separately
+    const authorIds = (data.authors || []).map(a => a.author?.key).filter(Boolean);
+    const authorNames = await Promise.all(
+      authorIds.slice(0, 3).map(async key => {
+        try {
+          const r = await fetch(`https://openlibrary.org${key}.json`);
+          const d = await r.json();
+          return d.name || null;
+        } catch { return null; }
+      })
+    );
+
+    // Description can be a string or an object with a value property
+    const description = typeof data.description === 'string'
+      ? data.description
+      : data.description?.value || '';
+
+    // Get cover from covers array
+    const coverId = data.covers?.[0];
+
+    res.json({
+      openLibraryId: req.params.id,
+      title:         data.title,
+      description:   description.slice(0, 1000), // truncate very long descriptions
+      authors:       authorNames.filter(Boolean),
+      releaseYear:   data.first_publish_date
+        ? parseInt(data.first_publish_date)
+        : null,
+      imageUrl:      coverId
+        ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
+        : null,
+      genres: (data.subjects || []).slice(0, 8),
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/lookup/igdb ───────────────────────────────────────────────
+// Searches IGDB by title for video games.
+router.get('/lookup/igdb', requireAdmin, async (req, res, next) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: 'q is required' });
+
+  const clientId     = process.env.IGDB_CLIENT_ID;
+  const clientSecret = process.env.IGDB_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    return res.status(503).json({ error: 'IGDB_CLIENT_ID and IGDB_CLIENT_SECRET not configured in Railway Variables' });
+  }
+
+  try {
+    // Get Twitch OAuth token for IGDB
+    const tokenRes = await fetch(
+      `https://id.twitch.tv/oauth2/token?client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`,
+      { method: 'POST' }
+    );
+    if (!tokenRes.ok) throw new Error('IGDB auth failed');
+    const tokenData = await tokenRes.json();
+    const token = tokenData.access_token;
+
+    // Search IGDB
+    const searchRes = await fetch('https://api.igdb.com/v4/games', {
+      method: 'POST',
+      headers: {
+        'Client-ID':     clientId,
+        'Authorization': `Bearer ${token}`,
+        'Content-Type':  'text/plain',
+      },
+      // Search by name, get cover art and basic info
+      body: `search "${q}"; fields name,cover.url,first_release_date,genres.name,involved_companies.company.name,summary,rating; limit 5;`,
+    });
+    if (!searchRes.ok) throw new Error('IGDB search failed');
+    const games = await searchRes.json();
+
+    const results = games.map(game => ({
+      igdbId:      String(game.id),
+      title:       game.name,
+      releaseYear: game.first_release_date
+        ? new Date(game.first_release_date * 1000).getFullYear()
+        : null,
+      description: game.summary || null,
+      // IGDB cover URLs need //images.igdb.com → https://images.igdb.com
+      // and t_thumb → t_cover_big for a better size
+      imageUrl:    game.cover?.url
+        ? 'https:' + game.cover.url.replace('t_thumb', 't_cover_big')
+        : null,
+      genres:      (game.genres || []).map(g => g.name),
+      developers:  (game.involved_companies || []).map(c => c.company?.name).filter(Boolean),
+      rating:      game.rating ? Math.round(game.rating) : null,
+    }));
+
+    res.json(results);
   } catch (err) { next(err); }
 });
 

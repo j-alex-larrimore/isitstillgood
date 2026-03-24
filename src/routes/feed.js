@@ -65,12 +65,13 @@ router.get('/', requireAuth, [
           mediaItem: {
             select: {
               id: true, title: true, slug: true, mediaType: true, releaseYear: true,
-              imageUrl: true, genres: true, imdbRating: true, rtScore: true,
-              goodreadsRating: true, openCriticScore: true,
+              imageUrl: true, genres: true, tags: true,
+              tmdbRating: true, openCriticScore: true,
             },
           },
           reactions: { select: { userId: true, emoji: true } },
           _count: { select: { reactions: true, comments: true } },
+          // dateConsumed and all other scalar review fields are included automatically
         },
         orderBy,
         skip: (page - 1) * take,

@@ -117,7 +117,7 @@ router.get('/:username/reviews', optionalAuth, [
             select: {
               id: true, title: true, mediaType: true, releaseYear: true,
               imageUrl: true, slug: true, genres: true,
-              imdbRating: true, rtScore: true, goodreadsRating: true,
+              tmdbRating: true, openCriticScore: true,
             },
           },
           _count: { select: { reactions: true, comments: true } },

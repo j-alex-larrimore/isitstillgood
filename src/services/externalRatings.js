@@ -1,148 +1,124 @@
 // src/services/externalRatings.js
 //
-// Fetches ratings from OMDB (IMDB + Rotten Tomatoes), Google Books, and
-// OpenCritic, then caches results on the MediaItem row.
+// Fetches external data for media items from licensed sources:
+//   - TMDB        — movies and TV shows (cover art, ratings, cast, genres)
+//   - Open Library — books (cover art, author, synopsis)
+//   - IGDB        — video games (cover art, release date, genres)
 //
-// All keys are optional — the service is gracefully no-ops when a key
-// or ID is absent.
+// IMDb and Rotten Tomatoes removed due to licensing concerns.
 
 const prisma = require('../lib/prisma');
 
-// ─── Main entry point ────────────────────────────────────────────────────────
+// ─── TMDB ─────────────────────────────────────────────────────────────────────
+// Uses the TMDB Read Access Token (Bearer token).
+// Set TMDB_READ_ACCESS_TOKEN in Railway Variables.
+async function fetchTmdbData(tmdbId, mediaType) {
+  const token = process.env.TMDB_READ_ACCESS_TOKEN;
+  if (!token || !tmdbId) return null;
+  try {
+    const endpoint = mediaType === 'TV_SHOW' ? 'tv' : 'movie';
+    const res = await fetch(
+      `https://api.themoviedb.org/3/${endpoint}/${tmdbId}?append_to_response=credits`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
+    );
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) { console.error('TMDB fetch error:', err.message); return null; }
+}
+
+// ─── IGDB ─────────────────────────────────────────────────────────────────────
+// Requires Twitch OAuth. Set IGDB_CLIENT_ID and IGDB_CLIENT_SECRET in Railway.
+let igdbToken = null;
+let igdbTokenExpiry = 0;
+
+async function getIgdbToken() {
+  if (igdbToken && Date.now() < igdbTokenExpiry - 300000) return igdbToken;
+  const clientId = process.env.IGDB_CLIENT_ID;
+  const clientSecret = process.env.IGDB_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+  try {
+    const res = await fetch(
+      `https://id.twitch.tv/oauth2/token?client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`,
+      { method: 'POST' }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    igdbToken = data.access_token;
+    igdbTokenExpiry = Date.now() + (data.expires_in * 1000);
+    return igdbToken;
+  } catch (err) { console.error('IGDB token error:', err.message); return null; }
+}
+
+async function fetchIgdbData(igdbId) {
+  const token = await getIgdbToken();
+  const clientId = process.env.IGDB_CLIENT_ID;
+  if (!token || !clientId || !igdbId) return null;
+  try {
+    const res = await fetch('https://api.igdb.com/v4/games', {
+      method: 'POST',
+      headers: { 'Client-ID': clientId, 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain' },
+      body: `fields name,cover.url,first_release_date,genres.name,involved_companies.company.name,summary,rating; where id = ${igdbId};`,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.[0] || null;
+  } catch (err) { console.error('IGDB fetch error:', err.message); return null; }
+}
+
+// ─── Open Library ─────────────────────────────────────────────────────────────
+// No API key needed. Free including commercial use.
+async function fetchOpenLibraryData(openLibraryId) {
+  if (!openLibraryId) return null;
+  try {
+    const isIsbn = /^\d{10,13}$/.test(openLibraryId);
+    const url = isIsbn
+      ? `https://openlibrary.org/api/books?bibkeys=ISBN:${openLibraryId}&format=json&jscmd=data`
+      : `https://openlibrary.org/works/${openLibraryId}.json`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) { console.error('Open Library fetch error:', err.message); return null; }
+}
+
+// ─── Main sync ────────────────────────────────────────────────────────────────
 async function fetchExternalRatings(mediaItemId) {
   const item = await prisma.mediaItem.findUnique({ where: { id: mediaItemId } });
-  if (!item) throw new Error('Media item not found');
-
+  if (!item) return null;
   const updates = {};
 
-  // OMDB — covers IMDB rating + Rotten Tomatoes for movies & shows
-  if (item.imdbId && process.env.OMDB_API_KEY) {
-    const omdb = await fetchOMDB(item.imdbId);
-    if (omdb) Object.assign(updates, omdb);
+  if ((item.mediaType === 'MOVIE' || item.mediaType === 'TV_SHOW') && item.tmdbId) {
+    const data = await fetchTmdbData(item.tmdbId, item.mediaType);
+    if (data?.vote_average) {
+      updates.tmdbRating = data.vote_average;
+      updates.externalRatingsUpdatedAt = new Date();
+    }
   }
 
-  // Google Books — for books
-  if (item.goodreadsId && process.env.GOOGLE_BOOKS_API_KEY) {
-    // Note: Goodreads API is closed; Google Books is the best public proxy
-    const gb = await fetchGoogleBooks(item.goodreadsId);
-    if (gb) Object.assign(updates, gb);
+  if (item.mediaType === 'VIDEO_GAME' && item.openCriticId) {
+    const data = await fetchIgdbData(item.openCriticId);
+    if (data?.rating) {
+      updates.openCriticScore = Math.round(data.rating);
+      updates.externalRatingsUpdatedAt = new Date();
+    }
   }
 
-  // OpenCritic — for video games
-  if (item.openCriticId && process.env.OPENCRITC_API_KEY) {
-    const oc = await fetchOpenCritic(item.openCriticId);
-    if (oc) Object.assign(updates, oc);
+  if (Object.keys(updates).length) {
+    return prisma.mediaItem.update({ where: { id: mediaItemId }, data: updates });
   }
-
-  if (Object.keys(updates).length === 0) return item;
-
-  return prisma.mediaItem.update({
-    where: { id: mediaItemId },
-    data: { ...updates, externalRatingsUpdatedAt: new Date() },
-  });
+  return item;
 }
 
-// ─── OMDB (IMDB + Rotten Tomatoes) ──────────────────────────────────────────
-async function fetchOMDB(imdbId) {
-  try {
-    const url = `https://www.omdbapi.com/?i=${imdbId}&apikey=${process.env.OMDB_API_KEY}`;
-    const res  = await fetch(url);
-    const data = await res.json();
-    if (data.Response === 'False') return null;
-
-    const updates = {};
-
-    // IMDB rating
-    if (data.imdbRating && data.imdbRating !== 'N/A') {
-      updates.imdbRating = parseFloat(data.imdbRating);
-    }
-
-    // Rotten Tomatoes — in Ratings array
-    const rt = data.Ratings?.find(r => r.Source === 'Rotten Tomatoes');
-    if (rt) {
-      updates.rtScore = parseInt(rt.Value); // "84%" → 84
-    }
-
-    // Metacritic
-    if (data.Metascore && data.Metascore !== 'N/A') {
-      updates.metacriticScore = parseInt(data.Metascore);
-    }
-
-    return Object.keys(updates).length ? updates : null;
-  } catch (err) {
-    console.warn(`[OMDB] Failed for ${imdbId}:`, err.message);
-    return null;
-  }
-}
-
-// ─── Google Books (goodreads proxy) ─────────────────────────────────────────
-async function fetchGoogleBooks(volumeId) {
-  try {
-    const url = `https://www.googleapis.com/books/v1/volumes/${volumeId}?key=${process.env.GOOGLE_BOOKS_API_KEY}`;
-    const res  = await fetch(url);
-    const data = await res.json();
-    if (!data.volumeInfo) return null;
-
-    const updates = {};
-    if (data.volumeInfo.averageRating) {
-      updates.goodreadsRating = data.volumeInfo.averageRating; // 0–5
-    }
-
-    return Object.keys(updates).length ? updates : null;
-  } catch (err) {
-    console.warn(`[GoogleBooks] Failed for ${volumeId}:`, err.message);
-    return null;
-  }
-}
-
-// ─── OpenCritic ──────────────────────────────────────────────────────────────
-async function fetchOpenCritic(gameId) {
-  try {
-    const url = `https://api.opencritic.com/api/game/${gameId}`;
-    const res  = await fetch(url, {
-      headers: { 'x-opencritic-api-key': process.env.OPENCRITC_API_KEY },
-    });
-    const data = await res.json();
-
-    const updates = {};
-    if (data.topCriticScore != null) {
-      updates.openCriticScore = Math.round(data.topCriticScore);
-    }
-
-    return Object.keys(updates).length ? updates : null;
-  } catch (err) {
-    console.warn(`[OpenCritic] Failed for ${gameId}:`, err.message);
-    return null;
-  }
-}
-
-// ─── Batch refresh (run as a cron job) ──────────────────────────────────────
-// Call this nightly to keep ratings fresh (max 1 request/sec to be polite)
-async function refreshStaleRatings(olderThanDays = 7) {
-  const since = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+async function refreshStaleRatings() {
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const stale = await prisma.mediaItem.findMany({
     where: {
-      OR: [
-        { externalRatingsUpdatedAt: null },
-        { externalRatingsUpdatedAt: { lt: since } },
-      ],
-      OR: [
-        { imdbId: { not: null } },
-        { goodreadsId: { not: null } },
-        { openCriticId: { not: null } },
-      ],
+      externalRatingsUpdatedAt: { lt: sevenDaysAgo },
+      OR: [{ tmdbId: { not: null } }, { openCriticId: { not: null } }],
     },
     select: { id: true },
-    take: 100, // cap per run
+    take: 50,
   });
-
-  console.log(`[Ratings Refresh] ${stale.length} items need updating`);
-  for (const { id } of stale) {
-    await fetchExternalRatings(id).catch(e => console.warn(e));
-    await sleep(1100); // 1 req/sec
-  }
+  for (const item of stale) await fetchExternalRatings(item.id).catch(console.error);
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-module.exports = { fetchExternalRatings, refreshStaleRatings };
+module.exports = { fetchExternalRatings, refreshStaleRatings, fetchTmdbData, fetchIgdbData, fetchOpenLibraryData };
