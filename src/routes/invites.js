@@ -140,12 +140,21 @@ router.post('/', requireAuth, [
     });
 
     // Send the invite email — this is async but we await it so we can catch errors
-    await sendInviteEmail({
+    const emailResult = await sendInviteEmail({
       to: email,
       inviterName: req.user.displayName,
       customMessage,
       inviteToken: invite.token,
     });
+
+    // If the email was only simulated (no API key configured), warn the caller
+    if (emailResult?.simulated) {
+      return res.status(201).json({
+        outcome: 'invite_created_email_not_sent',
+        message: `Invite created but email not sent — RESEND_API_KEY is not configured in Railway Variables.`,
+        inviteLink: `${process.env.CLIENT_URL}/join.html?token=${invite.token}`,
+      });
+    }
 
     res.status(201).json({
       outcome: 'invite_sent',
