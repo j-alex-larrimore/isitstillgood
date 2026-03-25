@@ -531,8 +531,19 @@ router.get('/lookup/openlibrary/:id', requireAdmin, async (req, res, next) => {
       ? data.description
       : data.description?.value || '';
 
-    // Cover ID from the work record
-    const coverId = data.covers?.[0];
+    // Cover ID — try work record first, then fall back to editions.
+    // Many books only have covers attached to edition records, not the work itself.
+    let coverId = data.covers?.[0] || null;
+
+    if (!coverId && editions?.entries?.length) {
+      // Find the first edition that has a cover
+      for (const edition of editions.entries) {
+        if (edition.covers?.[0]) {
+          coverId = edition.covers[0];
+          break;
+        }
+      }
+    }
 
     // ── Determine release year ────────────────────────────────────────────────
     // Priority order:
