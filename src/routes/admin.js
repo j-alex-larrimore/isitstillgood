@@ -226,11 +226,16 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
       where: { id: req.params.id },
       data,
       include: {
-        cast:      { select: { id: true, name: true }, orderBy: { name: 'asc' } },
-        directors: { select: { id: true, name: true }, orderBy: { name: 'asc' } },
-        authors:   { select: { id: true, name: true }, orderBy: { name: 'asc' } },
+        cast:      { select: { id: true, name: true } },
+        directors: { select: { id: true, name: true } },
+        authors:   { select: { id: true, name: true } },
       },
     });
+    // Sort people alphabetically — orderBy not supported on implicit M2M
+    const sbn = (a, b) => a.name.localeCompare(b.name);
+    if (item.cast)      item.cast      = item.cast.sort(sbn);
+    if (item.directors) item.directors = item.directors.sort(sbn);
+    if (item.authors)   item.authors   = item.authors.sort(sbn);
     res.json(item);
   } catch (err) { next(err); }
 });
@@ -309,12 +314,17 @@ router.get('/shows', requireAdmin, async (req, res, next) => {
         id: true, title: true, releaseYear: true, imageUrl: true,
         seasons: true, description: true, genres: true, tags: true, tmdbId: true,
         // Include cast so seasons can inherit the main cast — ordered by name for consistency
-        cast: { select: { id: true, name: true }, orderBy: { name: 'asc' } },
+        cast: { select: { id: true, name: true } },
       },
       orderBy: { title: 'asc' },
       take: 20,
     });
-    res.json(shows);
+    // Sort cast alphabetically — orderBy not supported on implicit M2M
+    const sorted = shows.map(s => ({
+      ...s,
+      cast: (s.cast || []).sort((a, b) => a.name.localeCompare(b.name)),
+    }));
+    res.json(sorted);
   } catch (err) { next(err); }
 });
 
@@ -451,7 +461,7 @@ router.get('/lookup/tmdb/:id', requireAdmin, async (req, res, next) => {
       .map(p => p.name);
 
     const cast = (data.credits?.cast || [])
-      .slice(0, 10) // top 10 cast members
+      .slice(0, 20) // top 20 cast members
       .map(p => p.name);
 
     // For TV shows, get creators instead of directors

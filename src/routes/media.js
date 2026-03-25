@@ -128,9 +128,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
         where,
         include: {
           _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
-          directors: { select: { id: true, name: true, slug: true }, orderBy: { name: 'asc' } },
-          authors:   { select: { id: true, name: true, slug: true }, orderBy: { name: 'asc' } },
-          cast:      { select: { id: true, name: true, slug: true }, orderBy: { name: 'asc' } },
+          directors: { select: { id: true, name: true, slug: true } },
+          authors:   { select: { id: true, name: true, slug: true } },
+          cast:      { select: { id: true, name: true, slug: true } },
           // Include parent show info so season entries can display their show name
           // and so the frontend can identify seasons vs parent shows
           parent:    { select: { id: true, title: true, slug: true } },
@@ -172,9 +172,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     const item = await prisma.mediaItem.findUnique({
       where: { slug: req.params.slug },
       include: {
-        directors: { select: { id: true, name: true, slug: true, imageUrl: true }, orderBy: { name: 'asc' } },
-        cast:       { select: { id: true, name: true, slug: true, imageUrl: true }, orderBy: { name: 'asc' } },
-        authors:    { select: { id: true, name: true, slug: true, imageUrl: true }, orderBy: { name: 'asc' } },
+        directors: { select: { id: true, name: true, slug: true, imageUrl: true } },
+        cast:       { select: { id: true, name: true, slug: true, imageUrl: true } },
+        authors:    { select: { id: true, name: true, slug: true, imageUrl: true } },
         _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
       },
     });
@@ -197,6 +197,13 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         where: { userId: req.user.id, mediaItemId: item.id, seasonNumber: null },
       });
     }
+
+    // Sort cast, directors, authors alphabetically in JS — Prisma doesn't support
+    // orderBy on implicit many-to-many relations, so we sort after fetching
+    const sortByName = (a, b) => a.name.localeCompare(b.name);
+    if (item.cast)      item.cast      = item.cast.sort(sortByName);
+    if (item.directors) item.directors = item.directors.sort(sortByName);
+    if (item.authors)   item.authors   = item.authors.sort(sortByName);
 
     res.json({
       ...item,
