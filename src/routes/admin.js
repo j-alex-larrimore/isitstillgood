@@ -226,9 +226,9 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
       where: { id: req.params.id },
       data,
       include: {
-        cast:      { select: { id: true, name: true } },
-        directors: { select: { id: true, name: true } },
-        authors:   { select: { id: true, name: true } },
+        cast:      { select: { id: true, name: true }, orderBy: { name: 'asc' } },
+        directors: { select: { id: true, name: true }, orderBy: { name: 'asc' } },
+        authors:   { select: { id: true, name: true }, orderBy: { name: 'asc' } },
       },
     });
     res.json(item);
@@ -308,8 +308,8 @@ router.get('/shows', requireAdmin, async (req, res, next) => {
       select: {
         id: true, title: true, releaseYear: true, imageUrl: true,
         seasons: true, description: true, genres: true, tags: true, tmdbId: true,
-        // Include cast so seasons can inherit the main cast
-        cast: { select: { id: true, name: true } },
+        // Include cast so seasons can inherit the main cast — ordered by name for consistency
+        cast: { select: { id: true, name: true }, orderBy: { name: 'asc' } },
       },
       orderBy: { title: 'asc' },
       take: 20,
