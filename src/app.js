@@ -94,6 +94,16 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date() }))
 app.use((err, req, res, next) => {
   console.error(err);
   const status = err.status || err.statusCode || 500;
+
+  // Always add CORS headers on error responses — without this, a 500 error
+  // from a cross-origin request shows as a CORS error in the browser, masking
+  // the real problem.
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+
   res.status(status).json({
     error: err.message || 'Internal server error',
     ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),

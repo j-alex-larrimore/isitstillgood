@@ -114,18 +114,23 @@ router.post('/', requireAuth, [
     });
 
     if (existingInvite) {
-      // Resend the same invite email rather than creating a new token
-      await sendInviteEmail({
-        to: email,
-        inviterName: req.user.displayName,
-        customMessage,
-        inviteToken: existingInvite.token,
-      });
-
-      return res.json({
-        outcome: 'resent',
-        message: `Invite resent to ${email}`,
-      });
+      const inviteLink = `${process.env.CLIENT_URL || 'https://www.isitstillgood.com'}/join.html?token=${existingInvite.token}`;
+      try {
+        await sendInviteEmail({
+          to: email,
+          inviterName: req.user.displayName,
+          customMessage,
+          inviteToken: existingInvite.token,
+        });
+        return res.json({ outcome: 'resent', message: `Invite resent to ${email}` });
+      } catch (err) {
+        console.error('Resend invite email failed:', err.message);
+        return res.json({
+          outcome: 'invite_created_email_not_sent',
+          message: `Invite exists but email failed: ${err.message}`,
+          inviteLink,
+        });
+      }
     }
 
     // Create a new invite token that expires in 7 days
@@ -139,20 +144,33 @@ router.post('/', requireAuth, [
       },
     });
 
-    // Send the invite email — this is async but we await it so we can catch errors
-    const emailResult = await sendInviteEmail({
-      to: email,
-      inviterName: req.user.displayName,
-      customMessage,
-      inviteToken: invite.token,
-    });
+    // Send the invite email — wrapped in try/catch so email failures don't
+    // crash the request with a 500. Instead we return a clear message and
+    // include the invite link so the admin can share it manually.
+    let emailResult;
+    let emailError = null;
+    try {
+      emailResult = await sendInviteEmail({
+        to: email,
+        inviterName: req.user.displayName,
+        customMessage,
+        inviteToken: invite.token,
+      });
+    } catch (err) {
+      emailError = err.message;
+      console.error('Invite email failed:', err.message);
+    }
 
-    // If the email was only simulated (no API key configured), warn the caller
-    if (emailResult?.simulated) {
+    const inviteLink = `${process.env.CLIENT_URL || 'https://www.isitstillgood.com'}/join.html?token=${invite.token}`;
+
+    // Email failed or was simulated — return the invite link so it can be shared manually
+    if (emailError || emailResult?.simulated) {
       return res.status(201).json({
         outcome: 'invite_created_email_not_sent',
-        message: `Invite created but email not sent — RESEND_API_KEY is not configured in Railway Variables.`,
-        inviteLink: `${process.env.CLIENT_URL}/join.html?token=${invite.token}`,
+        message: emailError
+          ? `Invite created but email failed: ${emailError}`
+          : `Invite created but email not sent — RESEND_API_KEY not configured.`,
+        inviteLink,
       });
     }
 
