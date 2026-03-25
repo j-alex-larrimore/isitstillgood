@@ -271,7 +271,13 @@ router.get('/shows', requireAdmin, async (req, res, next) => {
         parentId:  null, // only parent shows, not season entries
         ...(q && { title: { contains: q, mode: 'insensitive' } }),
       },
-      select: { id: true, title: true, releaseYear: true, imageUrl: true, seasons: true },
+      // Return all fields needed to auto-fill season entries when a show is selected
+      select: {
+        id: true, title: true, releaseYear: true, imageUrl: true,
+        seasons: true, description: true, genres: true, tags: true, tmdbId: true,
+        // Include cast so seasons can inherit the main cast
+        cast: { select: { id: true, name: true } },
+      },
       orderBy: { title: 'asc' },
       take: 20,
     });
