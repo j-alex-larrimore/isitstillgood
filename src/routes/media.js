@@ -128,9 +128,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
         where,
         include: {
           _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
-          directors: { select: { id: true, name: true, slug: true } },
-          authors:   { select: { id: true, name: true, slug: true } },
-          cast:      { select: { id: true, name: true, slug: true } },
+          directors: { select: { id: true, name: true, slug: true }, take: 100 },
+          authors:   { select: { id: true, name: true, slug: true }, take: 100 },
+          cast:      { select: { id: true, name: true, slug: true }, take: 100 },
           // Include parent show info so season entries can display their show name
           // and so the frontend can identify seasons vs parent shows
           parent:    { select: { id: true, title: true, slug: true } },
@@ -172,9 +172,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     const item = await prisma.mediaItem.findUnique({
       where: { slug: req.params.slug },
       include: {
-        directors: { select: { id: true, name: true, slug: true, imageUrl: true } },
-        cast:       { select: { id: true, name: true, slug: true, imageUrl: true } },
-        authors:    { select: { id: true, name: true, slug: true, imageUrl: true } },
+        directors: { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
+        cast:       { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
+        authors:    { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
       },
     });

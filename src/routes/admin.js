@@ -226,9 +226,9 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
       where: { id: req.params.id },
       data,
       include: {
-        cast:      { select: { id: true, name: true } },
-        directors: { select: { id: true, name: true } },
-        authors:   { select: { id: true, name: true } },
+        cast:      { select: { id: true, name: true }, take: 100 },
+        directors: { select: { id: true, name: true }, take: 100 },
+        authors:   { select: { id: true, name: true }, take: 100 },
       },
     });
     // Sort people alphabetically — orderBy not supported on implicit M2M
@@ -314,7 +314,7 @@ router.get('/shows', requireAdmin, async (req, res, next) => {
         id: true, title: true, releaseYear: true, imageUrl: true,
         seasons: true, description: true, genres: true, tags: true, tmdbId: true,
         // Include cast so seasons can inherit the main cast — ordered by name for consistency
-        cast: { select: { id: true, name: true } },
+        cast: { select: { id: true, name: true }, take: 100 },
       },
       orderBy: { title: 'asc' },
       take: 20,
@@ -362,7 +362,7 @@ router.get('/season-data', requireAdmin, async (req, res, next) => {
       include: {
         // Cast members — we'll return their names as a comma-separated string
         // so it can be pasted straight into the cast field
-        cast: { select: { id: true, name: true } },
+        cast: { select: { id: true, name: true }, take: 100 },
       },
       // Get the highest season number below the target — the most recent prior season
       orderBy: { seasonNumber: 'desc' },
