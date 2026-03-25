@@ -189,15 +189,48 @@ router.post('/media', requireAdmin, [
 // ─── PATCH /api/admin/media/:id ───────────────────────────────────────────
 router.patch('/media/:id', requireAdmin, async (req, res, next) => {
   try {
+    // Scalar fields — updated directly
     const allowed = [
       'title','description','imageUrl','genres','releaseYear',
       'tmdbId','tmdbRating','tags',
       'goodreadsId','openCriticId','openCriticScore',
-      'seasons',
-      'seriesName','seriesNumber',
+      'seasons','seriesName','seriesNumber',
     ];
-    const data = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
-    const item = await prisma.mediaItem.update({ where: { id: req.params.id }, data });
+    const data = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => allowed.includes(k))
+    );
+
+    // Relation fields — cast, directors, authors are many-to-many through Person.
+    // They need the { set: [...] } Prisma relation syntax, not direct assignment.
+    // We accept comma-separated name strings and upsert Person records as needed.
+    // An empty array clears the relation entirely (allows removing all cast).
+    const { castNames, directorNames, authorNames } = req.body;
+
+    if (castNames !== undefined) {
+      data.cast = castNames.length
+        ? await connectPersons(castNames)
+        : { set: [] }; // empty array = disconnect all
+    }
+    if (directorNames !== undefined) {
+      data.directors = directorNames.length
+        ? await connectPersons(directorNames)
+        : { set: [] };
+    }
+    if (authorNames !== undefined) {
+      data.authors = authorNames.length
+        ? await connectPersons(authorNames)
+        : { set: [] };
+    }
+
+    const item = await prisma.mediaItem.update({
+      where: { id: req.params.id },
+      data,
+      include: {
+        cast:      { select: { id: true, name: true } },
+        directors: { select: { id: true, name: true } },
+        authors:   { select: { id: true, name: true } },
+      },
+    });
     res.json(item);
   } catch (err) { next(err); }
 });
