@@ -71,7 +71,7 @@ async function sendInviteEmail({ to, inviterName, customMessage, inviteToken }) 
   const joinUrl = `${SITE_URL}/join.html?token=${inviteToken}`;
 
   // Default message shown if the inviter didn't write a custom one
-  const defaultMessage = `I've been using Is It (Still) Good to track and share reviews of movies, books, TV shows, and video games with friends. I thought you'd enjoy it — come join me!`;
+  const defaultMessage = `I've been using Is It (Still) Good to track and share reviews of movies, books, TV shows, and video games with friends. I thought you'd enjoy it — come join!`;
 
   const messageToShow = customMessage?.trim() || defaultMessage;
 

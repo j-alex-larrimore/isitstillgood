@@ -122,7 +122,7 @@ router.post('/', requireAuth, [
           customMessage,
           inviteToken: existingInvite.token,
         });
-        return res.json({ outcome: 'resent', message: `Invite resent to ${email}` });
+        return res.json({ outcome: 'resent', message: `Invite sent to ${email}` });
       } catch (err) {
         console.error('Resend invite email failed:', err.message);
         return res.json({
