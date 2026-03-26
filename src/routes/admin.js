@@ -729,4 +729,23 @@ router.get('/check-duplicate', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ─── GET /api/admin/media/by-slug/:slug ──────────────────────────────────────
+// Returns full item data for the edit form — no redirect logic, no aggregation.
+// Used by the Edit Media tab so single-season TV parents load correctly.
+router.get('/media/by-slug/:slug', requireAdmin, async (req, res, next) => {
+  try {
+    const item = await prisma.mediaItem.findUnique({
+      where: { slug: req.params.slug },
+      include: {
+        directors: { select: { id: true, name: true }, take: 100 },
+        cast:       { select: { id: true, name: true }, take: 100 },
+        authors:    { select: { id: true, name: true }, take: 100 },
+      },
+    });
+    if (!item) return res.status(404).json({ error: 'Not found' });
+    res.json(item);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
