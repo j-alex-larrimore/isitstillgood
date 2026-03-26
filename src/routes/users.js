@@ -225,22 +225,30 @@ router.patch('/me/settings', requireAuth, [
   body('profilePublic').optional().isBoolean(),
   body('bio').optional().trim().isLength({ max: 500 }),
   body('displayName').optional().trim().isLength({ min: 1, max: 100 }),
+  body('email').optional().trim().isEmail().withMessage('Must be a valid email address'),
 ], async (req, res, next) => {
   const e = validationResult(req);
   if (!e.isEmpty()) return res.status(422).json({ errors: e.array() });
   try {
-    // Only allow updating safe fields — never email, password, isAdmin etc.
     const data = {};
     if (req.body.profilePublic !== undefined) data.profilePublic = req.body.profilePublic;
     if (req.body.bio !== undefined)           data.bio           = req.body.bio;
     if (req.body.displayName !== undefined)   data.displayName   = req.body.displayName;
+    if (req.body.email !== undefined) {
+      // Check email isn't already taken by another user
+      const existing = await prisma.user.findFirst({
+        where: { email: req.body.email, NOT: { id: req.user.id } },
+      });
+      if (existing) return res.status(409).json({ error: 'Email already in use by another account' });
+      data.email = req.body.email.toLowerCase();
+    }
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data,
       select: {
         id: true, username: true, displayName: true,
-        bio: true, profilePublic: true,
+        bio: true, profilePublic: true, email: true,
       },
     });
     res.json(updated);
