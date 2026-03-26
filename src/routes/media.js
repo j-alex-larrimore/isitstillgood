@@ -176,9 +176,25 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         cast:       { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         authors:    { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+        // Include parent so seasons can show parent show info and inherit cast
+        parent: {
+          select: { id: true, title: true, slug: true },
+          include: {
+            cast: { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
+          },
+        },
       },
     });
     if (!item) return res.status(404).json({ error: 'Not found' });
+
+    // For TV seasons, merge parent show cast with season-specific cast.
+    // Parent cast = main series regulars, season cast = additional/guest cast.
+    // Combined and deduplicated so no one appears twice.
+    if (item.parentId && item.parent?.cast?.length) {
+      const seasonCastIds  = new Set((item.cast || []).map(p => p.id));
+      const parentOnlyCast = item.parent.cast.filter(p => !seasonCastIds.has(p.id));
+      item.cast = [...(item.cast || []), ...parentOnlyCast];
+    }
 
     const stats = await prisma.review.aggregate({
       where: { mediaItemId: item.id, visibility: 'PUBLIC' },
