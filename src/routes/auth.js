@@ -149,7 +149,7 @@ router.get('/google/callback',
       const refreshToken = await issueRefreshToken(req.user.id);
       setAuthCookies(res, accessToken, refreshToken);
       // Redirect to frontend — it will read the cookie
-      res.redirect(`${process.env.CLIENT_URL}/auth/callback?success=true`);
+      res.redirect(`${process.env.CLIENT_URL}/index.html?google=true&token=${accessToken}&refresh=${encodeURIComponent(refreshToken)}`);
     } catch (err) { next(err); }
   }
 );
