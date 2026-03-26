@@ -200,7 +200,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     let seasonCountMap = {};
 
     // For TV parent shows, also aggregate ratings from all child seasons
-    if (seriesParentIds.length) {
+    if (tvParentIds.length) {
       const seasonRatings = await prisma.review.groupBy({
         by: ['mediaItemId'],
         where: {
@@ -212,7 +212,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       // Map season mediaItemId -> parentId, and count seasons per parent
       const seasons = await prisma.mediaItem.findMany({
-        where: { parentId: { in: seriesParentIds } },
+        where: { parentId: { in: tvParentIds } },
         select: { id: true, parentId: true, seasonNumber: true },
       });
       const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
