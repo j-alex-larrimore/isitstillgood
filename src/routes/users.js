@@ -138,7 +138,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       select: {
         id: true, username: true, displayName: true,
         bio: true, avatarUrl: true, profilePublic: true,
-        createdAt: true,
+        createdAt: true, email: true,
         // Count total reviews for the stats section
         _count: { select: { reviews: true } },
       },
@@ -207,7 +207,11 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
     });
 
     res.json({
-      user: target,
+      user: {
+        ...target,
+        // Only expose email to the profile owner
+        email: isSelf ? target.email : undefined,
+      },
       isSelf,
       reviews,
       stats: {
