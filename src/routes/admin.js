@@ -144,16 +144,19 @@ router.post('/media', requireAdmin, [
       openCriticId: ocId,
     } = req.body;
 
-    // For TV seasons, auto-build the title as "Show Name — Season N"
-    // when a parentId is supplied and the user hasn't already included "season"
+    // Auto-build title for TV seasons ("Show — Season N") and book entries ("Series — Book N")
     let finalTitle = title;
-    if (mediaType === 'TV_SHOW' && parentId && seasonNumber) {
-      const parentShow = await prisma.mediaItem.findUnique({
+    if (parentId && (seasonNumber || seriesNumber)) {
+      const parentItem = await prisma.mediaItem.findUnique({
         where: { id: parentId },
         select: { title: true },
       });
-      if (parentShow && !title.toLowerCase().includes('season')) {
-        finalTitle = `${parentShow.title} — Season ${seasonNumber}`;
+      if (parentItem) {
+        if (mediaType === 'TV_SHOW' && seasonNumber && !title.toLowerCase().includes('season')) {
+          finalTitle = `${parentItem.title} — Season ${seasonNumber}`;
+        } else if (mediaType === 'BOOK' && seriesNumber && !title.toLowerCase().includes('book')) {
+          finalTitle = title || `${parentItem.title} — Book ${seriesNumber}`;
+        }
       }
     }
 

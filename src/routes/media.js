@@ -95,9 +95,19 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     const where = {
       ...(type  && { mediaType: type }),
-      // For TV shows: only return parent shows (parentId = null), not individual seasons.
-      // Seasons are accessed by clicking into a show, not browsed directly.
+      // For TV shows: only return parent entries (parentId = null).
       ...(type === 'TV_SHOW' && { parentId: null }),
+      // For books browsing without a series filter: show standalones + lowest-numbered
+      // book per series. The actual filtering to lowest-per-series happens post-fetch.
+      // We can't do it in a single Prisma where clause efficiently, so we fetch
+      // all books and deduplicate by series after — handled below before res.json.
+      ...(type === 'BOOK' && !req.query.series && {
+        OR: [
+          { seriesName: null },   // standalone books
+          { seriesNumber: { not: null } }, // any numbered series book (deduplicated below)
+          { seriesNumber: null },          // unnumbered books
+        ]
+      }),
       // Exact year match (legacy) OR year range if from/to are provided
       ...(year && !req.query.yearFrom && !req.query.yearTo
         ? { releaseYear: parseInt(year) }
@@ -112,6 +122,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ...(genreFilter),
       // Tag filter — same pattern as genre, checks if the tags array contains the value
       ...(req.query.tag ? { tags: { has: req.query.tag } } : {}),
+      // Series filter — shows all books in a named series
+      ...(req.query.series ? { seriesName: req.query.series } : {}),
       ...(textFilter),
       ...(personFilter),
       ...(excludeReviewed && reviewedIds.length && { id: { notIn: reviewedIds } }),
@@ -147,8 +159,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     // Compute avg rating per item.
     // For TV parent shows, aggregate ratings across ALL their seasons.
-    const itemIds = items.map(i => i.id);
-    const tvParentIds = items.filter(i => i.mediaType === 'TV_SHOW' && !i.parentId).map(i => i.id);
+    const itemIds = finalItems.map(i => i.id);
+    const tvParentIds = finalItems.filter(i => i.mediaType === 'TV_SHOW' && !i.parentId).map(i => i.id);
+    // Book series: items that are first in a series (seriesNumber=1) act as the representative card
+    // Use the deduplicated series representatives (lowest seriesNumber per series)
+    const bookSeriesItems = finalItems.filter(i => i.mediaType === 'BOOK' && i.seriesName);
+    const bookSeriesNames = bookSeriesItems.map(i => i.seriesName);
 
     // Get direct ratings for non-TV items
     const ratings = await prisma.review.groupBy({
@@ -162,8 +178,41 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // seasonCountMap is always defined so the items.map() below never errors
     let seasonCountMap = {};
 
+    // For book browse without series filter: deduplicate to keep only the
+    // lowest-numbered book per series (the series representative card).
+    // This ensures that if books 3, 4, 5 are added but not book 1, book 3 shows.
+    // When book 1 is later added, it automatically takes over as the card.
+    let deduplicatedItems = items;
+    if (type === 'BOOK' && !req.query.series) {
+      const seenSeries = new Map(); // seriesName -> item with lowest seriesNumber
+      const result = [];
+      for (const item of items) {
+        if (!item.seriesName) {
+          // Standalone book — always include
+          result.push(item);
+        } else {
+          const existing = seenSeries.get(item.seriesName);
+          if (!existing) {
+            seenSeries.set(item.seriesName, item);
+          } else {
+            // Keep whichever has the lower seriesNumber (null counts as high)
+            const existingNum = existing.seriesNumber ?? Infinity;
+            const itemNum     = item.seriesNumber     ?? Infinity;
+            if (itemNum < existingNum) {
+              seenSeries.set(item.seriesName, item);
+            }
+          }
+        }
+      }
+      // Add the winner for each series back in
+      for (const [, winner] of seenSeries) result.push(winner);
+      deduplicatedItems = result;
+    }
+    // Use deduplicatedItems for everything below
+    const finalItems = deduplicatedItems;
+
     // For TV parent shows, also aggregate ratings from all child seasons
-    if (tvParentIds.length) {
+    if (seriesParentIds.length) {
       const seasonRatings = await prisma.review.groupBy({
         by: ['mediaItemId'],
         where: {
@@ -175,12 +224,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       // Map season mediaItemId -> parentId, and count seasons per parent
       const seasons = await prisma.mediaItem.findMany({
-        where: { parentId: { in: tvParentIds } },
+        where: { parentId: { in: seriesParentIds } },
         select: { id: true, parentId: true, seasonNumber: true },
       });
       const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
 
-      // Count how many seasons each parent show has
+      // Count children per parent (seasons for TV, books for book series)
       for (const s of seasons) {
         if (!s.parentId) continue;
         seasonCountMap[s.parentId] = (seasonCountMap[s.parentId] || 0) + 1;
@@ -195,7 +244,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         parentAccum[parentId].sum   += (r._avg.rating || 0) * r._count.rating;
         parentAccum[parentId].count += r._count.rating;
       }
-      // Override rating map for TV parents with the aggregated value
+      // Override rating map for TV parents with aggregated value
       for (const [parentId, acc] of Object.entries(parentAccum)) {
         if (acc.count > 0) {
           ratingMap[parentId] = { avg: acc.sum / acc.count, count: acc.count };
@@ -203,16 +252,63 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
+    // For book series: count books in each series and aggregate ratings
+    const bookSeriesCountMap = {};
+    const bookSeriesRatingMap = {};
+    if (bookSeriesNames.length) {
+      const allSeriesBooks = await prisma.mediaItem.findMany({
+        where: { mediaType: 'BOOK', seriesName: { in: bookSeriesNames } },
+        select: { id: true, seriesName: true, seriesNumber: true },
+      });
+      // Count books per series
+      for (const b of allSeriesBooks) {
+        if (!b.seriesName) continue;
+        bookSeriesCountMap[b.seriesName] = (bookSeriesCountMap[b.seriesName] || 0) + 1;
+      }
+      // Aggregate ratings for all books in each series
+      const allBookIds = allSeriesBooks.map(b => b.id);
+      if (allBookIds.length) {
+        const bookRatings = await prisma.review.groupBy({
+          by: ['mediaItemId'],
+          where: { mediaItemId: { in: allBookIds }, visibility: 'PUBLIC' },
+          _avg: { rating: true },
+          _count: { rating: true },
+        });
+        const bookIdToSeries = Object.fromEntries(allSeriesBooks.map(b => [b.id, b.seriesName]));
+        const seriesAccum = {};
+        for (const r of bookRatings) {
+          const sn = bookIdToSeries[r.mediaItemId];
+          if (!sn) continue;
+          if (!seriesAccum[sn]) seriesAccum[sn] = { sum: 0, count: 0 };
+          seriesAccum[sn].sum   += (r._avg.rating || 0) * r._count.rating;
+          seriesAccum[sn].count += r._count.rating;
+        }
+        for (const [sn, acc] of Object.entries(seriesAccum)) {
+          if (acc.count > 0) bookSeriesRatingMap[sn] = { avg: acc.sum / acc.count, count: acc.count };
+        }
+      }
+    }
+
     res.json({
-      items: items.map(i => ({
+      items: finalItems.map(i => {
+        // For series representative cards, use aggregated series ratings
+        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series;
+        const avg   = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.avg   || ratingMap[i.id]?.avg)   : ratingMap[i.id]?.avg;
+        const count = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.count || ratingMap[i.id]?.count) : ratingMap[i.id]?.count;
+        return {
         ...i,
-        avgRating:   ratingMap[i.id]?.avg   || null,
-        reviewCount: ratingMap[i.id]?.count || 0,
-        seasonCount: (i.mediaType === 'TV_SHOW' && !i.parentId) ? (seasonCountMap?.[i.id] || 0) : undefined,
+        avgRating:   avg   || null,
+        reviewCount: count || 0,
+        seasonCount: i.mediaType === 'TV_SHOW' && !i.parentId
+          ? (seasonCountMap?.[i.id] || 0)
+          : isSeriesCard
+            ? (bookSeriesCountMap[i.seriesName] || 0)
+            : undefined,
         // If filtering by reviewedBy, include that user's personal rating on each item
         // so the search page can show "Marco rated this 8/10" alongside community avg
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
-      })),
+        }; // close the return object for isSeriesCard
+      }),
       total,
       page: parseInt(page),
       pages: Math.ceil(total / take),
@@ -269,24 +365,50 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       item.cast = (item.cast || []).filter(p => !excluded.has(p.name.toLowerCase()));
     }
 
-    // Is this a TV parent show (has seasons, no parentId)?
+    // Is this a TV parent show?
     const isTvParent = item.mediaType === 'TV_SHOW' && !item.parentId;
 
-    // If this is a TV parent with exactly one season, redirect to that season
-    // so users land directly on the reviewable page
+    // Is this a book that is the lowest-numbered in its series?
+    // If so, treat it as the series page showing all books in that series.
+    // We check dynamically so if a lower-numbered book is added later,
+    // it automatically becomes the series page.
+    let isBookSeries = false;
+    if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
+      const lowestInSeries = await prisma.mediaItem.findFirst({
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null } },
+        orderBy: { seriesNumber: 'asc' },
+        select: { id: true },
+      });
+      isBookSeries = lowestInSeries?.id === item.id;
+    }
+    const isSeriesParent = isTvParent || isBookSeries;
+
+    // If a TV parent has exactly one season, redirect straight to it
     if (isTvParent && item.seasonEntries?.length === 1) {
       const onlySeason = item.seasonEntries[0];
-      return res.json({
-        redirect: `/item.html?slug=${onlySeason.slug}`,
-      });
+      return res.json({ redirect: `/item.html?slug=${onlySeason.slug}` });
     }
 
-    // For TV parent shows, aggregate stats across all seasons.
-    // For seasons and everything else, use direct reviews.
+    // For TV parent shows and book series, aggregate stats across all entries
     let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
+    let seriesBooks = [];
+
     if (isTvParent && item.seasonEntries?.length) {
       const seasonIds = item.seasonEntries.map(s => s.id);
       statsWhere = { mediaItemId: { in: seasonIds }, visibility: 'PUBLIC' };
+    } else if (isBookSeries && item.seriesName) {
+      // Fetch all books in this series ordered by seriesNumber
+      seriesBooks = await prisma.mediaItem.findMany({
+        where: { mediaType: 'BOOK', seriesName: item.seriesName },
+        select: {
+          id: true, title: true, slug: true,
+          seriesNumber: true, releaseYear: true, imageUrl: true,
+          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+        },
+        orderBy: { seriesNumber: 'asc' },
+      });
+      const seriesBookIds = seriesBooks.map(b => b.id);
+      statsWhere = { mediaItemId: { in: seriesBookIds }, visibility: 'PUBLIC' };
     }
 
     const stats = await prisma.review.aggregate({
@@ -300,7 +422,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       _count: { verdict: true },
     });
 
-    // Add avg rating to each season for the season picker
+    // Add avg rating to each season/book for the picker
     if (isTvParent && item.seasonEntries?.length) {
       const seasonIds = item.seasonEntries.map(s => s.id);
       const seasonRatings = await prisma.review.groupBy({
@@ -315,6 +437,24 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         avgRating:   srMap[s.id]?.avg   || null,
         reviewCount: srMap[s.id]?.count || 0,
       }));
+    }
+    // For book series: enrich the series books list with ratings
+    if (isBookSeries && seriesBooks.length) {
+      const bookIds = seriesBooks.map(b => b.id);
+      const bookRatings = await prisma.review.groupBy({
+        by: ['mediaItemId'],
+        where: { mediaItemId: { in: bookIds }, visibility: 'PUBLIC' },
+        _avg: { rating: true },
+        _count: { rating: true },
+      });
+      const brMap = Object.fromEntries(bookRatings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
+      seriesBooks = seriesBooks.map(b => ({
+        ...b,
+        avgRating:   brMap[b.id]?.avg   || null,
+        reviewCount: brMap[b.id]?.count || 0,
+      }));
+      // Attach series books to item for the frontend
+      item.seriesBooksData = seriesBooks;
     }
 
     let userReview = null;
@@ -334,6 +474,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     res.json({
       ...item,
       isTvParent,
+      isBookSeries,
+      isSeriesParent,
+      seriesBooksData: item.seriesBooksData || null,
       communityStats: {
         avgRating:   stats._avg.rating,
         reviewCount: stats._count.rating,
