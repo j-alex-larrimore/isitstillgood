@@ -88,9 +88,11 @@ router.post('/', requireAuth, [
     // otherwise leave as null — the field is optional
     const consumed = dateConsumed ? new Date(dateConsumed) : null;
 
-    // For TV shows, unique key includes seasonNumber
-    const uniqueKey = { userId: req.user.id, mediaItemId, seasonNumber: season };
-    const existing = await prisma.review.findUnique({ where: { userId_mediaItemId_seasonNumber: uniqueKey } });
+    // Use findFirst with explicit where clause — findUnique with a composite key
+    // fails when seasonNumber is null because Prisma can't match null in a compound key
+    const existing = await prisma.review.findFirst({
+      where: { userId: req.user.id, mediaItemId, seasonNumber: season },
+    });
 
     let review;
     if (existing) {
