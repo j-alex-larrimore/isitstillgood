@@ -22,12 +22,16 @@ async function uniqueSlug(base) {
   return slug;
 }
 
-async function connectPersons(names) {
-  // Empty array means "remove all" — return {set:[]} to disconnect all relations.
-  // Returning undefined would leave the relation unchanged, which is wrong.
-  // We use 'set' (not 'connect') so it replaces the entire relation set,
-  // removing anyone not in the new list rather than just adding new ones.
-  if (!names?.length) return { set: [] };
+// connectPersons builds the Prisma relation payload for cast/directors/authors.
+// isUpdate=true  → uses {set:[...]} which replaces the full relation (correct for PATCH)
+// isUpdate=false → uses {connect:[...]} which adds relations (correct for CREATE)
+// Empty names + isUpdate → {set:[]} removes all; empty + create → undefined (skip field)
+async function connectPersons(names, isUpdate = false) {
+  if (!names?.length) {
+    // On update, empty array means "remove all relations"
+    // On create, skip the field entirely (no relations to set up)
+    return isUpdate ? { set: [] } : undefined;
+  }
 
   const persons = await Promise.all(names.map(name => {
     const personSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -38,10 +42,10 @@ async function connectPersons(names) {
     });
   }));
 
-  // Use 'set' instead of 'connect' so the relation is fully replaced.
-  // This means removing cast members works correctly — anyone not in
-  // the new list is disconnected, not just new names connected.
-  return { set: persons.map(p => ({ id: p.id })) };
+  const ids = persons.map(p => ({ id: p.id }));
+  // set: replaces the entire relation (update) — removes anyone not in the new list
+  // connect: adds to existing relations (create) — only adds, never removes
+  return isUpdate ? { set: ids } : { connect: ids };
 }
 
 // ─── GET /api/admin/stats ─────────────────────────────────────────────────
@@ -216,16 +220,15 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     // An empty array clears the relation entirely (allows removing all cast).
     const { castNames, directorNames, authorNames } = req.body;
 
-    // connectPersons now handles empty arrays correctly (returns {set:[]})
-    // so we just call it directly — no need for the length check here
+    // Pass isUpdate=true so connectPersons uses {set:[...]} to fully replace relations
     if (castNames !== undefined) {
-      data.cast = await connectPersons(castNames);
+      data.cast = await connectPersons(castNames, true);
     }
     if (directorNames !== undefined) {
-      data.directors = await connectPersons(directorNames);
+      data.directors = await connectPersons(directorNames, true);
     }
     if (authorNames !== undefined) {
-      data.authors = await connectPersons(authorNames);
+      data.authors = await connectPersons(authorNames, true);
     }
 
     const item = await prisma.mediaItem.update({
