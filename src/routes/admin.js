@@ -23,7 +23,12 @@ async function uniqueSlug(base) {
 }
 
 async function connectPersons(names) {
-  if (!names?.length) return undefined;
+  // Empty array means "remove all" — return {set:[]} to disconnect all relations.
+  // Returning undefined would leave the relation unchanged, which is wrong.
+  // We use 'set' (not 'connect') so it replaces the entire relation set,
+  // removing anyone not in the new list rather than just adding new ones.
+  if (!names?.length) return { set: [] };
+
   const persons = await Promise.all(names.map(name => {
     const personSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     return prisma.person.upsert({
@@ -32,7 +37,11 @@ async function connectPersons(names) {
       create: { name, slug: personSlug },
     });
   }));
-  return { connect: persons.map(p => ({ id: p.id })) };
+
+  // Use 'set' instead of 'connect' so the relation is fully replaced.
+  // This means removing cast members works correctly — anyone not in
+  // the new list is disconnected, not just new names connected.
+  return { set: persons.map(p => ({ id: p.id })) };
 }
 
 // ─── GET /api/admin/stats ─────────────────────────────────────────────────
@@ -207,20 +216,16 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     // An empty array clears the relation entirely (allows removing all cast).
     const { castNames, directorNames, authorNames } = req.body;
 
+    // connectPersons now handles empty arrays correctly (returns {set:[]})
+    // so we just call it directly — no need for the length check here
     if (castNames !== undefined) {
-      data.cast = castNames.length
-        ? await connectPersons(castNames)
-        : { set: [] }; // empty array = disconnect all
+      data.cast = await connectPersons(castNames);
     }
     if (directorNames !== undefined) {
-      data.directors = directorNames.length
-        ? await connectPersons(directorNames)
-        : { set: [] };
+      data.directors = await connectPersons(directorNames);
     }
     if (authorNames !== undefined) {
-      data.authors = authorNames.length
-        ? await connectPersons(authorNames)
-        : { set: [] };
+      data.authors = await connectPersons(authorNames);
     }
 
     const item = await prisma.mediaItem.update({
