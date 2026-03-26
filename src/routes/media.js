@@ -95,6 +95,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     const where = {
       ...(type  && { mediaType: type }),
+      // For TV shows: only return parent shows (parentId = null), not individual seasons.
+      // Seasons are accessed by clicking into a show, not browsed directly.
+      ...(type === 'TV_SHOW' && { parentId: null }),
       // Exact year match (legacy) OR year range if from/to are provided
       ...(year && !req.query.yearFrom && !req.query.yearTo
         ? { releaseYear: parseInt(year) }
@@ -142,19 +145,68 @@ router.get('/', optionalAuth, async (req, res, next) => {
       prisma.mediaItem.count({ where }),
     ]);
 
-    // Compute avg rating per item
+    // Compute avg rating per item.
+    // For TV parent shows, aggregate ratings across ALL their seasons.
     const itemIds = items.map(i => i.id);
+    const tvParentIds = items.filter(i => i.mediaType === 'TV_SHOW' && !i.parentId).map(i => i.id);
+
+    // Get direct ratings for non-TV items
     const ratings = await prisma.review.groupBy({
       by: ['mediaItemId'],
       where: { mediaItemId: { in: itemIds }, visibility: 'PUBLIC' },
       _avg: { rating: true },
+      _count: { rating: true },
     });
-    const ratingMap = Object.fromEntries(ratings.map(r => [r.mediaItemId, r._avg.rating]));
+    const ratingMap = Object.fromEntries(ratings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
+
+    // For TV parent shows, also aggregate ratings from all child seasons
+    if (tvParentIds.length) {
+      const seasonRatings = await prisma.review.groupBy({
+        by: ['mediaItemId'],
+        where: {
+          visibility: 'PUBLIC',
+          mediaItem: { parentId: { in: tvParentIds } },
+        },
+        _avg: { rating: true },
+        _count: { rating: true },
+      });
+      // Map season mediaItemId -> parentId, and count seasons per parent
+      const seasons = await prisma.mediaItem.findMany({
+        where: { parentId: { in: tvParentIds } },
+        select: { id: true, parentId: true, seasonNumber: true },
+      });
+      const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
+
+      // Count how many seasons each parent show has
+      const seasonCountMap = {};
+      for (const s of seasons) {
+        if (!s.parentId) continue;
+        seasonCountMap[s.parentId] = (seasonCountMap[s.parentId] || 0) + 1;
+      }
+
+      // Accumulate season ratings per parent show
+      const parentAccum = {};
+      for (const r of seasonRatings) {
+        const parentId = seasonToParent[r.mediaItemId];
+        if (!parentId) continue;
+        if (!parentAccum[parentId]) parentAccum[parentId] = { sum: 0, count: 0 };
+        parentAccum[parentId].sum   += (r._avg.rating || 0) * r._count.rating;
+        parentAccum[parentId].count += r._count.rating;
+      }
+      // Override rating map for TV parents with the aggregated value
+      for (const [parentId, acc] of Object.entries(parentAccum)) {
+        if (acc.count > 0) {
+          ratingMap[parentId] = { avg: acc.sum / acc.count, count: acc.count };
+        }
+      }
+    }
 
     res.json({
       items: items.map(i => ({
         ...i,
-        avgRating: ratingMap[i.id] || null,
+        avgRating:   ratingMap[i.id]?.avg   || null,
+        reviewCount: ratingMap[i.id]?.count || 0,
+        seasonCount: (i.mediaType === 'TV_SHOW' && !i.parentId) ? (seasonCountMap?.[i.id] || 0) : undefined,
         // If filtering by reviewedBy, include that user's personal rating on each item
         // so the search page can show "Marco rated this 8/10" alongside community avg
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
@@ -176,36 +228,81 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         cast:       { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         authors:    { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
-        // Include parent so seasons can show parent show info and inherit cast
+        // For seasons: include parent show info and its cast
         parent: {
           select: { id: true, title: true, slug: true },
           include: {
             cast: { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
           },
         },
+        // For parent shows: include child seasons ordered by season number
+        seasonEntries: {
+          where: { seasonNumber: { not: null } },
+          select: {
+            id: true, title: true, slug: true,
+            seasonNumber: true, releaseYear: true, imageUrl: true,
+            _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          },
+          orderBy: { seasonNumber: 'asc' },
+        },
       },
     });
     if (!item) return res.status(404).json({ error: 'Not found' });
 
-    // For TV seasons, merge parent show cast with season-specific cast.
-    // Parent cast = main series regulars, season cast = additional/guest cast.
-    // Combined and deduplicated so no one appears twice.
+    // For TV seasons: merge parent cast with season-specific cast
     if (item.parentId && item.parent?.cast?.length) {
       const seasonCastIds  = new Set((item.cast || []).map(p => p.id));
       const parentOnlyCast = item.parent.cast.filter(p => !seasonCastIds.has(p.id));
       item.cast = [...(item.cast || []), ...parentOnlyCast];
     }
 
+    // Is this a TV parent show (has seasons, no parentId)?
+    const isTvParent = item.mediaType === 'TV_SHOW' && !item.parentId;
+
+    // If this is a TV parent with exactly one season, redirect to that season
+    // so users land directly on the reviewable page
+    if (isTvParent && item.seasonEntries?.length === 1) {
+      const onlySeason = item.seasonEntries[0];
+      return res.json({
+        redirect: `/item.html?slug=${onlySeason.slug}`,
+      });
+    }
+
+    // For TV parent shows, aggregate stats across all seasons.
+    // For seasons and everything else, use direct reviews.
+    let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
+    if (isTvParent && item.seasonEntries?.length) {
+      const seasonIds = item.seasonEntries.map(s => s.id);
+      statsWhere = { mediaItemId: { in: seasonIds }, visibility: 'PUBLIC' };
+    }
+
     const stats = await prisma.review.aggregate({
-      where: { mediaItemId: item.id, visibility: 'PUBLIC' },
+      where: statsWhere,
       _avg: { rating: true }, _count: { rating: true },
     });
 
     const verdicts = await prisma.review.groupBy({
       by: ['verdict'],
-      where: { mediaItemId: item.id, visibility: 'PUBLIC' },
+      where: statsWhere,
       _count: { verdict: true },
     });
+
+    // Add avg rating to each season for the season picker
+    if (isTvParent && item.seasonEntries?.length) {
+      const seasonIds = item.seasonEntries.map(s => s.id);
+      const seasonRatings = await prisma.review.groupBy({
+        by: ['mediaItemId'],
+        where: { mediaItemId: { in: seasonIds }, visibility: 'PUBLIC' },
+        _avg: { rating: true },
+        _count: { rating: true },
+      });
+      const srMap = Object.fromEntries(seasonRatings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
+      item.seasonEntries = item.seasonEntries.map(s => ({
+        ...s,
+        avgRating:   srMap[s.id]?.avg   || null,
+        reviewCount: srMap[s.id]?.count || 0,
+      }));
+    }
 
     let userReview = null;
     if (req.user) {
@@ -223,10 +320,11 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
 
     res.json({
       ...item,
+      isTvParent,
       communityStats: {
-        avgRating: stats._avg.rating,
+        avgRating:   stats._avg.rating,
         reviewCount: stats._count.rating,
-        verdicts: Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
+        verdicts:    Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
       },
       userReview,
     });
