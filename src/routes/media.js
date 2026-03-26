@@ -232,9 +232,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
         // For seasons: include parent show info and its cast
         parent: {
-          select: { id: true, title: true, slug: true },
           include: {
-            cast: { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
+            cast:      { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
+            directors: { select: { id: true, name: true, slug: true }, take: 100 },
           },
         },
         // For parent shows: include child seasons ordered by season number
