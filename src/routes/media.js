@@ -302,6 +302,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
         const count = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.count || ratingMap[i.id]?.count) : ratingMap[i.id]?.count;
         return {
         ...i,
+        // For series representative cards, use the series name as the display title
+        // so browse shows "Cradle" not "Unsouled" (the first book's actual title)
+        displayTitle: isSeriesCard ? i.seriesName : undefined,
         avgRating:   avg   || null,
         reviewCount: count || 0,
         seasonCount: i.mediaType === 'TV_SHOW' && !i.parentId
@@ -309,8 +312,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
           : isSeriesCard
             ? (bookSeriesCountMap[i.seriesName] || 0)
             : undefined,
-        // If filtering by reviewedBy, include that user's personal rating on each item
-        // so the search page can show "Marco rated this 8/10" alongside community avg
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
       }),
