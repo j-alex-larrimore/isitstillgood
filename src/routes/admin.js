@@ -116,7 +116,7 @@ router.post('/media', requireAdmin, [
   try {
     const {
       mediaType, title, releaseYear, description, imageUrl, genres,
-      tmdbId, goodreadsId, openCriticId, tags,
+      tmdbId, goodreadsId, openCriticId, tags, excludedCast,
       // Movie
       directorNames, castNames,
       // TV Show — parent show fields (seasons = total count on parent row)
@@ -157,6 +157,7 @@ router.post('/media', requireAdmin, [
         genres:          genres      || [],
         // Tags — franchise, studio, network etc. e.g. "Marvel", "HBO", "Star Wars"
         tags:            tags        || [],
+        excludedCast:    excludedCast || [],  // cast members who left before this season
         tmdbId:          tmdbId      || null,
         goodreadsId:     goodreadsId || null,
         openCriticId:    openCriticId || ocId || null,
@@ -192,7 +193,7 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     // Scalar fields — updated directly
     const allowed = [
       'title','description','imageUrl','genres','releaseYear',
-      'tmdbId','tmdbRating','tags',
+      'tmdbId','tmdbRating','tags','excludedCast',
       'goodreadsId','openCriticId','openCriticScore',
       'seasons','seriesName','seriesNumber',
     ];

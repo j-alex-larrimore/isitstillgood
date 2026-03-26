@@ -36,6 +36,7 @@ model MediaItem {
   imageUrl        String?
   genres          String[]
   tags            String[]  // freeform tags e.g. Marvel, Star Wars, HBO, Disney
+  excludedCast    String[]  // names of cast members excluded from this season (departed actors)
 
   // External ratings — IMDb and RT removed (licensing concerns)
   // Community ratings stored here, fetched via TMDB, Open Library, IGDB

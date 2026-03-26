@@ -251,11 +251,22 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     });
     if (!item) return res.status(404).json({ error: 'Not found' });
 
-    // For TV seasons: merge parent cast with season-specific cast
+    // For TV seasons: merge parent cast with season-specific cast.
+    // Exclude any cast members listed in excludedCast (departed actors).
+    // Exclusion is by name (case-insensitive) so it works even if Person IDs differ.
     if (item.parentId && item.parent?.cast?.length) {
       const seasonCastIds  = new Set((item.cast || []).map(p => p.id));
-      const parentOnlyCast = item.parent.cast.filter(p => !seasonCastIds.has(p.id));
+      const excluded       = new Set((item.excludedCast || []).map(n => n.toLowerCase()));
+      const parentOnlyCast = item.parent.cast.filter(p =>
+        !seasonCastIds.has(p.id) && !excluded.has(p.name.toLowerCase())
+      );
       item.cast = [...(item.cast || []), ...parentOnlyCast];
+    }
+    // Also filter season's own cast against excludedCast (in case someone was
+    // added to a season's cast and then added to excludedCast later)
+    if (item.excludedCast?.length) {
+      const excluded = new Set(item.excludedCast.map(n => n.toLowerCase()));
+      item.cast = (item.cast || []).filter(p => !excluded.has(p.name.toLowerCase()));
     }
 
     // Is this a TV parent show (has seasons, no parentId)?
