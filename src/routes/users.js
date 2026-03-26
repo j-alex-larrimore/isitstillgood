@@ -10,49 +10,6 @@ function ok(req, res) {
   return true;
 }
 
-// ─── GET /api/users/:username ─── Public profile ──────────────────────────
-router.get('/:username', optionalAuth, async (req, res, next) => {
-  try {
-    const user = await prisma.user.findUnique({
-      where: { username: req.params.username },
-      select: {
-        id: true, username: true, displayName: true, avatarUrl: true,
-        bio: true, createdAt: true, profilePublic: true,
-        _count: {
-          select: {
-            reviews: { where: { visibility: 'PUBLIC' } },
-            friendsInitiated: { where: { status: 'ACCEPTED' } },
-          },
-        },
-      },
-    });
-
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    // Private profile — only the owner or friends can see
-    const isSelf = req.user?.id === user.id;
-    if (!user.profilePublic && !isSelf) {
-      // Check if they're friends
-      if (req.user) {
-        const friendship = await prisma.friendship.findFirst({
-          where: {
-            status: 'ACCEPTED',
-            OR: [
-              { initiatorId: req.user.id, receiverId: user.id },
-              { initiatorId: user.id, receiverId: req.user.id },
-            ],
-          },
-        });
-        if (!friendship) return res.status(403).json({ error: 'This profile is private' });
-      } else {
-        return res.status(403).json({ error: 'This profile is private' });
-      }
-    }
-
-    res.json(user);
-  } catch (err) { next(err); }
-});
-
 // ─── PATCH /api/users/me ─── Update own profile ────────────────────────────
 router.patch('/me', requireAuth, [
   body('displayName').optional().trim().isLength({ min: 1, max: 60 }),

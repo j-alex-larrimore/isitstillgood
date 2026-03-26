@@ -17,6 +17,11 @@ const SITE_URL = process.env.CLIENT_URL || 'https://isitstillgood.com';
 async function sendEmail({ to, subject, html }) {
   // If no API key is configured, log the email to console instead of failing.
   // This lets the rest of the invite flow work during development/testing.
+  // Debug: log what env vars are visible at runtime
+  console.log('[Email] RESEND_API_KEY present:', !!process.env.RESEND_API_KEY);
+  console.log('[Email] RESEND_API_KEY length:', process.env.RESEND_API_KEY?.length || 0);
+  console.log('[Email] NODE_ENV:', process.env.NODE_ENV);
+
   if (!process.env.RESEND_API_KEY) {
     console.log('📧 [Email — no RESEND_API_KEY set, logging instead]');
     console.log(`  To:      ${to}`);

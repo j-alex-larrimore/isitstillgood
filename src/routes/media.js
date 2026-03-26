@@ -131,8 +131,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ...(reviewedByIds !== undefined && { id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } }),
     };
 
+    // For 'rating' sort we can't use Prisma orderBy because avgRating is computed
+    // post-fetch. Use createdAt as a stable DB sort, then re-sort by avgRating in JS.
+    // 'popular' sorts by review count which Prisma can do directly.
     const orderBy = {
-      rating:  [{ reviews: { _count: 'desc' } }],
+      popular: [{ reviews: { _count: 'desc' } }],
       recent:  [{ createdAt: 'desc' }],
       title:   [{ title: 'asc' }],
       year:    [{ releaseYear: 'desc' }],
@@ -277,8 +280,22 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
+    // If sort=rating, sort finalItems by avgRating desc (items with no rating go last)
+    let sortedItems = finalItems;
+    if (sort === 'rating') {
+      sortedItems = [...finalItems].sort((a, b) => {
+        const aRating = (a.mediaType === 'BOOK' && a.seriesName && !req.query.series)
+          ? (bookSeriesRatingMap[a.seriesName]?.avg || ratingMap[a.id]?.avg || 0)
+          : (ratingMap[a.id]?.avg || 0);
+        const bRating = (b.mediaType === 'BOOK' && b.seriesName && !req.query.series)
+          ? (bookSeriesRatingMap[b.seriesName]?.avg || ratingMap[b.id]?.avg || 0)
+          : (ratingMap[b.id]?.avg || 0);
+        return bRating - aRating;
+      });
+    }
+
     res.json({
-      items: finalItems.map(i => {
+      items: sortedItems.map(i => {
         // For series representative cards, use aggregated series ratings
         const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series;
         const avg   = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.avg   || ratingMap[i.id]?.avg)   : ratingMap[i.id]?.avg;

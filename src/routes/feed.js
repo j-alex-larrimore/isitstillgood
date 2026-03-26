@@ -2,7 +2,7 @@
 const router = require('express').Router();
 const { query } = require('express-validator');
 const prisma = require('../lib/prisma');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
 
 // ─── GET /api/feed ─── Friend activity + timeframe support ──────────────
 router.get('/', requireAuth, [
@@ -101,30 +101,28 @@ router.get('/', requireAuth, [
 });
 
 // ─── GET /api/feed/trending ───────────────────────────────────────────────
-router.get('/trending', requireAuth, async (req, res, next) => {
+router.get('/trending', optionalAuth, async (req, res, next) => {
   try {
-    const friendships = await prisma.friendship.findMany({
-      where: {
-        status: 'ACCEPTED',
-        OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }],
-      },
-      select: { initiatorId: true, receiverId: true },
-    });
-    const friendIds = friendships.map(f =>
-      f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
-    );
-
     const setting = await prisma.adminSetting.findUnique({ where: { key: 'feedTimeframeDays' } });
     const days = setting ? parseInt(setting.value) : 30;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const authorIds = friendIds.length ? [req.user.id, ...friendIds] : undefined;
+    // If logged in, weight towards friend activity; otherwise show global trending
+    let authorIds;
+    if (req.user) {
+      const friendships = await prisma.friendship.findMany({
+        where: { status: 'ACCEPTED', OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }] },
+        select: { initiatorId: true, receiverId: true },
+      });
+      const friendIds = friendships.map(f => f.initiatorId === req.user.id ? f.receiverId : f.initiatorId);
+      authorIds = friendIds.length ? [req.user.id, ...friendIds] : undefined;
+    }
 
     const trending = await prisma.review.groupBy({
       by: ['mediaItemId'],
       where: {
-        ...(authorIds && { userId: { in: authorIds } }),
-        visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] },
+        ...(authorIds ? { userId: { in: authorIds } } : {}),
+        visibility: 'PUBLIC',
         createdAt: { gte: since },
       },
       _count: { mediaItemId: true },
@@ -135,12 +133,13 @@ router.get('/trending', requireAuth, async (req, res, next) => {
 
     const mediaItems = await prisma.mediaItem.findMany({
       where: { id: { in: trending.map(t => t.mediaItemId) } },
-      select: { id: true, title: true, slug: true, mediaType: true, releaseYear: true, imageUrl: true, genres: true },
+      select: { id: true, title: true, slug: true, mediaType: true, releaseYear: true, imageUrl: true },
     });
 
     res.json(trending.map(t => ({
-      ...t,
-      mediaItem: mediaItems.find(m => m.id === t.mediaItemId),
+      ...mediaItems.find(m => m.id === t.mediaItemId),
+      reviewCount: t._count.mediaItemId,  // expose as reviewCount so frontend can use it
+      avgRating:   t._avg.rating,
     })));
   } catch (err) { next(err); }
 });
