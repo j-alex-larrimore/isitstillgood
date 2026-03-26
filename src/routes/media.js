@@ -157,16 +157,38 @@ router.get('/', optionalAuth, async (req, res, next) => {
       prisma.mediaItem.count({ where }),
     ]);
 
+    // For book browse without series filter: deduplicate to keep only the
+    // lowest-numbered book per series (the series representative card).
+    // Must happen BEFORE rating computation so finalItems is defined.
+    let deduplicatedItems = items;
+    if (type === 'BOOK' && !req.query.series) {
+      const seenSeries = new Map();
+      const result = [];
+      for (const item of items) {
+        if (!item.seriesName) {
+          result.push(item);
+        } else {
+          const existing = seenSeries.get(item.seriesName);
+          if (!existing) {
+            seenSeries.set(item.seriesName, item);
+          } else {
+            const existingNum = existing.seriesNumber ?? Infinity;
+            const itemNum     = item.seriesNumber     ?? Infinity;
+            if (itemNum < existingNum) seenSeries.set(item.seriesName, item);
+          }
+        }
+      }
+      for (const [, winner] of seenSeries) result.push(winner);
+      deduplicatedItems = result;
+    }
+    const finalItems = deduplicatedItems;
+
     // Compute avg rating per item.
-    // For TV parent shows, aggregate ratings across ALL their seasons.
     const itemIds = finalItems.map(i => i.id);
     const tvParentIds = finalItems.filter(i => i.mediaType === 'TV_SHOW' && !i.parentId).map(i => i.id);
-    // Book series: items that are first in a series (seriesNumber=1) act as the representative card
-    // Use the deduplicated series representatives (lowest seriesNumber per series)
     const bookSeriesItems = finalItems.filter(i => i.mediaType === 'BOOK' && i.seriesName);
     const bookSeriesNames = bookSeriesItems.map(i => i.seriesName);
 
-    // Get direct ratings for non-TV items
     const ratings = await prisma.review.groupBy({
       by: ['mediaItemId'],
       where: { mediaItemId: { in: itemIds }, visibility: 'PUBLIC' },
@@ -175,41 +197,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     });
     const ratingMap = Object.fromEntries(ratings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
 
-    // seasonCountMap is always defined so the items.map() below never errors
     let seasonCountMap = {};
-
-    // For book browse without series filter: deduplicate to keep only the
-    // lowest-numbered book per series (the series representative card).
-    // This ensures that if books 3, 4, 5 are added but not book 1, book 3 shows.
-    // When book 1 is later added, it automatically takes over as the card.
-    let deduplicatedItems = items;
-    if (type === 'BOOK' && !req.query.series) {
-      const seenSeries = new Map(); // seriesName -> item with lowest seriesNumber
-      const result = [];
-      for (const item of items) {
-        if (!item.seriesName) {
-          // Standalone book — always include
-          result.push(item);
-        } else {
-          const existing = seenSeries.get(item.seriesName);
-          if (!existing) {
-            seenSeries.set(item.seriesName, item);
-          } else {
-            // Keep whichever has the lower seriesNumber (null counts as high)
-            const existingNum = existing.seriesNumber ?? Infinity;
-            const itemNum     = item.seriesNumber     ?? Infinity;
-            if (itemNum < existingNum) {
-              seenSeries.set(item.seriesName, item);
-            }
-          }
-        }
-      }
-      // Add the winner for each series back in
-      for (const [, winner] of seenSeries) result.push(winner);
-      deduplicatedItems = result;
-    }
-    // Use deduplicatedItems for everything below
-    const finalItems = deduplicatedItems;
 
     // For TV parent shows, also aggregate ratings from all child seasons
     if (seriesParentIds.length) {
