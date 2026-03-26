@@ -8,7 +8,7 @@
 // All emails send from hello@isitstillgood.com
 
 // ─── Configuration ───────────────────────────────────────────────────────────
-const FROM_ADDRESS = 'noreply@send.isitstillgood.com';
+const FROM_ADDRESS = 'noreply@isitstillgood.com';
 const SITE_URL = process.env.CLIENT_URL || 'https://isitstillgood.com';
 
 // ─── Send via Resend API ──────────────────────────────────────────────────────
