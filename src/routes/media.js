@@ -8,6 +8,7 @@ const { fetchExternalRatings } = require('../services/externalRatings');
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
+  const friendsOnly = req.query.friendsOnly === 'true';
   // reviewedBy: a username — filter to only items reviewed by that specific user
   const reviewedBy = req.query.reviewedBy?.trim();
   const excludeReviewed = req.query.excludeReviewed === 'true' && req.user;
@@ -82,6 +83,26 @@ router.get('/', optionalAuth, async (req, res, next) => {
         ],
       };
     }
+
+    // Resolve friend IDs for friendsOnly mode
+    let friendIds = [];
+    if (friendsOnly && req.user) {
+      const friendships = await prisma.friendship.findMany({
+        where: {
+          status: 'ACCEPTED',
+          OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }],
+        },
+        select: { initiatorId: true, receiverId: true },
+      });
+      friendIds = friendships.map(f =>
+        f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
+      );
+      // Include self in friends-only ratings
+      friendIds.push(req.user.id);
+    }
+    const friendFilter = friendsOnly && friendIds.length
+      ? { userId: { in: friendIds } }
+      : {};
 
     // Excluded already-reviewed items
     let reviewedIds = [];
@@ -199,7 +220,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     const ratings = await prisma.review.groupBy({
       by: ['mediaItemId'],
-      where: { mediaItemId: { in: itemIds }, visibility: 'PUBLIC' },
+      where: { mediaItemId: { in: itemIds }, visibility: 'PUBLIC', ...friendFilter },
       _avg: { rating: true },
       _count: { rating: true },
     });
@@ -266,7 +287,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (allBookIds.length) {
         const bookRatings = await prisma.review.groupBy({
           by: ['mediaItemId'],
-          where: { mediaItemId: { in: allBookIds }, visibility: 'PUBLIC' },
+          where: { mediaItemId: { in: allBookIds }, visibility: 'PUBLIC', ...friendFilter },
           _avg: { rating: true },
           _count: { rating: true },
         });
@@ -323,6 +344,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       total,
       page: parseInt(page),
       pages: Math.ceil(total / take),
+      friendsOnly: friendsOnly && friendIds.length > 0,
     });
   } catch (err) { next(err); }
 });

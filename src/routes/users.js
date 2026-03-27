@@ -322,7 +322,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // ── Helper: build a ranked list from person/genre occurrences ─────────────
     // Takes a map of { id/name -> { name, slug?, ratings: [] } }
     // Returns array sorted by avgRating desc, filtered to min 2 entries
-    function rankEntries(map, minCount = 2, topN = 5) {
+    function rankEntries(map, minCount = 1, topN = 3) {
       return Object.values(map)
         .filter(entry => entry.ratings.length >= minCount)
         .map(entry => ({
@@ -335,41 +335,48 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         .slice(0, topN);
     }
 
-    // ── Accumulate ratings per director, actor, author, genre ─────────────────
+    // ── Accumulate ratings per director, actor, author, genre — split by media type ──
+    // We track per-type counts so we can apply a dynamic threshold:
+    // to qualify as "favorite", a genre/person must appear in at least
+    // 1/10th of all reviews in that type (min 1), making the bar proportional.
     const directors = {}, actors = {}, authors = {}, genres = {};
+    const countByType = {}; // total reviews per media type
 
     for (const review of reviews) {
       const item   = review.mediaItem;
       const rating = review.rating;
+      const type   = item.mediaType;
 
-      // Directors
+      countByType[type] = (countByType[type] || 0) + 1;
+
       for (const p of (item.directors || [])) {
-        if (!directors[p.id]) directors[p.id] = { name: p.name, slug: p.slug, ratings: [] };
+        if (!directors[p.id]) directors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {} };
         directors[p.id].ratings.push(rating);
+        directors[p.id].types[type] = (directors[p.id].types[type] || 0) + 1;
       }
-
-      // Cast / actors
       for (const p of (item.cast || [])) {
-        if (!actors[p.id]) actors[p.id] = { name: p.name, slug: p.slug, ratings: [] };
+        if (!actors[p.id]) actors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {} };
         actors[p.id].ratings.push(rating);
+        actors[p.id].types[type] = (actors[p.id].types[type] || 0) + 1;
       }
-
-      // Authors (books)
       for (const p of (item.authors || [])) {
-        if (!authors[p.id]) authors[p.id] = { name: p.name, slug: p.slug, ratings: [] };
+        if (!authors[p.id]) authors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {} };
         authors[p.id].ratings.push(rating);
+        authors[p.id].types[type] = (authors[p.id].types[type] || 0) + 1;
       }
-
-      // Genres — stored as string array, so key by the genre string itself
       for (const g of (item.genres || [])) {
-        if (!genres[g]) genres[g] = { name: g, ratings: [] };
+        if (!genres[g]) genres[g] = { name: g, ratings: [], types: {} };
         genres[g].ratings.push(rating);
+        genres[g].types[type] = (genres[g].types[type] || 0) + 1;
       }
     }
 
-    // ── Build per-media-type genre breakdowns ─────────────────────────────────
-    // Also compute genre favorites per type so we can show
-    // "Favorite Movie Genre: Fantasy" separately from "Favorite Book Genre: Mystery"
+    // Dynamic threshold: at least 1/10th of reviews in that type, minimum 1
+    function threshold(typeCount) {
+      return Math.max(1, Math.floor(typeCount / 10));
+    }
+
+    // ── Build per-media-type genre breakdowns with dynamic thresholds ──────────
     const genresByType = {};
     for (const review of reviews) {
       const type = review.mediaItem.mediaType;
@@ -380,18 +387,43 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       }
     }
     const favoriteGenreByType = {};
+    const mostReviewedGenreByType = {};
     for (const [type, gMap] of Object.entries(genresByType)) {
-      const ranked = rankEntries(gMap, 1, 1); // min 1 for per-type
-      if (ranked.length) favoriteGenreByType[type] = ranked[0];
+      const minCount = threshold(countByType[type] || 0);
+      const byRating = rankEntries(gMap, minCount, 3);
+      const byCount  = rankByCount(gMap, minCount, 3);
+      if (byRating.length) favoriteGenreByType[type]     = byRating;
+      if (byCount.length)  mostReviewedGenreByType[type] = byCount;
+    }
+
+    // Overall person thresholds — use total review count / 10
+    const totalThreshold = threshold(reviews.length);
+
+    // ── Most reviewed variants — same data, sorted by count not avgRating ───────
+    function rankByCount(map, minCount = 1, topN = 3) {
+      return Object.values(map)
+        .filter(entry => entry.ratings.length >= minCount)
+        .map(entry => ({
+          name:      entry.name,
+          slug:      entry.slug || null,
+          count:     entry.ratings.length,
+          avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
+        }))
+        .sort((a, b) => b.count - a.count || b.avgRating - a.avgRating)
+        .slice(0, topN);
     }
 
     res.json({
-      totalReviews: reviews.length,
-      favoriteDirectors: rankEntries(directors),
-      favoriteActors:    rankEntries(actors),
-      favoriteAuthors:   rankEntries(authors),
-      favoriteGenres:    rankEntries(genres),
+      totalReviews:       reviews.length,
+      favoriteDirectors:  rankEntries(directors),
+      favoriteActors:     rankEntries(actors),
+      favoriteAuthors:    rankEntries(authors),
+      favoriteGenres:     rankEntries(genres),
       favoriteGenreByType,
+      mostReviewedDirectors: rankByCount(directors),
+      mostReviewedActors:    rankByCount(actors),
+      mostReviewedAuthors:   rankByCount(authors),
+      mostReviewedGenres:    rankByCount(genres),
     });
   } catch (err) { next(err); }
 });
