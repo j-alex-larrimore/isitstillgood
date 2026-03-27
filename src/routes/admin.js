@@ -751,4 +751,104 @@ router.get('/media/by-slug/:slug', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ─── GET /api/admin/lookup/tmdb-collection ─── Search TMDB collections ──────
+router.get('/lookup/tmdb-collection', requireAdmin, async (req, res, next) => {
+  const token = process.env.TMDB_READ_ACCESS_TOKEN;
+  if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured' });
+  const q = req.query.q?.trim();
+  if (!q) return res.status(400).json({ error: 'Query required' });
+  try {
+    // Search for collections
+    const r = await fetch(
+      `https://api.themoviedb.org/3/search/collection?query=${encodeURIComponent(q)}&language=en-US`,
+      { headers: { Authorization: `Bearer ${token}`, accept: 'application/json' } }
+    );
+    const data = await r.json();
+    const results = (data.results || []).slice(0, 8).map(c => ({
+      id:       c.id,
+      name:     c.name,
+      overview: c.overview,
+      imageUrl: c.poster_path ? `https://image.tmdb.org/t/p/w200${c.poster_path}` : null,
+    }));
+    res.json(results);
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/lookup/tmdb-collection/:id ─── Get all movies in collection ──
+router.get('/lookup/tmdb-collection/:id', requireAdmin, async (req, res, next) => {
+  const token = process.env.TMDB_READ_ACCESS_TOKEN;
+  if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured' });
+  try {
+    const r = await fetch(
+      `https://api.themoviedb.org/3/collection/${req.params.id}?language=en-US`,
+      { headers: { Authorization: `Bearer ${token}`, accept: 'application/json' } }
+    );
+    const data = await r.json();
+    const movies = await Promise.all((data.parts || [])
+      .sort((a, b) => (a.release_date || '').localeCompare(b.release_date || ''))
+      .map(async m => {
+        // Fetch full details including credits for each movie
+        const dr = await fetch(
+          `https://api.themoviedb.org/3/movie/${m.id}?append_to_response=credits&language=en-US`,
+          { headers: { Authorization: `Bearer ${token}`, accept: 'application/json' } }
+        );
+        const detail = await dr.json();
+        return {
+          tmdbId:      String(m.id),
+          title:       detail.title,
+          releaseYear: detail.release_date ? parseInt(detail.release_date) : null,
+          description: detail.overview || null,
+          imageUrl:    detail.poster_path ? `https://image.tmdb.org/t/p/w500${detail.poster_path}` : null,
+          tmdbRating:  detail.vote_average ? Math.round(detail.vote_average * 10) / 10 : null,
+          genres:      (detail.genres || []).map(g => g.name).slice(0, 5),
+          directors:   (detail.credits?.crew || []).filter(c => c.job === 'Director').map(c => c.name),
+          cast:        (detail.credits?.cast || []).slice(0, 20).map(c => c.name),
+        };
+      })
+    );
+    res.json({ name: data.name, movies });
+  } catch (err) { next(err); }
+});
+
+// ─── POST /api/admin/bulk-import ─── Import multiple movies at once ──────────
+router.post('/bulk-import', requireAdmin, async (req, res, next) => {
+  const { movies, tags } = req.body; // movies: array of movie objects from TMDB
+  if (!Array.isArray(movies) || !movies.length) {
+    return res.status(400).json({ error: 'movies array required' });
+  }
+  const results = { added: [], skipped: [], failed: [] };
+  for (const m of movies) {
+    try {
+      // Skip if already exists by tmdbId
+      const existing = await prisma.mediaItem.findFirst({ where: { tmdbId: m.tmdbId } });
+      if (existing) { results.skipped.push(m.title); continue; }
+
+      const finalTitle = m.title;
+      const slug = await uniqueSlug(slugify(finalTitle, m.releaseYear));
+      await prisma.mediaItem.create({
+        data: {
+          mediaType:   'MOVIE',
+          title:       finalTitle,
+          slug,
+          releaseYear: m.releaseYear,
+          description: m.description,
+          imageUrl:    m.imageUrl,
+          genres:      m.genres || [],
+          tags:        [...(tags || []), ...(m.extraTags || [])]
+                       .map(t => t.trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')),
+          tmdbId:      m.tmdbId,
+          tmdbRating:  m.tmdbRating,
+          directors:   await connectPersons(m.directors || []),
+          cast:        await connectPersons(m.cast || []),
+        },
+      });
+      results.added.push(m.title);
+    } catch (err) {
+      results.failed.push({ title: m.title, error: err.message });
+    }
+  }
+  res.json(results);
+});
+
 module.exports = router;

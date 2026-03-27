@@ -156,8 +156,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ...(textFilter),
       ...(personFilter),
       ...(excludeReviewed && reviewedIds.length && { id: { notIn: reviewedIds } }),
-      // If reviewedBy is set, restrict to items that user has reviewed
       ...(reviewedByIds !== undefined && { id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } }),
+      // Exclude TV parent shows from search results — they exist only as containers
+      // for seasons and aren't directly reviewable. Seasons are shown instead.
+      // Exception: browse page sets type=TV_SHOW explicitly and wants parents only.
+      ...(!type && { NOT: { AND: [{ mediaType: 'TV_SHOW' }, { parentId: null }] } }),
     };
 
     // For 'rating' sort we can't use Prisma orderBy because avgRating is computed
