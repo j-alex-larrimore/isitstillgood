@@ -111,7 +111,9 @@ model User {
   googleId        String?   @unique
   googleEmail     String?
   defaultVisibility ReviewVisibility @default(PUBLIC)
-  profilePublic   Boolean   @default(false)  // false = friends only, true = public
+  profilePublic   Boolean   @default(false)
+  tasteThreshold  Int       @default(2)
+  ignoredGenres   String[]  @default([])  // false = friends only, true = public
   reviews         Review[]
   reactions       Reaction[]
   comments        Comment[]

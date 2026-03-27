@@ -18,12 +18,12 @@ router.patch('/me', requireAuth, [
   body('defaultVisibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
-  const { displayName, bio, profilePublic, defaultVisibility } = req.body;
+  const { displayName, bio, profilePublic, defaultVisibility, tasteThreshold } = req.body;
   try {
     const user = await prisma.user.update({
       where: { id: req.user.id },
-      data: { displayName, bio, profilePublic, defaultVisibility },
-      select: { id: true, username: true, displayName: true, bio: true, avatarUrl: true, profilePublic: true, defaultVisibility: true },
+      data: { displayName, bio, profilePublic, defaultVisibility, ...(tasteThreshold !== undefined && { tasteThreshold: parseInt(tasteThreshold) }) },
+      select: { id: true, username: true, displayName: true, bio: true, avatarUrl: true, profilePublic: true, defaultVisibility: true, tasteThreshold: true },
     });
     res.json(user);
   } catch (err) { next(err); }
@@ -282,7 +282,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // Look up the target user
     const target = await prisma.user.findUnique({
       where: { username: req.params.username },
-      select: { id: true, username: true, displayName: true, profilePublic: true },
+      select: { id: true, username: true, displayName: true, profilePublic: true, ignoredGenres: true },
     });
     if (!target) return res.status(404).json({ error: 'User not found' });
 
@@ -373,6 +373,9 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     const directors = {}, actors = {}, authors = {}, genres = {};
     const countByType = {}; // total reviews per media type
 
+    // Build a lowercase set of ignored genres for fast lookup
+    const ignoredSet = new Set((target.ignoredGenres || []).map(g => g.toLowerCase()));
+
     // mediaItem summary for linking from taste cards
     const itemSummary = (item, rating) => ({
       id: item.id, title: item.title, slug: item.slug,
@@ -406,6 +409,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         authors[p.id].items.push(itemSummary(item, rating));
       }
       for (const g of (item.genres || [])) {
+        if (ignoredSet.has(g.toLowerCase())) continue; // skip user-ignored genres
         if (!genres[g]) genres[g] = { name: g, ratings: [], types: {}, items: [] };
         genres[g].ratings.push(rating);
         genres[g].types[type] = (genres[g].types[type] || 0) + 1;
@@ -424,6 +428,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       const type = review.mediaItem.mediaType;
       if (!genresByType[type]) genresByType[type] = {};
       for (const g of (review.mediaItem.genres || [])) {
+        if (ignoredSet.has(g.toLowerCase())) continue;
         if (!genresByType[type][g]) genresByType[type][g] = { name: g, ratings: [] };
         genresByType[type][g].ratings.push(review.rating);
       }
@@ -460,6 +465,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // user-selected threshold dynamically without extra API calls
     res.json({
       totalReviews:          reviews.length,
+      ignoredGenres:         target.ignoredGenres || [],
       favoriteDirectors:     rankEntries(directors, 1, 20),
       favoriteActors:        rankEntries(actors,    1, 20),
       favoriteAuthors:       rankEntries(authors,   1, 20),
@@ -472,6 +478,38 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       mostReviewedGenreByType,
       countByType,
     });
+  } catch (err) { next(err); }
+});
+
+
+// ─── GET /api/users/:username/ignored-genres ─────────────────────────────────
+router.get('/:username/ignored-genres', requireAuth, async (req, res, next) => {
+  try {
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ error: 'Can only view your own ignored genres' });
+    }
+    const user = await prisma.user.findUnique({
+      where: { username: req.params.username },
+      select: { ignoredGenres: true },
+    });
+    res.json(user?.ignoredGenres || []);
+  } catch (err) { next(err); }
+});
+
+// ─── PUT /api/users/:username/ignored-genres ─────────────────────────────────
+router.put('/:username/ignored-genres', requireAuth, async (req, res, next) => {
+  try {
+    if (req.user.username !== req.params.username) {
+      return res.status(403).json({ error: 'Can only update your own ignored genres' });
+    }
+    const { genres } = req.body;
+    if (!Array.isArray(genres)) return res.status(400).json({ error: 'genres must be an array' });
+    const user = await prisma.user.update({
+      where: { username: req.params.username },
+      data: { ignoredGenres: genres },
+      select: { ignoredGenres: true },
+    });
+    res.json(user.ignoredGenres);
   } catch (err) { next(err); }
 });
 
