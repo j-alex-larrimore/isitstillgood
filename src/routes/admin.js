@@ -534,13 +534,15 @@ function filterOpenLibraryGenres(subjects) {
 // ─── GET /api/admin/lookup/openlibrary ───────────────────────────────────────
 // Searches Open Library by title and returns candidates for books.
 router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
-  const { q } = req.query;
+  const { q, year, author } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
 
   try {
-    const searchRes = await fetch(
-      `https://openlibrary.org/search.json?title=${encodeURIComponent(q)}&limit=5&fields=key,title,author_name,first_publish_year,cover_i,subject`
-    );
+    // Build query — can filter by author and/or year
+    let searchUrl = `https://openlibrary.org/search.json?title=${encodeURIComponent(q)}&limit=20&fields=key,title,author_name,first_publish_year,cover_i,subject`;
+    if (author) searchUrl += `&author=${encodeURIComponent(author)}`;
+    if (year)   searchUrl += `&first_publish_year=${encodeURIComponent(year)}`;
+    const searchRes = await fetch(searchUrl);
     if (!searchRes.ok) throw new Error('Open Library search failed');
     const data = await searchRes.json();
 
@@ -681,10 +683,19 @@ router.get('/lookup/igdb', requireAdmin, async (req, res, next) => {
         'Content-Type':  'text/plain',
       },
       // Search by name, get cover art and basic info
-      body: `search "${q}"; fields name,cover.url,first_release_date,genres.name,involved_companies.company.name,summary,rating; limit 5;`,
+      body: `search "${q}"; fields name,cover.url,first_release_date,genres.name,involved_companies.company.name,summary,rating; limit 15;`,
     });
     if (!searchRes.ok) throw new Error('IGDB search failed');
-    const games = await searchRes.json();
+    let games = await searchRes.json();
+
+    // Filter by year if provided (IGDB doesn't support year in search query)
+    if (req.query.year) {
+      const filterYear = parseInt(req.query.year);
+      games = games.filter(g => {
+        if (!g.first_release_date) return false;
+        return new Date(g.first_release_date * 1000).getFullYear() === filterYear;
+      });
+    }
 
     const results = games.map(game => ({
       igdbId:      String(game.id),
