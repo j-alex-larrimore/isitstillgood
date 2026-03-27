@@ -423,21 +423,22 @@ router.get('/lookup/tmdb', requireAdmin, async (req, res, next) => {
   const token = process.env.TMDB_READ_ACCESS_TOKEN;
   if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured in Railway Variables' });
 
-  const { q, type = 'movie' } = req.query;
+  const { q, type = 'movie', year } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
 
   try {
-    // Search TMDB for matching titles
+    // Search TMDB for matching titles — optionally filter by year
     const endpoint = type === 'tv' ? 'tv' : 'movie';
+    const yearParam = year ? `&${type === 'tv' ? 'first_air_date_year' : 'year'}=${year}` : '';
     const searchRes = await fetch(
-      `https://api.themoviedb.org/3/search/${endpoint}?query=${encodeURIComponent(q)}&include_adult=false`,
+      `https://api.themoviedb.org/3/search/${endpoint}?query=${encodeURIComponent(q)}&include_adult=false${yearParam}`,
       { headers: { 'Authorization': `Bearer ${token}` } }
     );
     if (!searchRes.ok) throw new Error('TMDB search failed');
     const searchData = await searchRes.json();
 
-    // Return top 5 candidates with enough info to identify them
-    const results = (searchData.results || []).slice(0, 5).map(item => ({
+    // Return top 15 candidates with enough info to identify them
+    const results = (searchData.results || []).slice(0, 15).map(item => ({
       tmdbId:      String(item.id),
       title:       item.title || item.name,
       releaseYear: (item.release_date || item.first_air_date || '').split('-')[0],
@@ -543,7 +544,7 @@ router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
     if (!searchRes.ok) throw new Error('Open Library search failed');
     const data = await searchRes.json();
 
-    const results = (data.docs || []).slice(0, 5).map(item => ({
+    const results = (data.docs || []).slice(0, 15).map(item => ({
       openLibraryId: item.key?.replace('/works/', ''), // e.g. OL45804W
       title:         item.title,
       authors:       item.author_name || [],
@@ -765,7 +766,7 @@ router.get('/lookup/tmdb-collection', requireAdmin, async (req, res, next) => {
       { headers: { Authorization: `Bearer ${token}`, accept: 'application/json' } }
     );
     const data = await r.json();
-    const results = (data.results || []).slice(0, 8).map(c => ({
+    const results = (data.results || []).slice(0, 15).map(c => ({
       id:       c.id,
       name:     c.name,
       overview: c.overview,
