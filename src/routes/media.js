@@ -188,6 +188,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       seriesRepresentatives = [...seriesMap.values()];
     }
 
+    // For book rating/lowest sort: fetch ALL standalones so we can sort them
+    // together with series reps before paginating. Other sorts paginate at DB level.
+    const bookRatingSort = type === 'BOOK' && !req.query.series && (sort === 'rating' || sort === 'lowest');
+
     const [items, total] = await Promise.all([
       prisma.mediaItem.findMany({
         where,
@@ -196,13 +200,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
           directors: { select: { id: true, name: true, slug: true }, take: 100 },
           authors:   { select: { id: true, name: true, slug: true }, take: 100 },
           cast:      { select: { id: true, name: true, slug: true }, take: 100 },
-          // Include parent show info so season entries can display their show name
-          // and so the frontend can identify seasons vs parent shows
           parent:    { select: { id: true, title: true, slug: true } },
         },
         orderBy,
-        skip: (parseInt(page) - 1) * take,
-        take,
+        // For book rating sort, fetch all — pagination handled in JS after sort
+        skip: bookRatingSort ? 0 : (parseInt(page) - 1) * take,
+        take: bookRatingSort ? undefined : take,
       }),
       prisma.mediaItem.count({ where }),
     ]);
@@ -306,23 +309,29 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // If sort=rating or sort=lowest, sort by avgRating (desc or asc)
-    // Items with no ratings sort to the bottom in both cases
+    // Helper to get the effective rating for an item (series aggregate or individual)
+    function effectiveRating(i) {
+      return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series)
+        ? (bookSeriesRatingMap[i.seriesName]?.avg || ratingMap[i.id]?.avg || null)
+        : (ratingMap[i.id]?.avg || null);
+    }
+
+    // For rating/lowest sort: sort ALL items together (series + standalones) then paginate.
+    // We must do this in JS since avgRating is computed post-fetch and can't be done in DB.
     let sortedItems = finalItems;
     if (sort === 'rating' || sort === 'lowest') {
       sortedItems = [...finalItems].sort((a, b) => {
-        const aRating = (a.mediaType === 'BOOK' && a.seriesName && !req.query.series)
-          ? (bookSeriesRatingMap[a.seriesName]?.avg || ratingMap[a.id]?.avg || null)
-          : (ratingMap[a.id]?.avg || null);
-        const bRating = (b.mediaType === 'BOOK' && b.seriesName && !req.query.series)
-          ? (bookSeriesRatingMap[b.seriesName]?.avg || ratingMap[b.id]?.avg || null)
-          : (ratingMap[b.id]?.avg || null);
-        // Items with no rating always go last
+        const aRating = effectiveRating(a);
+        const bRating = effectiveRating(b);
+        // Items with no rating always go last regardless of sort direction
         if (aRating === null && bRating === null) return 0;
         if (aRating === null) return 1;
-        if (bRating === null) return 1;
+        if (bRating === null) return -1;
         return sort === 'lowest' ? aRating - bRating : bRating - aRating;
       });
+      // Re-apply pagination after sorting
+      const pageNum = parseInt(page) - 1;
+      sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
     }
 
     res.json({
