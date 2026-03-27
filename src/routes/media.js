@@ -306,17 +306,22 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // If sort=rating, sort finalItems by avgRating desc (items with no rating go last)
+    // If sort=rating or sort=lowest, sort by avgRating (desc or asc)
+    // Items with no ratings sort to the bottom in both cases
     let sortedItems = finalItems;
-    if (sort === 'rating') {
+    if (sort === 'rating' || sort === 'lowest') {
       sortedItems = [...finalItems].sort((a, b) => {
         const aRating = (a.mediaType === 'BOOK' && a.seriesName && !req.query.series)
-          ? (bookSeriesRatingMap[a.seriesName]?.avg || ratingMap[a.id]?.avg || 0)
-          : (ratingMap[a.id]?.avg || 0);
+          ? (bookSeriesRatingMap[a.seriesName]?.avg || ratingMap[a.id]?.avg || null)
+          : (ratingMap[a.id]?.avg || null);
         const bRating = (b.mediaType === 'BOOK' && b.seriesName && !req.query.series)
-          ? (bookSeriesRatingMap[b.seriesName]?.avg || ratingMap[b.id]?.avg || 0)
-          : (ratingMap[b.id]?.avg || 0);
-        return bRating - aRating;
+          ? (bookSeriesRatingMap[b.seriesName]?.avg || ratingMap[b.id]?.avg || null)
+          : (ratingMap[b.id]?.avg || null);
+        // Items with no rating always go last
+        if (aRating === null && bRating === null) return 0;
+        if (aRating === null) return 1;
+        if (bRating === null) return 1;
+        return sort === 'lowest' ? aRating - bRating : bRating - aRating;
       });
     }
 
