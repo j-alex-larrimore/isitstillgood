@@ -355,9 +355,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
       }),
-      total,
+      // For book rating sort, total includes series reps which aren't in the DB count
+      total: bookRatingSort ? finalItems.length : total,
       page: parseInt(page),
-      pages: Math.ceil(total / take),
+      pages: bookRatingSort ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
       friendsOnly: friendsOnly && friendIds.length > 0,
     });
   } catch (err) { next(err); }
