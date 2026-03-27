@@ -97,15 +97,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ...(type  && { mediaType: type }),
       // For TV shows: only return parent entries (parentId = null).
       ...(type === 'TV_SHOW' && { parentId: null }),
-      // For books browsing without a series filter: show standalones + lowest-numbered
-      // book per series. The actual filtering to lowest-per-series happens post-fetch.
-      // We can't do it in a single Prisma where clause efficiently, so we fetch
-      // all books and deduplicate by series after — handled below before res.json.
+      // For books browsing without a series filter: show standalones and unnumbered books.
+      // Series books are handled separately below — we fetch all of them and deduplicate
+      // to the lowest-numbered per series, then merge back before pagination.
       ...(type === 'BOOK' && !req.query.series && {
         OR: [
-          { seriesName: null },   // standalone books
-          { seriesNumber: { not: null } }, // any numbered series book (deduplicated below)
-          { seriesNumber: null },          // unnumbered books
+          { seriesName: null },    // standalone books
+          { seriesNumber: null },  // unnumbered books
         ]
       }),
       // Exact year match (legacy) OR year range if from/to are provided
@@ -141,6 +139,34 @@ router.get('/', optionalAuth, async (req, res, next) => {
       year:    [{ releaseYear: 'desc' }],
     }[sort] || [{ createdAt: 'desc' }];
 
+    // For book browse without series filter: fetch ONE representative per series
+    // by getting all series books and deduplicating to the lowest seriesNumber.
+    // This avoids pagination issues where book 2 would appear on page 2 without book 1.
+    let seriesRepresentatives = [];
+    if (type === 'BOOK' && !req.query.series) {
+      const allSeriesEntries = await prisma.mediaItem.findMany({
+        where: {
+          mediaType: 'BOOK',
+          seriesName: { not: null },
+          seriesNumber: { not: null },
+        },
+        include: {
+          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          authors: { select: { id: true, name: true, slug: true }, take: 100 },
+          parent:  { select: { id: true, title: true, slug: true } },
+        },
+      });
+      // Deduplicate to lowest seriesNumber per seriesName
+      const seriesMap = new Map();
+      for (const book of allSeriesEntries) {
+        const existing = seriesMap.get(book.seriesName);
+        if (!existing || (book.seriesNumber ?? Infinity) < (existing.seriesNumber ?? Infinity)) {
+          seriesMap.set(book.seriesName, book);
+        }
+      }
+      seriesRepresentatives = [...seriesMap.values()];
+    }
+
     const [items, total] = await Promise.all([
       prisma.mediaItem.findMany({
         where,
@@ -160,31 +186,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       prisma.mediaItem.count({ where }),
     ]);
 
-    // For book browse without series filter: deduplicate to keep only the
-    // lowest-numbered book per series (the series representative card).
-    // Must happen BEFORE rating computation so finalItems is defined.
-    let deduplicatedItems = items;
-    if (type === 'BOOK' && !req.query.series) {
-      const seenSeries = new Map();
-      const result = [];
-      for (const item of items) {
-        if (!item.seriesName) {
-          result.push(item);
-        } else {
-          const existing = seenSeries.get(item.seriesName);
-          if (!existing) {
-            seenSeries.set(item.seriesName, item);
-          } else {
-            const existingNum = existing.seriesNumber ?? Infinity;
-            const itemNum     = item.seriesNumber     ?? Infinity;
-            if (itemNum < existingNum) seenSeries.set(item.seriesName, item);
-          }
-        }
-      }
-      for (const [, winner] of seenSeries) result.push(winner);
-      deduplicatedItems = result;
-    }
-    const finalItems = deduplicatedItems;
+    // Merge standalone/unnumbered books with series representatives
+    let finalItems = type === 'BOOK' && !req.query.series
+      ? [...items, ...seriesRepresentatives]
+      : items;
 
     // Compute avg rating per item.
     const itemIds = finalItems.map(i => i.id);
