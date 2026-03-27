@@ -172,7 +172,7 @@ router.post('/media', requireAdmin, [
         imageUrl:        imageUrl    || null,
         genres:          genres      || [],
         // Tags — franchise, studio, network etc. e.g. "Marvel", "HBO", "Star Wars"
-        tags:            tags        || [],
+        tags:            (tags || []).map(t => t.trim().replace(/\b\w/g, c => c.toUpperCase())),
         excludedCast:    excludedCast || [],  // cast members who left before this season
         tmdbId:          tmdbId      || null,
         goodreadsId:     goodreadsId || null,

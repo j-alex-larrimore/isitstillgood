@@ -140,7 +140,17 @@ router.get('/', optionalAuth, async (req, res, next) => {
       } : {}),
       ...(genreFilter),
       // Tag filter — same pattern as genre, checks if the tags array contains the value
-      ...(req.query.tag ? { tags: { has: req.query.tag } } : {}),
+      // Tags are stored in title case — normalize search input to title case for reliable matching
+      // Also include the raw input as a fallback for existing data that may not be normalized
+      ...(req.query.tag ? {
+        tags: {
+          hasSome: [
+            req.query.tag.trim(),
+            req.query.tag.trim().toLowerCase(),
+            req.query.tag.trim().replace(/\b\w/g, c => c.toUpperCase()),
+          ]
+        }
+      } : {}),
       // Series filter — shows all books in a named series
       ...(req.query.series ? { seriesName: req.query.series } : {}),
       ...(textFilter),
