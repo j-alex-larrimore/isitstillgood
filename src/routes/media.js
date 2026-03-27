@@ -147,7 +147,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
           hasSome: [
             req.query.tag.trim(),
             req.query.tag.trim().toLowerCase(),
-            req.query.tag.trim().replace(/\b\w/g, c => c.toUpperCase()),
+            req.query.tag.trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' '),
           ]
         }
       } : {}),

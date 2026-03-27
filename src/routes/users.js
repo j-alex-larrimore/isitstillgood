@@ -314,9 +314,9 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         rating: true,
         mediaItem: {
           select: {
-            mediaType: true,
+            id: true, title: true, slug: true,
+            mediaType: true, releaseYear: true, imageUrl: true,
             genres: true,
-            // Relations — we need names of people associated with each item
             directors: { select: { id: true, name: true, slug: true } },
             cast:      { select: { id: true, name: true, slug: true } },
             authors:   { select: { id: true, name: true, slug: true } },
@@ -328,14 +328,15 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // ── Helper: build a ranked list from person/genre occurrences ─────────────
     // Takes a map of { id/name -> { name, slug?, ratings: [] } }
     // Returns array sorted by avgRating desc, filtered to min 2 entries
-    function rankEntries(map, minCount = 1, topN = 3) {
+    function rankEntries(map, minCount = 1, topN = 5) {
       return Object.values(map)
         .filter(entry => entry.ratings.length >= minCount)
         .map(entry => ({
-          name:     entry.name,
-          slug:     entry.slug || null,
-          count:    entry.ratings.length,
+          name:      entry.name,
+          slug:      entry.slug || null,
+          count:     entry.ratings.length,
           avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
+          items:     entry.items || [],
         }))
         .sort((a, b) => b.avgRating - a.avgRating || b.count - a.count)
         .slice(0, topN);
@@ -348,6 +349,13 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     const directors = {}, actors = {}, authors = {}, genres = {};
     const countByType = {}; // total reviews per media type
 
+    // mediaItem summary for linking from taste cards
+    const itemSummary = (item, rating) => ({
+      id: item.id, title: item.title, slug: item.slug,
+      mediaType: item.mediaType, imageUrl: item.imageUrl,
+      releaseYear: item.releaseYear, rating,
+    });
+
     for (const review of reviews) {
       const item   = review.mediaItem;
       const rating = review.rating;
@@ -356,24 +364,28 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       countByType[type] = (countByType[type] || 0) + 1;
 
       for (const p of (item.directors || [])) {
-        if (!directors[p.id]) directors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {} };
+        if (!directors[p.id]) directors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {}, items: [] };
         directors[p.id].ratings.push(rating);
         directors[p.id].types[type] = (directors[p.id].types[type] || 0) + 1;
+        directors[p.id].items.push(itemSummary(item, rating));
       }
       for (const p of (item.cast || [])) {
-        if (!actors[p.id]) actors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {} };
+        if (!actors[p.id]) actors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {}, items: [] };
         actors[p.id].ratings.push(rating);
         actors[p.id].types[type] = (actors[p.id].types[type] || 0) + 1;
+        actors[p.id].items.push(itemSummary(item, rating));
       }
       for (const p of (item.authors || [])) {
-        if (!authors[p.id]) authors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {} };
+        if (!authors[p.id]) authors[p.id] = { name: p.name, slug: p.slug, ratings: [], types: {}, items: [] };
         authors[p.id].ratings.push(rating);
         authors[p.id].types[type] = (authors[p.id].types[type] || 0) + 1;
+        authors[p.id].items.push(itemSummary(item, rating));
       }
       for (const g of (item.genres || [])) {
-        if (!genres[g]) genres[g] = { name: g, ratings: [], types: {} };
+        if (!genres[g]) genres[g] = { name: g, ratings: [], types: {}, items: [] };
         genres[g].ratings.push(rating);
         genres[g].types[type] = (genres[g].types[type] || 0) + 1;
+        genres[g].items.push(itemSummary(item, rating));
       }
     }
 
@@ -406,7 +418,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     const totalThreshold = threshold(reviews.length);
 
     // ── Most reviewed variants — same data, sorted by count not avgRating ───────
-    function rankByCount(map, minCount = 1, topN = 3) {
+    function rankByCount(map, minCount = 1, topN = 5) {
       return Object.values(map)
         .filter(entry => entry.ratings.length >= minCount)
         .map(entry => ({
@@ -414,22 +426,27 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           slug:      entry.slug || null,
           count:     entry.ratings.length,
           avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
+          items:     entry.items || [],
         }))
         .sort((a, b) => b.count - a.count || b.avgRating - a.avgRating)
         .slice(0, topN);
     }
 
+    // Return all entries with minCount=1 — the frontend filters by the
+    // user-selected threshold dynamically without extra API calls
     res.json({
-      totalReviews:       reviews.length,
-      favoriteDirectors:  rankEntries(directors),
-      favoriteActors:     rankEntries(actors),
-      favoriteAuthors:    rankEntries(authors),
-      favoriteGenres:     rankEntries(genres),
+      totalReviews:          reviews.length,
+      favoriteDirectors:     rankEntries(directors, 1, 20),
+      favoriteActors:        rankEntries(actors,    1, 20),
+      favoriteAuthors:       rankEntries(authors,   1, 20),
+      mostReviewedDirectors: rankByCount(directors, 1, 20),
+      mostReviewedActors:    rankByCount(actors,    1, 20),
+      mostReviewedAuthors:   rankByCount(authors,   1, 20),
+      favoriteGenres:        rankEntries(genres,    1, 20),
+      mostReviewedGenres:    rankByCount(genres,    1, 20),
       favoriteGenreByType,
-      mostReviewedDirectors: rankByCount(directors),
-      mostReviewedActors:    rankByCount(actors),
-      mostReviewedAuthors:   rankByCount(authors),
-      mostReviewedGenres:    rankByCount(genres),
+      mostReviewedGenreByType,
+      countByType,
     });
   } catch (err) { next(err); }
 });
