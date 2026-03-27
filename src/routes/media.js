@@ -179,7 +179,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       popular: [{ reviews: { _count: 'desc' } }],
       recent:  [{ createdAt: 'desc' }],
       title:   [{ title: 'asc' }],
-      year:    [{ releaseYear: 'desc' }],
+      year:    [{ releaseYear: 'asc' }],
     }[sort] || [{ createdAt: 'desc' }];
 
     // For book browse without series filter: fetch ONE representative per series
