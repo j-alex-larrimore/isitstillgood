@@ -413,7 +413,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         orderBy: { seriesNumber: 'asc' },
         select: { id: true, slug: true },
       });
-      isBookSeries  = lowestInSeries?.id === item.id;
+      // ?book=1 means "show this as an individual book" even if it's the series representative
+      const forceIndividual = req.query.book === '1';
+      isBookSeries  = !forceIndividual && lowestInSeries?.id === item.id;
       seriesRepSlug = lowestInSeries?.slug || null;
     }
     const isSeriesParent = isTvParent || isBookSeries;
