@@ -188,9 +188,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       seriesRepresentatives = [...seriesMap.values()];
     }
 
-    // For book rating/lowest sort: fetch ALL standalones so we can sort them
-    // together with series reps before paginating. Other sorts paginate at DB level.
-    const bookRatingSort = type === 'BOOK' && !req.query.series && (sort === 'rating' || sort === 'lowest');
+    // For rating/lowest sort: fetch ALL items so we can sort them together
+    // and paginate in JS. This ensures unrated items always appear at the bottom
+    // of the last page rather than being pushed off by pagination.
+    const ratingSort = sort === 'rating' || sort === 'lowest';
 
     const [items, total] = await Promise.all([
       prisma.mediaItem.findMany({
@@ -203,12 +204,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
           parent:    { select: { id: true, title: true, slug: true } },
         },
         orderBy,
-        // For book rating sort, fetch all — pagination handled in JS after sort
-        skip: bookRatingSort ? 0 : (parseInt(page) - 1) * take,
-        take: bookRatingSort ? undefined : take,
+        // For rating sort, fetch all — pagination handled in JS after sort
+        skip: ratingSort ? 0 : (parseInt(page) - 1) * take,
+        take: ratingSort ? undefined : take,
       }),
       prisma.mediaItem.count({ where }),
     ]);
+    const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series;
 
     // Merge standalone/unnumbered books with series representatives
     let finalItems = type === 'BOOK' && !req.query.series
@@ -231,43 +233,47 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     let seasonCountMap = {};
 
-    // For TV parent shows, also aggregate ratings from all child seasons
+    // For TV parent shows, aggregate ratings from all child seasons.
+    // Fetch season IDs first, then filter reviews by those IDs directly —
+    // groupBy doesn't support relation filters reliably in Prisma.
     if (tvParentIds.length) {
-      const seasonRatings = await prisma.review.groupBy({
-        by: ['mediaItemId'],
-        where: {
-          visibility: 'PUBLIC',
-          mediaItem: { parentId: { in: tvParentIds } },
-        },
-        _avg: { rating: true },
-        _count: { rating: true },
-      });
-      // Map season mediaItemId -> parentId, and count seasons per parent
       const seasons = await prisma.mediaItem.findMany({
         where: { parentId: { in: tvParentIds } },
-        select: { id: true, parentId: true, seasonNumber: true },
+        select: { id: true, parentId: true },
       });
+      const seasonIds = seasons.map(s => s.id);
       const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
 
-      // Count children per parent (seasons for TV, books for book series)
+      // Count seasons per parent
       for (const s of seasons) {
         if (!s.parentId) continue;
         seasonCountMap[s.parentId] = (seasonCountMap[s.parentId] || 0) + 1;
       }
 
-      // Accumulate season ratings per parent show
-      const parentAccum = {};
-      for (const r of seasonRatings) {
-        const parentId = seasonToParent[r.mediaItemId];
-        if (!parentId) continue;
-        if (!parentAccum[parentId]) parentAccum[parentId] = { sum: 0, count: 0 };
-        parentAccum[parentId].sum   += (r._avg.rating || 0) * r._count.rating;
-        parentAccum[parentId].count += r._count.rating;
-      }
-      // Override rating map for TV parents with aggregated value
-      for (const [parentId, acc] of Object.entries(parentAccum)) {
-        if (acc.count > 0) {
-          ratingMap[parentId] = { avg: acc.sum / acc.count, count: acc.count };
+      if (seasonIds.length) {
+        const seasonRatings = await prisma.review.groupBy({
+          by: ['mediaItemId'],
+          where: {
+            mediaItemId: { in: seasonIds },
+            visibility: 'PUBLIC',
+            ...friendFilter,
+          },
+          _avg: { rating: true },
+          _count: { rating: true },
+        });
+
+        const parentAccum = {};
+        for (const r of seasonRatings) {
+          const parentId = seasonToParent[r.mediaItemId];
+          if (!parentId) continue;
+          if (!parentAccum[parentId]) parentAccum[parentId] = { sum: 0, count: 0 };
+          parentAccum[parentId].sum   += (r._avg.rating || 0) * r._count.rating;
+          parentAccum[parentId].count += r._count.rating;
+        }
+        for (const [parentId, acc] of Object.entries(parentAccum)) {
+          if (acc.count > 0) {
+            ratingMap[parentId] = { avg: acc.sum / acc.count, count: acc.count };
+          }
         }
       }
     }
@@ -355,10 +361,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
       }),
-      // For book rating sort, total includes series reps which aren't in the DB count
-      total: bookRatingSort ? finalItems.length : total,
+      // For rating sort, total reflects the full sorted set (including series reps for books)
+      total: ratingSort ? finalItems.length : total,
       page: parseInt(page),
-      pages: bookRatingSort ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
+      pages: ratingSort ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
       friendsOnly: friendsOnly && friendIds.length > 0,
     });
   } catch (err) { next(err); }
