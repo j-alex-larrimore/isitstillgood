@@ -32,6 +32,9 @@ router.patch('/me', requireAuth, [
 // ─── GET /api/users/:username/reviews ─── Their review timeline ────────────
 router.get('/:username/reviews', optionalAuth, [
   query('page').optional().isInt({ min: 1 }),
+  query('limit').optional().isInt({ min: 1, max: 20 }),
+  query('rating').optional().isInt({ min: 1, max: 10 }),
+  query('type').optional().isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
   query('mediaType').optional().isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
 ], async (req, res, next) => {
   try {
@@ -40,7 +43,7 @@ router.get('/:username/reviews', optionalAuth, [
 
     const isSelf = req.user?.id === target.id;
     const page   = parseInt(req.query.page) || 1;
-    const take   = 20;
+    const take   = parseInt(req.query.limit) || 20;
 
     // Determine which visibility levels the requester can see
     let visibilityFilter;
@@ -60,10 +63,13 @@ router.get('/:username/reviews', optionalAuth, [
       visibilityFilter = areFriends ? { in: ['PUBLIC', 'FRIENDS_ONLY'] } : { equals: 'PUBLIC' };
     }
 
+    // Support both ?type= and ?mediaType= for media type filtering
+    const typeFilter = req.query.type || req.query.mediaType;
     const where = {
       userId: target.id,
       visibility: visibilityFilter,
-      ...(req.query.mediaType && { mediaItem: { mediaType: req.query.mediaType } }),
+      ...(req.query.rating && { rating: parseInt(req.query.rating) }),
+      ...(typeFilter && { mediaItem: { mediaType: typeFilter } }),
     };
 
     const [reviews, total] = await Promise.all([
