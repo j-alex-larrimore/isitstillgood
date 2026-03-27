@@ -45,21 +45,30 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // Person search — look up matching person IDs
     let personFilter = undefined;
     if (person && person.trim().length > 0) {
-      const persons = await prisma.person.findMany({
-        where: { name: { contains: person.trim(), mode: 'insensitive' } },
-        select: { id: true },
-      });
-      if (!persons.length) {
-        return res.json({ items: [], total: 0, page: parseInt(page), pages: 0 });
+      // Support comma-separated names — each term must match at least one person
+      // and ALL matched persons must appear in the item (AND logic across terms)
+      const terms = person.split(',').map(t => t.trim()).filter(Boolean);
+      const termFilters = [];
+      for (const term of terms) {
+        const persons = await prisma.person.findMany({
+          where: { name: { contains: term, mode: 'insensitive' } },
+          select: { id: true },
+        });
+        if (!persons.length) {
+          // If any term matches nobody, no results possible
+          return res.json({ items: [], total: 0, page: parseInt(page), pages: 0 });
+        }
+        const ids = persons.map(p => p.id);
+        termFilters.push({
+          OR: [
+            { directors: { some: { id: { in: ids } } } },
+            { cast:      { some: { id: { in: ids } } } },
+            { authors:   { some: { id: { in: ids } } } },
+          ],
+        });
       }
-      const ids = persons.map(p => p.id);
-      personFilter = {
-        OR: [
-          { directors: { some: { id: { in: ids } } } },
-          { cast:      { some: { id: { in: ids } } } },
-          { authors:   { some: { id: { in: ids } } } },
-        ],
-      };
+      // AND all term filters — item must feature all named people
+      personFilter = termFilters.length === 1 ? termFilters[0] : { AND: termFilters };
     }
 
     // Genre search — check both genres array and title/description
