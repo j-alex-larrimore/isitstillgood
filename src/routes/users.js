@@ -69,7 +69,7 @@ router.get('/:username/reviews', optionalAuth, [
       userId: target.id,
       visibility: visibilityFilter,
       ...(req.query.rating && { rating: parseInt(req.query.rating) }),
-      ...(typeFilter && { mediaItem: { mediaType: typeFilter } }),
+      ...(typeFilter && { mediaItem: { is: { mediaType: typeFilter } } }),
     };
 
     const [reviews, total] = await Promise.all([
@@ -79,7 +79,7 @@ router.get('/:username/reviews', optionalAuth, [
           mediaItem: {
             select: {
               id: true, title: true, mediaType: true, releaseYear: true,
-              imageUrl: true, slug: true, genres: true,
+              imageUrl: true, slug: true, genres: true, tags: true,
               tmdbRating: true, openCriticScore: true,
             },
           },
