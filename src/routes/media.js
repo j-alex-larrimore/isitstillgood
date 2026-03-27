@@ -406,13 +406,15 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     // We check dynamically so if a lower-numbered book is added later,
     // it automatically becomes the series page.
     let isBookSeries = false;
+    let seriesRepSlug = null;
     if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
       const lowestInSeries = await prisma.mediaItem.findFirst({
         where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null } },
         orderBy: { seriesNumber: 'asc' },
-        select: { id: true },
+        select: { id: true, slug: true },
       });
-      isBookSeries = lowestInSeries?.id === item.id;
+      isBookSeries  = lowestInSeries?.id === item.id;
+      seriesRepSlug = lowestInSeries?.slug || null;
     }
     const isSeriesParent = isTvParent || isBookSeries;
 
@@ -510,6 +512,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       isBookSeries,
       isSeriesParent,
       seriesBooksData: item.seriesBooksData || null,
+      seriesRepSlug,
       communityStats: {
         avgRating:   stats._avg.rating,
         reviewCount: stats._count.rating,
