@@ -304,7 +304,6 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     }
 
     // Fetch all of this user's public/friends reviews with media item details
-    // We need the full cast/directors/authors/genres to compute the taste profile
     const reviews = await prisma.review.findMany({
       where: {
         userId: target.id,
@@ -316,14 +315,39 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           select: {
             id: true, title: true, slug: true,
             mediaType: true, releaseYear: true, imageUrl: true,
-            genres: true,
+            genres: true, parentId: true,
             directors: { select: { id: true, name: true, slug: true } },
             cast:      { select: { id: true, name: true, slug: true } },
             authors:   { select: { id: true, name: true, slug: true } },
+            // For TV seasons, also include parent show's cast and genres
+            parent: {
+              select: {
+                cast:      { select: { id: true, name: true, slug: true } },
+                directors: { select: { id: true, name: true, slug: true } },
+                genres:    true,
+              },
+            },
           },
         },
       },
     });
+
+    // Merge parent show cast/genres into TV season reviews so main cast counts
+    for (const review of reviews) {
+      const item = review.mediaItem;
+      if (item.mediaType === 'TV_SHOW' && item.parentId && item.parent) {
+        // Merge parent cast — add any not already in season cast
+        const seasonCastIds = new Set(item.cast.map(p => p.id));
+        for (const p of (item.parent.cast || [])) {
+          if (!seasonCastIds.has(p.id)) item.cast.push(p);
+        }
+        // Merge parent genres
+        const seasonGenres = new Set(item.genres);
+        for (const g of (item.parent.genres || [])) {
+          if (!seasonGenres.has(g)) item.genres.push(g);
+        }
+      }
+    }
 
     // ── Helper: build a ranked list from person/genre occurrences ─────────────
     // Takes a map of { id/name -> { name, slug?, ratings: [] } }
