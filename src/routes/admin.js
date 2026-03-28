@@ -531,6 +531,83 @@ function filterOpenLibraryGenres(subjects) {
     .slice(0, 5); // return max 5 clean genres
 }
 
+// ─── GET /api/admin/lookup/googlebooks ───────────────────────────────────────
+// Searches Google Books API by title (with optional author/year filters).
+// Much better coverage than Open Library for modern and popular titles.
+router.get('/lookup/googlebooks', requireAdmin, async (req, res, next) => {
+  const { q, author, year } = req.query;
+  if (!q) return res.status(400).json({ error: 'q is required' });
+
+  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'GOOGLE_BOOKS_API_KEY not configured in Railway Variables' });
+
+  try {
+    // Build query string — Google Books uses q= with field modifiers
+    let query = `intitle:${q}`;
+    if (author) query += `+inauthor:${author}`;
+
+    let url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
+    if (year) url += `&publishedDate:${year}`;
+
+    const res2 = await fetch(url);
+    if (!res2.ok) throw new Error('Google Books search failed');
+    const data = await res2.json();
+
+    const results = (data.items || []).slice(0, 15).map(item => {
+      const info = item.volumeInfo || {};
+      return {
+        googleBooksId: item.id,
+        title:         info.title || '',
+        authors:       info.authors || [],
+        releaseYear:   info.publishedDate ? parseInt(info.publishedDate) : null,
+        description:   info.description ? info.description.slice(0, 300) : null,
+        imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
+        genres:        (info.categories || []).slice(0, 5),
+        pageCount:     info.pageCount || null,
+        isbn:          (info.industryIdentifiers || []).find(i => i.type === 'ISBN_13')?.identifier || null,
+      };
+    });
+
+    // Filter out results without a title
+    res.json(results.filter(r => r.title));
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/lookup/googlebooks/:id ────────────────────────────────────
+// Fetches full details for a specific Google Books volume ID.
+router.get('/lookup/googlebooks/:id', requireAdmin, async (req, res, next) => {
+  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'GOOGLE_BOOKS_API_KEY not configured' });
+
+  try {
+    const res2 = await fetch(
+      `https://www.googleapis.com/books/v1/volumes/${req.params.id}?key=${apiKey}`
+    );
+    if (!res2.ok) throw new Error('Google Books fetch failed');
+    const item = await res2.json();
+    const info = item.volumeInfo || {};
+
+    const releaseYear = info.publishedDate ? parseInt(info.publishedDate) : null;
+
+    // Clean categories — Google Books categories are often like "Fiction / Science Fiction"
+    const genres = (info.categories || [])
+      .flatMap(c => c.split('/').map(s => s.trim()))
+      .filter(g => g && g.length < 30)
+      .slice(0, 5);
+
+    res.json({
+      googleBooksId: item.id,
+      title:         info.title,
+      authors:       info.authors || [],
+      releaseYear,
+      description:   info.description ? info.description.slice(0, 1000) : null,
+      imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
+      genres,
+      isbn:          (info.industryIdentifiers || []).find(i => i.type === 'ISBN_13')?.identifier || null,
+    });
+  } catch (err) { next(err); }
+});
+
 // ─── GET /api/admin/lookup/openlibrary ───────────────────────────────────────
 // Searches Open Library by title and returns candidates for books.
 router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
