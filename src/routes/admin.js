@@ -531,6 +531,45 @@ function filterOpenLibraryGenres(subjects) {
     .slice(0, 5); // return max 5 clean genres
 }
 
+// ─── Clean book description ──────────────────────────────────────────────────
+function cleanBookDescription(raw) {
+  if (!raw) return null;
+
+  let text = raw
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&mdash;/g, '\u2014').replace(/&ndash;/g, '\u2013')
+    .replace(/&ldquo;/g, '\u201C').replace(/&rdquo;/g, '\u201D')
+    .trim();
+
+  const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+
+  const marketingPatterns = [
+    /bestseller/i,
+    /new york times/i,
+    /wall street journal/i,
+    /named.*best/i,
+    /one of.*favorite/i,
+    /from the.*(?:bestselling )?author of/i,
+    /^["\u201C]/,
+    /^\u2014/,
+    /\u2022.*\u2022/,
+  ];
+
+  let descStart = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    if (!marketingPatterns.some(p => p.test(paragraphs[i]))) { descStart = i; break; }
+    descStart = i + 1;
+  }
+
+  const cleaned = paragraphs.slice(descStart).join('\n\n') || text;
+  return cleaned.slice(0, 1000).trim();
+}
+
 // ─── GET /api/admin/lookup/googlebooks ───────────────────────────────────────
 // Searches Google Books API by title (with optional author/year filters).
 // Much better coverage than Open Library for modern and popular titles.
@@ -560,7 +599,7 @@ router.get('/lookup/googlebooks', requireAdmin, async (req, res, next) => {
         title:         info.title || '',
         authors:       info.authors || [],
         releaseYear:   info.publishedDate ? parseInt(info.publishedDate) : null,
-        description:   info.description ? info.description.slice(0, 300) : null,
+        description:   cleanBookDescription(info.description),
         imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
         genres:        (info.categories || []).slice(0, 5),
         pageCount:     info.pageCount || null,
@@ -600,7 +639,7 @@ router.get('/lookup/googlebooks/:id', requireAdmin, async (req, res, next) => {
       title:         info.title,
       authors:       info.authors || [],
       releaseYear,
-      description:   info.description ? info.description.slice(0, 1000) : null,
+      description:   cleanBookDescription(info.description),
       imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
       genres,
       isbn:          (info.industryIdentifiers || []).find(i => i.type === 'ISBN_13')?.identifier || null,
