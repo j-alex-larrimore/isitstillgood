@@ -8,7 +8,14 @@ const { fetchExternalRatings } = require('../services/externalRatings');
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
-  const friendsOnly = req.query.friendsOnly === 'true';
+  const friendsOnly      = req.query.friendsOnly === 'true';
+  // excludeFriends: comma-separated usernames to exclude from friend ratings
+  const excludeFriends   = req.query.excludeFriends
+    ? req.query.excludeFriends.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  // consumedWithin: only count reviews where dateConsumed >= N months ago
+  // Format: "12m" = 12 months, "2y" = 2 years
+  const consumedWithin   = req.query.consumedWithin || null;
   // reviewedBy: a username — filter to only items reviewed by that specific user
   const reviewedBy = req.query.reviewedBy?.trim();
   const excludeReviewed = req.query.excludeReviewed === 'true' && req.user;
@@ -93,7 +100,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       };
     }
 
-    // Resolve friend IDs for friendsOnly mode
+    // Resolve friend IDs for friendsOnly mode, minus any excluded friends
     let friendIds = [];
     if (friendsOnly && req.user) {
       const friendships = await prisma.friendship.findMany({
@@ -106,11 +113,37 @@ router.get('/', optionalAuth, async (req, res, next) => {
       friendIds = friendships.map(f =>
         f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
       );
-      // Include self in friends-only ratings
       friendIds.push(req.user.id);
+
+      // Apply excluded friends — look up their user IDs by username
+      if (excludeFriends.length) {
+        const excluded = await prisma.user.findMany({
+          where: { username: { in: excludeFriends } },
+          select: { id: true },
+        });
+        const excludedIds = new Set(excluded.map(u => u.id));
+        friendIds = friendIds.filter(id => !excludedIds.has(id));
+      }
     }
     const friendFilter = friendsOnly && friendIds.length
       ? { userId: { in: friendIds } }
+      : {};
+
+    // Build dateConsumed cutoff for consumedWithin filter
+    let consumedCutoff = null;
+    if (consumedWithin) {
+      const match = consumedWithin.match(/^(\d+)(m|y)$/);
+      if (match) {
+        const n    = parseInt(match[1]);
+        const unit = match[2];
+        const d    = new Date();
+        if (unit === 'm') d.setMonth(d.getMonth() - n);
+        else              d.setFullYear(d.getFullYear() - n);
+        consumedCutoff = d;
+      }
+    }
+    const consumedFilter = consumedCutoff
+      ? { dateConsumed: { gte: consumedCutoff } }
       : {};
 
     // Excluded already-reviewed items
@@ -279,6 +312,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
             mediaItemId: { in: seasonIds },
             visibility: 'PUBLIC',
             ...friendFilter,
+            ...consumedFilter,
           },
           _avg: { rating: true },
           _count: { rating: true },
@@ -318,7 +352,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (allBookIds.length) {
         const bookRatings = await prisma.review.groupBy({
           by: ['mediaItemId'],
-          where: { mediaItemId: { in: allBookIds }, visibility: 'PUBLIC', ...friendFilter },
+          where: { mediaItemId: { in: allBookIds }, visibility: 'PUBLIC', ...friendFilter, ...consumedFilter },
           _avg: { rating: true },
           _count: { rating: true },
         });
@@ -579,7 +613,14 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
 
     // Friends-only filter — restrict to reviews by friends of the logged-in user
     let userFilter = {};
-    const friendsOnly = req.query.friendsOnly === 'true';
+    const friendsOnly      = req.query.friendsOnly === 'true';
+  // excludeFriends: comma-separated usernames to exclude from friend ratings
+  const excludeFriends   = req.query.excludeFriends
+    ? req.query.excludeFriends.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  // consumedWithin: only count reviews where dateConsumed >= N months ago
+  // Format: "12m" = 12 months, "2y" = 2 years
+  const consumedWithin   = req.query.consumedWithin || null;
     if (friendsOnly && req.user) {
       const friendships = await prisma.friendship.findMany({
         where: {
