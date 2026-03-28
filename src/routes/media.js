@@ -576,19 +576,41 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
     const page = parseInt(req.query.page) || 1;
     const take = 20;
     const seasonFilter = req.query.season ? { seasonNumber: parseInt(req.query.season) } : {};
+
+    // Friends-only filter — restrict to reviews by friends of the logged-in user
+    let userFilter = {};
+    const friendsOnly = req.query.friendsOnly === 'true';
+    if (friendsOnly && req.user) {
+      const friendships = await prisma.friendship.findMany({
+        where: {
+          status: 'ACCEPTED',
+          OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }],
+        },
+        select: { initiatorId: true, receiverId: true },
+      });
+      const friendIds = friendships.map(f =>
+        f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
+      );
+      userFilter = { userId: { in: friendIds.length ? friendIds : ['__none__'] } };
+    }
+
+    const visibilityFilter = (friendsOnly && req.user)
+      ? { in: ['PUBLIC', 'FRIENDS_ONLY'] }
+      : 'PUBLIC';
+
+    const where = { mediaItemId: item.id, visibility: visibilityFilter, ...seasonFilter, ...userFilter };
     const [reviews, total] = await Promise.all([
       prisma.review.findMany({
-        where: { mediaItemId: item.id, visibility: 'PUBLIC', ...seasonFilter },
+        where,
         include: {
           user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
-          // Include reactions with userId so we can compute myReaction for the logged-in user
           reactions: { select: { userId: true, emoji: true } },
           _count: { select: { reactions: true, comments: true } },
         },
         orderBy: req.query.sort === 'top' ? [{ reactions: { _count: 'desc' } }] : [{ createdAt: 'desc' }],
         skip: (page - 1) * take, take,
       }),
-      prisma.review.count({ where: { mediaItemId: item.id, visibility: 'PUBLIC', ...seasonFilter } }),
+      prisma.review.count({ where }),
     ]);
     // Enrich each review with the current user's reaction (if logged in)
     const enriched = reviews.map(r => ({
