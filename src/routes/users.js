@@ -513,4 +513,38 @@ router.put('/:username/ignored-genres', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ─── GET /api/users/:username/browse-prefs ────────────────────────────────────
+// Returns the user's saved browse/search preferences (excludedFriends, consumedWithin)
+router.get('/:username/browse-prefs', requireAuth, async (req, res, next) => {
+  try {
+    if (req.user.username !== req.params.username)
+      return res.status(403).json({ error: 'Can only view your own preferences' });
+    const user = await prisma.user.findUnique({
+      where: { username: req.params.username },
+      select: { excludedFriends: true, consumedWithin: true },
+    });
+    res.json(user || { excludedFriends: [], consumedWithin: null });
+  } catch (err) { next(err); }
+});
+
+// ─── PUT /api/users/:username/browse-prefs ────────────────────────────────────
+// Saves the user's browse/search preferences
+router.put('/:username/browse-prefs', requireAuth, async (req, res, next) => {
+  try {
+    if (req.user.username !== req.params.username)
+      return res.status(403).json({ error: 'Can only update your own preferences' });
+    const { excludedFriends, consumedWithin } = req.body;
+    const user = await prisma.user.update({
+      where: { username: req.params.username },
+      data: {
+        excludedFriends: Array.isArray(excludedFriends) ? excludedFriends : [],
+        consumedWithin:  consumedWithin || null,
+      },
+      select: { excludedFriends: true, consumedWithin: true },
+    });
+    res.json(user);
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

@@ -31,6 +31,7 @@ async function sendAuthResponse(res, user) {
       id: true, email: true, username: true,
       displayName: true, avatarUrl: true, isAdmin: true,
       defaultVisibility: true, profilePublic: true,
+      excludedFriends: true, consumedWithin: true,
     },
   });
 

@@ -114,6 +114,8 @@ model User {
   profilePublic   Boolean   @default(false)
   tasteThreshold  Int       @default(2)
   ignoredGenres   String[]  @default([])  // false = friends only, true = public
+  excludedFriends String[]  @default([])  // usernames excluded from friend rating filters
+  consumedWithin  String?                 // e.g. "12m" or "2y" — default recency filter
   reviews         Review[]
   reactions       Reaction[]
   comments        Comment[]
