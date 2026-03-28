@@ -725,22 +725,45 @@ router.get('/lookup/igdb', requireAdmin, async (req, res, next) => {
 // Used by the admin form to warn before submitting a duplicate.
 router.get('/check-duplicate', requireAdmin, async (req, res, next) => {
   try {
-    const { title, type } = req.query;
-    if (!title) return res.json({ duplicates: [] });
+    const { title, type, tmdbId, igdbId, openLibraryId } = req.query;
 
-    const duplicates = await prisma.mediaItem.findMany({
-      where: {
-        title: { equals: title.trim(), mode: 'insensitive' },
-        ...(type ? { mediaType: type } : {}),
-      },
-      select: {
-        id: true, title: true, mediaType: true,
-        releaseYear: true, slug: true, imageUrl: true,
-      },
-      take: 5,
+    // Check by external ID first — most reliable dedup signal
+    const idChecks = [];
+    if (tmdbId)       idChecks.push({ tmdbId });
+    if (igdbId)       idChecks.push({ openCriticId: igdbId }); // stored in openCriticId
+    if (openLibraryId) idChecks.push({ goodreadsId: openLibraryId }); // stored in goodreadsId
+
+    let idMatches = [];
+    if (idChecks.length) {
+      idMatches = await prisma.mediaItem.findMany({
+        where: { OR: idChecks },
+        select: { id: true, title: true, mediaType: true, releaseYear: true, slug: true, imageUrl: true },
+        take: 5,
+      });
+    }
+
+    // Also check by title (case-insensitive)
+    let titleMatches = [];
+    if (title) {
+      titleMatches = await prisma.mediaItem.findMany({
+        where: {
+          title: { equals: title.trim(), mode: 'insensitive' },
+          ...(type ? { mediaType: type } : {}),
+        },
+        select: { id: true, title: true, mediaType: true, releaseYear: true, slug: true, imageUrl: true },
+        take: 5,
+      });
+    }
+
+    // Merge, deduplicating by id
+    const seen = new Set();
+    const duplicates = [...idMatches, ...titleMatches].filter(d => {
+      if (seen.has(d.id)) return false;
+      seen.add(d.id);
+      return true;
     });
 
-    res.json({ duplicates });
+    res.json({ duplicates, idMatch: idMatches.length > 0 });
   } catch (err) { next(err); }
 });
 
