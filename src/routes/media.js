@@ -156,54 +156,40 @@ router.get('/', optionalAuth, async (req, res, next) => {
       reviewedIds = reviewed.map(r => r.mediaItemId);
     }
 
-    const where = {
-      ...(type  && { mediaType: type }),
-      // For TV shows: only return parent entries (parentId = null).
-      ...(type === 'TV_SHOW' && { parentId: null }),
-      // For books browsing without a series filter: show standalones and unnumbered books.
-      // Series books are handled separately below — we fetch all of them and deduplicate
-      // to the lowest-numbered per series, then merge back before pagination.
-      ...(type === 'BOOK' && !req.query.series && {
-        OR: [
-          { seriesName: null },    // standalone books
-          { seriesNumber: null },  // unnumbered books
-        ]
-      }),
-      // Exact year match (legacy) OR year range if from/to are provided
-      ...(year && !req.query.yearFrom && !req.query.yearTo
-        ? { releaseYear: parseInt(year) }
-        : {}),
-      // Year range — yearFrom and yearTo can be used independently
-      ...(req.query.yearFrom || req.query.yearTo ? {
-        releaseYear: {
-          ...(req.query.yearFrom ? { gte: parseInt(req.query.yearFrom) } : {}),
-          ...(req.query.yearTo   ? { lte: parseInt(req.query.yearTo)   } : {}),
-        }
-      } : {}),
-      ...(genreFilter),
-      // Tag filter — same pattern as genre, checks if the tags array contains the value
-      // Tags are stored in title case — normalize search input to title case for reliable matching
-      // Also include the raw input as a fallback for existing data that may not be normalized
-      ...(req.query.tag ? {
-        tags: {
-          hasSome: [
-            req.query.tag.trim(),
-            req.query.tag.trim().toLowerCase(),
-            req.query.tag.trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' '),
-          ]
-        }
-      } : {}),
-      // Series filter — shows all books in a named series
-      ...(req.query.series ? { seriesName: req.query.series } : {}),
-      ...(textFilter),
-      ...(personFilter),
-      ...(excludeReviewed && reviewedIds.length && { id: { notIn: reviewedIds } }),
-      ...(reviewedByIds !== undefined && { id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } }),
-      // Exclude TV parent shows from search results — they exist only as containers
-      // for seasons and aren't directly reviewable. Seasons are shown instead.
-      // Exception: browse page sets type=TV_SHOW explicitly and wants parents only.
-      ...(!type && { NOT: { AND: [{ mediaType: 'TV_SHOW' }, { parentId: null }] } }),
-    };
+    // Build where clause using AND array to avoid OR key collisions when
+    // multiple OR-based filters (textFilter, personFilter, book series) are combined.
+    const andClauses = [];
+
+    if (type)                             andClauses.push({ mediaType: type });
+    if (type === 'TV_SHOW')               andClauses.push({ parentId: null });
+    if (type === 'BOOK' && !req.query.series) {
+      andClauses.push({ OR: [{ seriesName: null }, { seriesNumber: null }] });
+    }
+    if (year && !req.query.yearFrom && !req.query.yearTo) {
+      andClauses.push({ releaseYear: parseInt(year) });
+    }
+    if (req.query.yearFrom || req.query.yearTo) {
+      andClauses.push({ releaseYear: {
+        ...(req.query.yearFrom ? { gte: parseInt(req.query.yearFrom) } : {}),
+        ...(req.query.yearTo   ? { lte: parseInt(req.query.yearTo)   } : {}),
+      }});
+    }
+    if (genreFilter)    andClauses.push(genreFilter);
+    if (req.query.tag) {
+      andClauses.push({ tags: { hasSome: [
+        req.query.tag.trim(),
+        req.query.tag.trim().toLowerCase(),
+        req.query.tag.trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' '),
+      ]}});
+    }
+    if (req.query.series)   andClauses.push({ seriesName: req.query.series });
+    if (textFilter)         andClauses.push(textFilter);
+    if (personFilter)       andClauses.push(personFilter);
+    if (excludeReviewed && reviewedIds.length) andClauses.push({ id: { notIn: reviewedIds } });
+    if (reviewedByIds !== undefined) andClauses.push({ id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } });
+    if (!type) andClauses.push({ NOT: { AND: [{ mediaType: 'TV_SHOW' }, { parentId: null }] } });
+
+    const where = andClauses.length > 0 ? { AND: andClauses } : {};
 
     // For 'rating' sort we can't use Prisma orderBy because avgRating is computed
     // post-fetch. Use createdAt as a stable DB sort, then re-sort by avgRating in JS.
