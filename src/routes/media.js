@@ -305,6 +305,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     let seasonCountMap = {};
 
+    let tvCompletionMap = {};
     // For TV parent shows, aggregate ratings from all child seasons.
     // Fetch season IDs first, then filter reviews by those IDs directly —
     // groupBy doesn't support relation filters reliably in Prisma.
@@ -351,7 +352,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
         // Average completion: avg number of seasons reviewed per user (who reviewed at least one)
         // Get all season reviews for these parent shows to group by user
-        const tvCompletionMap = {};
+        tvCompletionMap = {}; // reset before populating
         if (seasonIds.length) {
           const allSeasonReviews = await prisma.review.findMany({
             where: {
@@ -420,7 +421,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         }
 
         // Average completion: avg number of books reviewed per user (who reviewed at least one)
-        const bookCompletionMap = {};
+        bookCompletionMap = {}; // reset before populating
         const allBookReviews = await prisma.review.findMany({
           where: {
             mediaItemId: { in: allBookIds },
