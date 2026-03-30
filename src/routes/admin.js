@@ -858,11 +858,19 @@ router.get('/check-duplicate', requireAdmin, async (req, res, next) => {
   try {
     const { title, type, tmdbId, igdbId, openLibraryId } = req.query;
 
-    // Check by external ID first — most reliable dedup signal
+    // Check by external ID first — most reliable dedup signal.
+    // IMPORTANT: TMDB uses separate ID spaces for movies and TV shows, so
+    // a tmdbId match must also match mediaType to avoid false positives.
     const idChecks = [];
-    if (tmdbId)       idChecks.push({ tmdbId });
-    if (igdbId)       idChecks.push({ openCriticId: igdbId }); // stored in openCriticId
-    if (openLibraryId) idChecks.push({ goodreadsId: openLibraryId }); // stored in goodreadsId
+    if (tmdbId) {
+      const tmdbCheck = { tmdbId };
+      // If we know the type, restrict to that type so movie/2698 != tv/2698
+      if (type === 'MOVIE')   tmdbCheck.mediaType = 'MOVIE';
+      if (type === 'TV_SHOW') tmdbCheck.mediaType = 'TV_SHOW';
+      idChecks.push(tmdbCheck);
+    }
+    if (igdbId)        idChecks.push({ openCriticId: igdbId });
+    if (openLibraryId) idChecks.push({ goodreadsId: openLibraryId });
 
     let idMatches = [];
     if (idChecks.length) {
