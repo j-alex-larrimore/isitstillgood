@@ -899,6 +899,32 @@ router.get('/check-duplicate', requireAdmin, async (req, res, next) => {
 });
 
 
+// ─── GET /api/admin/media/search ─── Search all items including TV parents ──
+router.get('/media/search', requireAdmin, async (req, res, next) => {
+  try {
+    const q = req.query.q?.trim();
+    if (!q || q.length < 2) return res.json([]);
+
+    const items = await prisma.mediaItem.findMany({
+      where: {
+        OR: [
+          { title:       { contains: q, mode: 'insensitive' } },
+          { seriesName:  { contains: q, mode: 'insensitive' } },
+          { description: { contains: q, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        id: true, slug: true, title: true, mediaType: true,
+        releaseYear: true, imageUrl: true, parentId: true, seriesName: true,
+      },
+      orderBy: { title: 'asc' },
+      take: 15,
+    });
+
+    res.json({ items });
+  } catch (err) { next(err); }
+});
+
 // ─── GET /api/admin/media/by-slug/:slug ──────────────────────────────────────
 // Returns full item data for the edit form — no redirect logic, no aggregation.
 // Used by the Edit Media tab so single-season TV parents load correctly.

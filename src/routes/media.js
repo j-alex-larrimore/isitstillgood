@@ -153,7 +153,38 @@ router.get('/', optionalAuth, async (req, res, next) => {
         where: { userId: req.user.id },
         select: { mediaItemId: true },
       });
-      reviewedIds = reviewed.map(r => r.mediaItemId);
+      const directIds = reviewed.map(r => r.mediaItemId);
+
+      // For TV shows, reviews are written on seasons (children).
+      // Only exclude the parent show if ALL of its seasons have been reviewed.
+      const reviewedSeasons = await prisma.mediaItem.findMany({
+        where: { id: { in: directIds }, parentId: { not: null } },
+        select: { parentId: true },
+      });
+
+      // Group reviewed seasons by parent
+      const reviewedByParent = {};
+      for (const { parentId } of reviewedSeasons) {
+        reviewedByParent[parentId] = (reviewedByParent[parentId] || 0) + 1;
+      }
+
+      // Count total seasons per parent show
+      const parentIds = Object.keys(reviewedByParent);
+      const fullyReviewedParentIds = [];
+      if (parentIds.length) {
+        const seasonCounts = await prisma.mediaItem.groupBy({
+          by: ['parentId'],
+          where: { parentId: { in: parentIds } },
+          _count: { id: true },
+        });
+        for (const { parentId, _count } of seasonCounts) {
+          if (reviewedByParent[parentId] >= _count.id) {
+            fullyReviewedParentIds.push(parentId);
+          }
+        }
+      }
+
+      reviewedIds = [...new Set([...directIds, ...fullyReviewedParentIds])];
     }
 
     // Build where clause using AND array to avoid OR key collisions when
@@ -317,11 +348,44 @@ router.get('/', optionalAuth, async (req, res, next) => {
             ratingMap[parentId] = { avg: acc.sum / acc.count, count: acc.count };
           }
         }
+
+        // Average completion: avg number of seasons reviewed per user (who reviewed at least one)
+        // Get all season reviews for these parent shows to group by user
+        const tvCompletionMap = {};
+        if (seasonIds.length) {
+          const allSeasonReviews = await prisma.review.findMany({
+            where: {
+              mediaItemId: { in: seasonIds },
+              visibility: 'PUBLIC',
+              ...friendFilter,
+            },
+            select: { userId: true, mediaItemId: true },
+          });
+          // Group: parentId -> userId -> set of season ids reviewed
+          const byParentByUser = {};
+          for (const r of allSeasonReviews) {
+            const parentId = seasonToParent[r.mediaItemId];
+            if (!parentId) continue;
+            if (!byParentByUser[parentId]) byParentByUser[parentId] = {};
+            if (!byParentByUser[parentId][r.userId]) byParentByUser[parentId][r.userId] = new Set();
+            byParentByUser[parentId][r.userId].add(r.mediaItemId);
+          }
+          for (const [parentId, userMap] of Object.entries(byParentByUser)) {
+            const userCounts = Object.values(userMap).map(s => s.size);
+            const avgCompletion = userCounts.reduce((a, b) => a + b, 0) / userCounts.length;
+            tvCompletionMap[parentId] = {
+              avg: Math.round(avgCompletion * 10) / 10,
+              total: seasonCountMap[parentId] || 0,
+              reviewerCount: userCounts.length,
+            };
+          }
+        }
       }
     }
 
     // For book series: count books in each series and aggregate ratings
     const bookSeriesCountMap = {};
+    let bookCompletionMap = {};
     const bookSeriesRatingMap = {};
     if (bookSeriesNames.length) {
       const allSeriesBooks = await prisma.mediaItem.findMany({
@@ -353,6 +417,34 @@ router.get('/', optionalAuth, async (req, res, next) => {
         }
         for (const [sn, acc] of Object.entries(seriesAccum)) {
           if (acc.count > 0) bookSeriesRatingMap[sn] = { avg: acc.sum / acc.count, count: acc.count };
+        }
+
+        // Average completion: avg number of books reviewed per user (who reviewed at least one)
+        const bookCompletionMap = {};
+        const allBookReviews = await prisma.review.findMany({
+          where: {
+            mediaItemId: { in: allBookIds },
+            visibility: 'PUBLIC',
+            ...friendFilter,
+          },
+          select: { userId: true, mediaItemId: true },
+        });
+        const bySeriesByUser = {};
+        for (const r of allBookReviews) {
+          const sn = bookIdToSeries[r.mediaItemId];
+          if (!sn) continue;
+          if (!bySeriesByUser[sn]) bySeriesByUser[sn] = {};
+          if (!bySeriesByUser[sn][r.userId]) bySeriesByUser[sn][r.userId] = new Set();
+          bySeriesByUser[sn][r.userId].add(r.mediaItemId);
+        }
+        for (const [sn, userMap] of Object.entries(bySeriesByUser)) {
+          const userCounts = Object.values(userMap).map(s => s.size);
+          const avgCompletion = userCounts.reduce((a, b) => a + b, 0) / userCounts.length;
+          bookCompletionMap[sn] = {
+            avg: Math.round(avgCompletion * 10) / 10,
+            total: bookSeriesCountMap[sn] || 0,
+            reviewerCount: userCounts.length,
+          };
         }
       }
     }
@@ -399,6 +491,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
           ? (seasonCountMap?.[i.id] || 0)
           : isSeriesCard
             ? (bookSeriesCountMap[i.seriesName] || 0)
+            : undefined,
+        avgCompletion: i.mediaType === 'TV_SHOW' && !i.parentId
+          ? (tvCompletionMap?.[i.id] || null)
+          : isSeriesCard
+            ? (bookCompletionMap?.[i.seriesName] || null)
             : undefined,
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
