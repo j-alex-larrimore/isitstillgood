@@ -662,6 +662,50 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       });
     }
 
+    // Compute average completion for TV parent shows and book series
+    let avgCompletion = null;
+    if (isTvParent && item.seasonEntries?.length) {
+      const seasonIds = item.seasonEntries.map(s => s.id);
+      const allSeasonReviews = await prisma.review.findMany({
+        where: { mediaItemId: { in: seasonIds }, visibility: 'PUBLIC' },
+        select: { userId: true, mediaItemId: true },
+      });
+      const byUser = {};
+      for (const r of allSeasonReviews) {
+        if (!byUser[r.userId]) byUser[r.userId] = new Set();
+        byUser[r.userId].add(r.mediaItemId);
+      }
+      const userCounts = Object.values(byUser).map(s => s.size);
+      if (userCounts.length) {
+        const avg = userCounts.reduce((a, b) => a + b, 0) / userCounts.length;
+        avgCompletion = {
+          avg: Math.round(avg * 10) / 10,
+          total: item.seasonEntries.length,
+          reviewerCount: userCounts.length,
+        };
+      }
+    } else if (isBookSeries && seriesBooks.length) {
+      const bookIds = seriesBooks.map(b => b.id);
+      const allBookReviews = await prisma.review.findMany({
+        where: { mediaItemId: { in: bookIds }, visibility: 'PUBLIC' },
+        select: { userId: true, mediaItemId: true },
+      });
+      const byUser = {};
+      for (const r of allBookReviews) {
+        if (!byUser[r.userId]) byUser[r.userId] = new Set();
+        byUser[r.userId].add(r.mediaItemId);
+      }
+      const userCounts = Object.values(byUser).map(s => s.size);
+      if (userCounts.length) {
+        const avg = userCounts.reduce((a, b) => a + b, 0) / userCounts.length;
+        avgCompletion = {
+          avg: Math.round(avg * 10) / 10,
+          total: seriesBooks.length,
+          reviewerCount: userCounts.length,
+        };
+      }
+    }
+
     // Sort cast, directors, authors alphabetically in JS — Prisma doesn't support
     // orderBy on implicit many-to-many relations, so we sort after fetching
     const sortByName = (a, b) => a.name.localeCompare(b.name);
@@ -677,9 +721,10 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       seriesBooksData: item.seriesBooksData || null,
       seriesRepSlug,
       communityStats: {
-        avgRating:   stats._avg.rating,
-        reviewCount: stats._count.rating,
-        verdicts:    Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
+        avgRating:    stats._avg.rating,
+        reviewCount:  stats._count.rating,
+        verdicts:     Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
+        avgCompletion,
       },
       userReview,
     });
