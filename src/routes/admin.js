@@ -104,6 +104,21 @@ router.patch('/requests/:id/flag', requireAdmin, [
 router.patch('/requests/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
     const request = await prisma.mediaRequest.update({ where: { id: req.params.id }, data: { resolved: true } });
+
+    // Notify the requester that their title has been added
+    if (request.userId) {
+      await prisma.notification.create({
+        data: {
+          userId:  request.userId,
+          type:    'REQUEST_ADDED',
+          payload: {
+            title:     request.title,
+            mediaType: request.mediaType,
+          },
+        },
+      }).catch(console.error); // non-blocking
+    }
+
     res.json(request);
   } catch (err) { next(err); }
 });
