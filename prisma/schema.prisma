@@ -126,6 +126,8 @@ model User {
   mediaRequests   MediaRequest[]
   refreshTokens   RefreshToken[]
   sentInvites     InviteToken[]    // invitations this user has sent
+  sentMessages    Message[] @relation("MessageSender")
+  receivedMessages Message[] @relation("MessageRecipient")
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   @@index([email])
@@ -172,6 +174,7 @@ model Review {
   mediaItem     MediaItem  @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
   reactions     Reaction[]
   comments      Comment[]
+  messages      Message[]
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   // Unique per user + media item + season (null season = overall)
@@ -292,4 +295,21 @@ model InviteToken {
   
   @@index([token])   // fast lookup when someone clicks the invite link
   @@index([email])   // check if an email already has a pending invite
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  senderId    String
+  recipientId String
+  body        String   @db.Text
+  read        Boolean  @default(false)
+  // Optional context — if sent in response to a review
+  reviewId    String?
+  review      Review?  @relation(fields: [reviewId], references: [id], onDelete: SetNull)
+  sender      User     @relation("MessageSender",    fields: [senderId],    references: [id], onDelete: Cascade)
+  recipient   User     @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  @@index([recipientId, read])
+  @@index([senderId])
+  @@index([recipientId, senderId])
 }

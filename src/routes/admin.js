@@ -187,7 +187,7 @@ router.post('/media', requireAdmin, [
         imageUrl:        imageUrl    || null,
         genres:          genres      || [],
         // Tags — franchise, studio, network etc. e.g. "Marvel", "HBO", "Star Wars"
-        tags:            (tags || []).map(t => t.trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')),
+        tags:            normalizeTags(tags || []),
         excludedCast:    excludedCast || [],  // cast members who left before this season
         tmdbId:          tmdbId      || null,
         goodreadsId:     goodreadsId || null,
@@ -248,6 +248,9 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     if (authorNames !== undefined) {
       data.authors = await connectPersons(authorNames, true);
     }
+
+    // Normalize tags if being updated
+    if (data.tags) data.tags = normalizeTags(data.tags);
 
     const item = await prisma.mediaItem.update({
       where: { id: req.params.id },
