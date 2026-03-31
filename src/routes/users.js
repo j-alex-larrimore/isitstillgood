@@ -554,9 +554,10 @@ router.delete('/:username', requireAuth, async (req, res, next) => {
     if (req.user.username !== req.params.username)
       return res.status(403).json({ error: 'You can only delete your own account' });
 
+    // Delete by authenticated user's ID — safer than username which comes from URL
     // Cascade deletes: reviews, reactions, comments, friendships, messages,
     // notifications, refresh tokens are all set to onDelete: Cascade in schema
-    await prisma.user.delete({ where: { username: req.params.username } });
+    await prisma.user.delete({ where: { id: req.user.id } });
 
     res.json({ message: 'Account deleted successfully' });
   } catch (err) { next(err); }
