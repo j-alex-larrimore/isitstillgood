@@ -547,4 +547,19 @@ router.put('/:username/browse-prefs', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ─── DELETE /api/users/:username ─── Delete own account ──────────────────────
+router.delete('/:username', requireAuth, async (req, res, next) => {
+  try {
+    if (req.user.username !== req.params.username)
+      return res.status(403).json({ error: 'You can only delete your own account' });
+
+    // Cascade deletes: reviews, reactions, comments, friendships, messages,
+    // notifications, refresh tokens are all set to onDelete: Cascade in schema
+    await prisma.user.delete({ where: { username: req.params.username } });
+
+    res.json({ message: 'Account deleted successfully' });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
