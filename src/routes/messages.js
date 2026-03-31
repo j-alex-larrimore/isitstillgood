@@ -25,21 +25,20 @@ router.post('/', requireAuth, [
     if (recipientUsername === req.user.username)
       return res.status(400).json({ error: "You can't message yourself" });
 
-    const recipient = await prisma.user.findUnique({
-      where: { username: recipientUsername },
-      select: USER_SELECT,
-    });
-    if (!recipient) return res.status(404).json({ error: 'User not found' });
-
-    // Validate reviewId if provided
-    let review = null;
-    if (reviewId) {
-      review = await prisma.review.findUnique({
+    // Look up recipient and review in parallel
+    const [recipient, review] = await Promise.all([
+      prisma.user.findUnique({
+        where: { username: recipientUsername },
+        select: USER_SELECT,
+      }),
+      reviewId ? prisma.review.findUnique({
         where: { id: reviewId },
         select: { id: true, mediaItem: { select: { title: true, slug: true } } },
-      });
-      if (!review) return res.status(404).json({ error: 'Review not found' });
-    }
+      }) : Promise.resolve(null),
+    ]);
+
+    if (!recipient) return res.status(404).json({ error: 'User not found' });
+    if (reviewId && !review) return res.status(404).json({ error: 'Review not found' });
 
     const message = await prisma.message.create({
       data: {
@@ -55,8 +54,10 @@ router.post('/', requireAuth, [
       },
     });
 
-    // Notify recipient
-    await prisma.notification.create({
+    // Respond immediately — notification is fire-and-forget
+    res.status(201).json(message);
+
+    prisma.notification.create({
       data: {
         userId:  recipient.id,
         type:    'NEW_MESSAGE',
@@ -69,7 +70,6 @@ router.post('/', requireAuth, [
       },
     }).catch(console.error);
 
-    res.status(201).json(message);
   } catch (err) { next(err); }
 });
 
