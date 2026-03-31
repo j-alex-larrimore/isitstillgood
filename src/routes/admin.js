@@ -1,5 +1,49 @@
 // src/routes/admin.js
 const router = require('express').Router();
+
+// ─── Tag and genre normalization helpers ──────────────────────────────────────
+const TAG_OVERRIDES = {
+  'hbo': 'HBO', 'hbo max': 'HBO Max', 'hbomax': 'HBO Max',
+  'apple tv': 'Apple TV', 'apple tv+': 'Apple TV+',
+  'nbc': 'NBC', 'cbs': 'CBS', 'abc': 'ABC', 'amc': 'AMC', 'fx': 'FX',
+  'bbc': 'BBC', 'pbs': 'PBS', 'mtv': 'MTV', 'vh1': 'VH1',
+  'usa': 'USA', 'tnt': 'TNT', 'tbs': 'TBS', 'syfy': 'Syfy',
+  'cnn': 'CNN', 'espn': 'ESPN', 'nfl': 'NFL', 'nba': 'NBA',
+  'mlb': 'MLB', 'nhl': 'NHL', 'dc': 'DC', 'mcu': 'MCU', 'dceu': 'DCEU',
+  'lgbtq': 'LGBTQ', 'lgbtq+': 'LGBTQ+', 'wwii': 'WWII', 'wwi': 'WWI',
+  'uk': 'UK', 'us': 'US',
+};
+
+function normalizeTags(tags) {
+  if (!Array.isArray(tags)) return tags;
+  return tags.map(t => {
+    const trimmed = t.trim();
+    const lower   = trimmed.toLowerCase();
+    if (TAG_OVERRIDES[lower]) return TAG_OVERRIDES[lower];
+    return trimmed.split(' ').map(w => {
+      const wl = w.toLowerCase();
+      if (TAG_OVERRIDES[wl]) return TAG_OVERRIDES[wl];
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    }).join(' ');
+  });
+}
+
+function normalizeGenres(genres) {
+  if (!Array.isArray(genres)) return genres;
+  const result = [];
+  for (const g of genres) {
+    const parts = g.split(/\s*&\s*/);
+    for (const p of parts) {
+      const s = p.trim();
+      if (!s) continue;
+      if (/^sci[-\s]?fi$/i.test(s)) { result.push('Science Fiction'); continue; }
+      result.push(s);
+    }
+  }
+  return [...new Set(result)];
+}
+
+
 const { body, query, validationResult } = require('express-validator');
 const prisma  = require('../lib/prisma');
 const { requireAdmin } = require('../middleware/admin');
