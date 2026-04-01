@@ -81,6 +81,7 @@ app.use('/api/media',   require('./routes/media'));
 app.use('/api/reviews', require('./routes/reviews'));
 app.use('/api/friends',   require('./routes/friends'));
 app.use('/api/messages',  require('./routes/messages'));
+app.use('/sitemap.xml',    require('./routes/sitemap'));
 app.use('/api/feed',    require('./routes/feed'));
 app.use('/api/lists',   require('./routes/lists'));
 app.use('/api/admin',   require('./routes/admin'));
