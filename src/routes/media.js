@@ -207,11 +207,21 @@ router.get('/', optionalAuth, async (req, res, next) => {
     }
     if (genreFilter)    andClauses.push(genreFilter);
     if (req.query.tag) {
-      andClauses.push({ tags: { hasSome: [
-        req.query.tag.trim(),
-        req.query.tag.trim().toLowerCase(),
-        req.query.tag.trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' '),
-      ]}});
+      const rawTag   = req.query.tag.trim();
+      const lower    = rawTag.toLowerCase();
+      const titleCase = rawTag.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+      // Also normalize through TAG_OVERRIDES so "hbo" matches "HBO", "apple tv" matches "Apple TV" etc.
+      const TAG_OVERRIDES = {
+        'hbo':'HBO','hbo max':'HBO Max','apple tv':'Apple TV','apple tv+':'Apple TV+',
+        'nbc':'NBC','cbs':'CBS','abc':'ABC','amc':'AMC','fx':'FX','bbc':'BBC','pbs':'PBS',
+        'mtv':'MTV','usa':'USA','tnt':'TNT','tbs':'TBS','syfy':'Syfy','espn':'ESPN',
+        'nfl':'NFL','nba':'NBA','mlb':'MLB','nhl':'NHL','dc':'DC','mcu':'MCU','uk':'UK',
+      };
+      const normalized = TAG_OVERRIDES[lower]
+        || rawTag.split(' ').map(w => TAG_OVERRIDES[w.toLowerCase()] || (w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
+      // Build a deduplicated set of variants to check
+      const tagVariants = [...new Set([rawTag, lower, titleCase, normalized])];
+      andClauses.push({ tags: { hasSome: tagVariants } });
     }
     if (req.query.series)   andClauses.push({ seriesName: req.query.series });
     if (textFilter)         andClauses.push(textFilter);
