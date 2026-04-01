@@ -962,11 +962,7 @@ router.get('/media/search', requireAdmin, async (req, res, next) => {
 
     const items = await prisma.mediaItem.findMany({
       where: {
-        OR: [
-          { title:       { contains: q, mode: 'insensitive' } },
-          { seriesName:  { contains: q, mode: 'insensitive' } },
-          { description: { contains: q, mode: 'insensitive' } },
-        ],
+        title: { contains: q, mode: 'insensitive' },
       },
       select: {
         id: true, slug: true, title: true, mediaType: true,
