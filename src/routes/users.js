@@ -85,7 +85,7 @@ router.get('/:username/reviews', optionalAuth, [
           },
           _count: { select: { reactions: true, comments: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ dateConsumed: 'desc' }, { updatedAt: 'desc' }],
         skip: (page - 1) * take,
         take,
       }),
@@ -194,7 +194,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
         },
         _count: { select: { reactions: true, comments: true } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ dateConsumed: 'desc' }, { updatedAt: 'desc' }],
       take: 20,
     });
 

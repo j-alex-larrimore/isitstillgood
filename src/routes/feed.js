@@ -53,12 +53,10 @@ router.get('/', requireAuth, [
       ...(since && { updatedAt: { gte: since } }),
     };
 
-    // Sort by when it was consumed (watched/read/played), then by when reviewed.
-    // Prisma sorts nulls last by default for desc ordering.
-    // Sort by when consumed first, then updatedAt so edits bump a review back to the top
+    // Sort by most recently created or edited — edits always bubble to the top
     const orderBy = mode === 'trending'
-      ? [{ reactions: { _count: 'desc' } }, { dateConsumed: 'desc' }, { updatedAt: 'desc' }]
-      : [{ dateConsumed: 'desc' }, { updatedAt: 'desc' }];
+      ? [{ reactions: { _count: 'desc' } }, { updatedAt: 'desc' }]
+      : [{ updatedAt: 'desc' }];
 
     const [reviews, total] = await Promise.all([
       prisma.review.findMany({
