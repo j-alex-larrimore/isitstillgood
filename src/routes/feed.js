@@ -103,20 +103,33 @@ router.get('/', requireAuth, [
   } catch (err) { next(err); }
 });
 
+// Simple in-memory cache for trending (unauthenticated) — avoids timeout on cold requests
+let trendingCache = null;
+let trendingCacheTime = 0;
+const TRENDING_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 // ─── GET /api/feed/trending ───────────────────────────────────────────────
 router.get('/trending', optionalAuth, async (req, res, next) => {
   try {
-    const setting = await prisma.adminSetting.findUnique({ where: { key: 'feedTimeframeDays' } });
+    // Serve cached response for unauthenticated requests to avoid timeout
+    if (!req.user && trendingCache && Date.now() - trendingCacheTime < TRENDING_CACHE_TTL) {
+      return res.json(trendingCache);
+    }
+
+    // Fetch setting and friendships in parallel
+    const [setting, friendships] = await Promise.all([
+      prisma.adminSetting.findUnique({ where: { key: 'feedTimeframeDays' } }),
+      req.user ? prisma.friendship.findMany({
+        where: { status: 'ACCEPTED', OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }] },
+        select: { initiatorId: true, receiverId: true },
+      }) : Promise.resolve([]),
+    ]);
+
     const days = setting ? parseInt(setting.value) : 30;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    // If logged in, weight towards friend activity; otherwise show global trending
     let authorIds;
-    if (req.user) {
-      const friendships = await prisma.friendship.findMany({
-        where: { status: 'ACCEPTED', OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }] },
-        select: { initiatorId: true, receiverId: true },
-      });
+    if (req.user && friendships.length) {
       const friendIds = friendships.map(f => f.initiatorId === req.user.id ? f.receiverId : f.initiatorId);
       authorIds = friendIds.length ? [req.user.id, ...friendIds] : undefined;
     }
@@ -139,11 +152,18 @@ router.get('/trending', optionalAuth, async (req, res, next) => {
       select: { id: true, title: true, slug: true, mediaType: true, releaseYear: true, imageUrl: true },
     });
 
-    res.json(trending.map(t => ({
+    const result = trending.map(t => ({
       ...mediaItems.find(m => m.id === t.mediaItemId),
-      reviewCount: t._count.mediaItemId,  // expose as reviewCount so frontend can use it
+      reviewCount: t._count.mediaItemId,
       avgRating:   t._avg.rating,
-    })));
+    }));
+
+    if (!req.user) {
+      trendingCache = result;
+      trendingCacheTime = Date.now();
+    }
+
+    res.json(result);
   } catch (err) { next(err); }
 });
 
