@@ -132,7 +132,9 @@ router.get('/trending', optionalAuth, async (req, res, next) => {
       authorIds = friendIds.length ? [req.user.id, ...friendIds] : undefined;
     }
 
-    const trending = await prisma.review.groupBy({
+    // Wrap in a race so the endpoint never hangs longer than 5s
+    const trending = await Promise.race([
+      prisma.review.groupBy({
       by: ['mediaItemId'],
       where: {
         ...(authorIds ? { userId: { in: authorIds } } : {}),
@@ -143,7 +145,9 @@ router.get('/trending', optionalAuth, async (req, res, next) => {
       _avg: { rating: true },
       orderBy: { _count: { mediaItemId: 'desc' } },
       take: 10,
-    });
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+    ]);
 
     const mediaItems = await prisma.mediaItem.findMany({
       where: { id: { in: trending.map(t => t.mediaItemId) } },
