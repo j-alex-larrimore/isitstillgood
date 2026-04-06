@@ -206,6 +206,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }});
     }
     if (genreFilter)    andClauses.push(genreFilter);
+    let tagVariants = [];
     if (req.query.tag) {
       const rawTag   = req.query.tag.trim();
       const lower    = rawTag.toLowerCase();
@@ -220,7 +221,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const normalized = TAG_OVERRIDES[lower]
         || rawTag.split(' ').map(w => TAG_OVERRIDES[w.toLowerCase()] || (w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
       // Build a deduplicated set of variants to check
-      const tagVariants = [...new Set([rawTag, lower, titleCase, normalized])];
+      tagVariants = [...new Set([rawTag, lower, titleCase, normalized])];
       andClauses.push({ tags: { hasSome: tagVariants } });
     }
     if (req.query.series)   andClauses.push({ seriesName: req.query.series });
@@ -245,14 +246,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // For book browse without series filter: fetch ONE representative per series
     // by getting all series books and deduplicating to the lowest seriesNumber.
     // This avoids pagination issues where book 2 would appear on page 2 without book 1.
+    // IMPORTANT: Apply the same filters (person, genre, tag, text) so searching for an
+    // author doesn't return series by unrelated authors.
     let seriesRepresentatives = [];
     if (type === 'BOOK' && !req.query.series) {
+      // Build a series-specific where clause that includes all active filters
+      const seriesWhereClauses = [
+        { mediaType: 'BOOK' },
+        { seriesName: { not: null } },
+        { seriesNumber: { not: null } },
+      ];
+      if (genreFilter)    seriesWhereClauses.push(genreFilter);
+      if (textFilter)     seriesWhereClauses.push(textFilter);
+      if (personFilter)   seriesWhereClauses.push(personFilter);
+      if (req.query.tag)  seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
+
       const allSeriesEntries = await prisma.mediaItem.findMany({
-        where: {
-          mediaType: 'BOOK',
-          seriesName: { not: null },
-          seriesNumber: { not: null },
-        },
+        where: { AND: seriesWhereClauses },
         include: {
           _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
           authors: { select: { id: true, name: true, slug: true }, take: 100 },
