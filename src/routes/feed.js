@@ -38,7 +38,9 @@ router.get('/', requireAuth, [
     // Build author filter based on mode
     let authorIds;
     if (mode === 'friends') {
-      authorIds = [req.user.id, ...friendIds];
+      // Friends feed shows only friends, not the current user's own reviews
+      // (user's own reviews appear under Everyone)
+      authorIds = friendIds.length ? friendIds : ['__none__'];
     } else {
       authorIds = undefined; // all users
     }

@@ -96,15 +96,17 @@ router.post('/', requireAuth, [
 
     let review;
     if (existing) {
-      // Update existing review — preserve previous rating for revisit tracking
+      // Only mark as revisit if the rating actually changed
+      const newRating = parseInt(rating);
+      const ratingChanged = newRating !== existing.rating;
       review = await prisma.review.update({
         where: { id: existing.id },
         data: {
-          rating: parseInt(rating),
-          dateConsumed: consumed,        // update the date they last consumed it
+          rating: newRating,
+          dateConsumed: consumed,
           reviewText, spoilerText, visibility: vis, verdict,
-          isRevisit: true,
-          previousRating: existing.rating,
+          isRevisit: ratingChanged ? true : existing.isRevisit,
+          previousRating: ratingChanged ? existing.rating : existing.previousRating,
         },
         include: reviewInclude,
       });
