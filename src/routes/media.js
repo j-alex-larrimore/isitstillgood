@@ -192,8 +192,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const andClauses = [];
 
     if (type)                             andClauses.push({ mediaType: type });
-    if (type === 'TV_SHOW')               andClauses.push({ parentId: null });
-    if (type === 'BOOK' && !req.query.series) {
+    if (type === 'TV_SHOW' && !req.query.individual) andClauses.push({ parentId: null });
+    if (type === 'TV_SHOW' && req.query.individual)  andClauses.push({ parentId: { not: null } });
+    if (type === 'BOOK' && !req.query.series && !req.query.individual) {
       andClauses.push({ OR: [{ seriesName: null }, { seriesNumber: null }] });
     }
     if (year && !req.query.yearFrom && !req.query.yearTo) {
