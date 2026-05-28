@@ -249,7 +249,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // IMPORTANT: Apply the same filters (person, genre, tag, text) so searching for an
     // author doesn't return series by unrelated authors.
     let seriesRepresentatives = [];
-    if (type === 'BOOK' && !req.query.series) {
+    if (type === 'BOOK' && !req.query.series && !req.query.individual) {
       // Build a series-specific where clause that includes all active filters
       const seriesWhereClauses = [
         { mediaType: 'BOOK' },
@@ -302,10 +302,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }),
       prisma.mediaItem.count({ where }),
     ]);
-    const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series;
+    const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series && !req.query.individual;
 
     // Merge standalone/unnumbered books with series representatives
-    let finalItems = type === 'BOOK' && !req.query.series
+    let finalItems = type === 'BOOK' && !req.query.series && !req.query.individual
       ? [...items, ...seriesRepresentatives]
       : items;
 
