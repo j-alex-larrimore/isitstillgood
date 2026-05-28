@@ -250,7 +250,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // IMPORTANT: Apply the same filters (person, genre, tag, text) so searching for an
     // author doesn't return series by unrelated authors.
     let seriesRepresentatives = [];
-    if (type === 'BOOK' && !req.query.series && !req.query.individual) {
+    if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
       // Build a series-specific where clause that includes all active filters
       const seriesWhereClauses = [
         { mediaType: 'BOOK' },
@@ -303,10 +303,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }),
       prisma.mediaItem.count({ where }),
     ]);
-    const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series && !req.query.individual;
+    const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy;
 
     // Merge standalone/unnumbered books with series representatives
-    let finalItems = type === 'BOOK' && !req.query.series && !req.query.individual
+    let finalItems = type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy
       ? [...items, ...seriesRepresentatives]
       : items;
 
@@ -473,7 +473,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     // Helper to get the effective rating for an item (series aggregate or individual)
     function effectiveRating(i) {
-      return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series)
+      return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual)
         ? (bookSeriesRatingMap[i.seriesName]?.avg || ratingMap[i.id]?.avg || null)
         : (ratingMap[i.id]?.avg || null);
     }
@@ -499,7 +499,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     res.json({
       items: sortedItems.map(i => {
         // For series representative cards, use aggregated series ratings
-        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series;
+        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual;
         const avg   = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.avg   || ratingMap[i.id]?.avg)   : ratingMap[i.id]?.avg;
         const count = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.count || ratingMap[i.id]?.count) : ratingMap[i.id]?.count;
         return {
