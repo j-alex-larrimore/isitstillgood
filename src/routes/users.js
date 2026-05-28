@@ -116,16 +116,17 @@ router.get('/search', requireAuth, [
           // or when you only know someone's email address
           { email:       { contains: req.query.q, mode: 'insensitive' } },
         ],
-        // Never return the searching user in their own results
-        NOT: { id: req.user.id },
       },
-      // Only return public-safe fields — never return passwordHash, googleId, etc.
-      // We intentionally omit email from results to protect user privacy;
-      // the search matches on email but doesn't reveal it
-      select: { id: true, username: true, displayName: true, avatarUrl: true },
+      select: {
+        id: true, username: true, displayName: true, avatarUrl: true,
+        _count: { select: { reviews: true } },
+      },
       take: 20,
     });
-    res.json(users);
+    res.json(users.map(u => ({
+      id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl,
+      reviewCount: u._count?.reviews || 0,
+    })));
   } catch (err) { next(err); }
 });
 
