@@ -25,6 +25,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // reviewedBy filter — look up the user and get their reviewed item IDs
     let reviewedByIds = undefined;
     if (reviewedBy) {
+      console.log(`[media] reviewedBy search for: ${reviewedBy}`);
       const reviewedByUser = await prisma.user.findFirst({
         where: {
           OR: [
@@ -35,12 +36,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
         select: { id: true },
       });
       if (reviewedByUser) {
+        console.log(`[media] found user ${reviewedByUser.id}, fetching their reviews`);
         // Get all media IDs this user has reviewed publicly
         const theirReviews = await prisma.review.findMany({
           where: { userId: reviewedByUser.id, visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } },
           select: { mediaItemId: true, rating: true },
         });
         reviewedByIds = theirReviews.map(r => r.mediaItemId);
+        console.log(`[media] user has ${reviewedByIds.length} reviewed items`);
         // Store ratings for enriching results later
         req.reviewedByRatings = Object.fromEntries(theirReviews.map(r => [r.mediaItemId, r.rating]));
       } else {
@@ -323,6 +326,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       _count: { rating: true },
     });
     const ratingMap = Object.fromEntries(ratings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
+    // Keep direct ratings (series-level reviews) before TV aggregation overwrites them
+    const directRatingMap = { ...ratingMap };
 
     let seasonCountMap = {};
 
@@ -499,21 +504,28 @@ router.get('/', optionalAuth, async (req, res, next) => {
       items: sortedItems.map(i => {
         // For series representative cards, use aggregated series ratings
         const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual;
-        const avg   = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.avg   || ratingMap[i.id]?.avg)   : ratingMap[i.id]?.avg;
-        const count = isSeriesCard ? (bookSeriesRatingMap[i.seriesName]?.count || ratingMap[i.id]?.count) : ratingMap[i.id]?.count;
+        const isTvParentCard = i.mediaType === 'TV_SHOW' && !i.parentId;
+
+        // avgRating: series-level reviews (written about the whole series/show)
+        // For book series cards: direct reviews of the first book (series rep)
+        // For TV parent cards: direct reviews of the show parent item
+        // For individual items: their own reviews
+        const avg   = isSeriesCard ? (directRatingMap[i.id]?.avg   || null) : ratingMap[i.id]?.avg;
+        const count = isSeriesCard ? (directRatingMap[i.id]?.count || 0)    : ratingMap[i.id]?.count;
+
+        // seriesAvgRating: aggregate of all books/seasons (only for series cards)
+        const seriesAvgRating = isSeriesCard
+          ? (bookSeriesRatingMap[i.seriesName]?.avg || null)
+          : isTvParentCard
+            ? (ratingMap[i.id]?.avg || null)  // ratingMap for TV parents = season aggregate
+            : undefined;
+
         return {
         ...i,
-        // For series representative cards, use the series name as the display title
-        // so browse shows "Cradle" not "Unsouled" (the first book's actual title)
         displayTitle: isSeriesCard ? i.seriesName : undefined,
         avgRating:   avg   || null,
         reviewCount: count || 0,
-        // Season/book aggregate avg — shown alongside series-level rating on browse cards
-        seriesAvgRating: i.mediaType === 'TV_SHOW' && !i.parentId && ratingMap[i.id]?.avg
-          ? ratingMap[i.id].avg
-          : isSeriesCard && bookSeriesRatingMap[i.seriesName]?.avg
-            ? bookSeriesRatingMap[i.seriesName].avg
-            : undefined,
+        seriesAvgRating,
         seasonCount: i.mediaType === 'TV_SHOW' && !i.parentId
           ? (seasonCountMap?.[i.id] || 0)
           : isSeriesCard
