@@ -328,9 +328,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     let tvCompletionMap = {};
     // For TV parent shows, aggregate ratings from all child seasons.
-    // Fetch season IDs first, then filter reviews by those IDs directly —
-    // groupBy doesn't support relation filters reliably in Prisma.
-    if (tvParentIds.length) {
+    // Skip this expensive aggregation when filtering by reviewedBy — just use direct ratings.
+    if (tvParentIds.length && !reviewedBy) {
       const seasons = await prisma.mediaItem.findMany({
         where: { parentId: { in: tvParentIds } },
         select: { id: true, parentId: true },
@@ -409,7 +408,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const bookSeriesCountMap = {};
     let bookCompletionMap = {};
     const bookSeriesRatingMap = {};
-    if (bookSeriesNames.length) {
+    if (bookSeriesNames.length && !reviewedBy) {
       const allSeriesBooks = await prisma.mediaItem.findMany({
         where: { mediaType: 'BOOK', seriesName: { in: bookSeriesNames } },
         select: { id: true, seriesName: true, seriesNumber: true },
@@ -509,6 +508,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
         displayTitle: isSeriesCard ? i.seriesName : undefined,
         avgRating:   avg   || null,
         reviewCount: count || 0,
+        // Season/book aggregate avg — shown alongside series-level rating on browse cards
+        seriesAvgRating: i.mediaType === 'TV_SHOW' && !i.parentId && ratingMap[i.id]?.avg
+          ? ratingMap[i.id].avg
+          : isSeriesCard && bookSeriesRatingMap[i.seriesName]?.avg
+            ? bookSeriesRatingMap[i.seriesName].avg
+            : undefined,
         seasonCount: i.mediaType === 'TV_SHOW' && !i.parentId
           ? (seasonCountMap?.[i.id] || 0)
           : isSeriesCard
@@ -609,6 +614,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     }
 
     // For TV parent shows and book series, aggregate stats across all entries
+    // Series-level reviews are always against item.id directly
+    // Season/book aggregate stats use child item IDs
+    const seriesLevelWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
     let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
     let seriesBooks = [];
 
@@ -630,10 +638,17 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       statsWhere = { mediaItemId: { in: seriesBookIds }, visibility: 'PUBLIC' };
     }
 
-    const stats = await prisma.review.aggregate({
-      where: statsWhere,
-      _avg: { rating: true }, _count: { rating: true },
-    });
+    const [stats, seriesLevelStats] = await Promise.all([
+      prisma.review.aggregate({
+        where: statsWhere,
+        _avg: { rating: true }, _count: { rating: true },
+      }),
+      // Series-level reviews (written directly about the series/show as a whole)
+      isSeriesParent ? prisma.review.aggregate({
+        where: seriesLevelWhere,
+        _avg: { rating: true }, _count: { rating: true },
+      }) : Promise.resolve(null),
+    ]);
 
     const verdicts = await prisma.review.groupBy({
       by: ['verdict'],
