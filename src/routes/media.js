@@ -626,9 +626,10 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     }
 
     // For TV parent shows and book series, aggregate stats across all entries
-    // Series-level reviews are always against item.id directly
-    // Season/book aggregate stats use child item IDs
-    const seriesLevelWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
+    // Series-level reviews: for book series use seasonNumber:0, for TV use seasonNumber:null
+    const seriesLevelWhere = isBookSeries
+      ? { mediaItemId: item.id, seasonNumber: 0, visibility: 'PUBLIC' }
+      : { mediaItemId: item.id, seasonNumber: null, visibility: 'PUBLIC' };
     let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
     let seriesBooks = [];
 
@@ -705,9 +706,13 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
 
     let userReview = null;
     if (req.user) {
-      userReview = await prisma.review.findFirst({
-        where: { userId: req.user.id, mediaItemId: item.id, seasonNumber: null },
-      });
+      // For book series pages, series-level reviews use seasonNumber: 0
+      // For TV parent shows, series-level reviews use seasonNumber: null
+      // For individual books and all other items, seasonNumber: null
+      const seriesReviewWhere = isBookSeries
+        ? { userId: req.user.id, mediaItemId: item.id, seasonNumber: 0 }
+        : { userId: req.user.id, mediaItemId: item.id, seasonNumber: null };
+      userReview = await prisma.review.findFirst({ where: seriesReviewWhere });
     }
 
     // Compute average completion for TV parent shows and book series

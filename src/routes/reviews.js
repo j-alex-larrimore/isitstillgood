@@ -66,7 +66,7 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
 router.post('/', requireAuth, [
   body('mediaItemId').notEmpty(),
   body('rating').isInt({ min: 1, max: 10 }),
-  body('seasonNumber').optional({ nullable: true }).isInt({ min: 1 }),
+  body('seasonNumber').optional({ nullable: true }).isInt({ min: 0 }),
   // dateConsumed is when they last watched/read/played it — optional ISO date string
   body('dateConsumed').optional({ nullable: true }).isISO8601().withMessage('dateConsumed must be a valid date'),
   body('reviewText').optional().trim().isLength({ max: 5000 }),
@@ -82,7 +82,7 @@ router.post('/', requireAuth, [
 
     const verdict = ratingToVerdict(parseInt(rating));
     const vis = visibility || req.user.defaultVisibility || 'PUBLIC';
-    const season = seasonNumber ? parseInt(seasonNumber) : null;
+    const season = (seasonNumber !== null && seasonNumber !== undefined && seasonNumber !== '') ? parseInt(seasonNumber) : null;
 
     // Convert dateConsumed string to a real Date object if provided,
     // otherwise leave as null — the field is optional
