@@ -198,7 +198,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (type === 'TV_SHOW' && !req.query.individual) andClauses.push({ parentId: null });
     if (type === 'TV_SHOW' && req.query.individual)  andClauses.push({ parentId: { not: null } });
     if (type === 'BOOK' && !req.query.series && !req.query.individual) {
-      andClauses.push({ OR: [{ seriesName: null }, { seriesNumber: null }] });
+      // When text search is active, series books will be handled individually
+      // if multiple from same series match — otherwise via seriesRepresentatives
+      // Only apply the standalone-books filter when no text search
+      if (!q) andClauses.push({ OR: [{ seriesName: null }, { seriesNumber: null }] });
     }
     if (year && !req.query.yearFrom && !req.query.yearTo) {
       andClauses.push({ releaseYear: parseInt(year) });
@@ -273,9 +276,18 @@ router.get('/', optionalAuth, async (req, res, next) => {
           parent:  { select: { id: true, title: true, slug: true } },
         },
       });
-      // Deduplicate to lowest seriesNumber per seriesName
+        // Deduplicate to lowest seriesNumber per seriesName
+      // BUT: if a text search returns multiple books from the same series,
+      // show them individually rather than collapsing to the representative.
+      const seriesCountMap = new Map();
+      for (const book of allSeriesEntries) {
+        seriesCountMap.set(book.seriesName, (seriesCountMap.get(book.seriesName) || 0) + 1);
+      }
+
       const seriesMap = new Map();
       for (const book of allSeriesEntries) {
+        // If text search matches multiple books from same series, list individually
+        if (q && seriesCountMap.get(book.seriesName) > 1) continue;
         const existing = seriesMap.get(book.seriesName);
         if (!existing || (book.seriesNumber ?? Infinity) < (existing.seriesNumber ?? Infinity)) {
           seriesMap.set(book.seriesName, book);
