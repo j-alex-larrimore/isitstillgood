@@ -522,7 +522,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
         return {
         ...i,
-        displayTitle: isSeriesCard ? i.seriesName : undefined,
+        // Only use series name as display title when browsing (no text search)
+        // When searching by title, show the actual book title
+        displayTitle: (isSeriesCard && !q) ? i.seriesName : undefined,
         avgRating:   avg   || null,
         reviewCount: count || 0,
         seriesAvgRating,
