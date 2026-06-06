@@ -515,7 +515,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
     res.json({
       items: sortedItems.map(i => {
         // For series representative cards, use aggregated series ratings
-        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual;
+        // A book is a series card only when browsing (no text search) and it's the series rep
+        // When text search is active, books show individually with their own ratings
+        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && !q;
         const isTvParentCard = i.mediaType === 'TV_SHOW' && !i.parentId;
 
         // avgRating: series-level reviews (written about the whole series/show)
