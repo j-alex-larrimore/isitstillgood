@@ -323,7 +323,17 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // Merge standalone/unnumbered books with series representatives
     let finalItems;
     if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
-      finalItems = [...items, ...seriesRepresentatives];
+      if (q) {
+        // When searching: always show both series cards and individual book cards
+        // Series reps that also appear in items are valid — series card + book 1 card are distinct
+        // Only deduplicate when browsing (no search) to avoid cluttering the default view
+        finalItems = [...items, ...seriesRepresentatives];
+      } else {
+        // Default browse: series reps replace individual books — only show series card
+        const seriesRepIds = new Set(seriesRepresentatives.map(r => r.id));
+        const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
+        finalItems = [...dedupedItems, ...seriesRepresentatives];
+      }
     } else {
       finalItems = items;
     }
@@ -540,9 +550,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
         return {
         ...i,
-        // Only use series name as display title when browsing (no text search)
-        // When searching by title, show the actual book title
-        displayTitle: (isSeriesCard && !q) ? i.seriesName : undefined,
+        // Series cards always show the series name as their title
+        displayTitle: isSeriesCard ? i.seriesName : undefined,
         isSeries: isSeriesCard || undefined,
         avgRating:   avg   || null,
         reviewCount: count || 0,
