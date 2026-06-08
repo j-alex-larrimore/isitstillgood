@@ -294,6 +294,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         }
       }
       seriesRepresentatives = [...seriesMap.values()];
+      if (q) console.log(`[series] q="${q}" reps:`, seriesRepresentatives.map(r => `${r.title}(${r.id})`));
     }
 
     // For rating/lowest sort: fetch ALL items so we can sort them together
@@ -326,7 +327,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // Always remove series reps from items — they come through seriesRepresentatives
       // This prevents duplicates whether searching or browsing
       const seriesRepIds = new Set(seriesRepresentatives.map(r => r.id));
+      if (q) console.log(`[series] items before dedup:`, items.map(i => `${i.title}(${i.id})`));
+      if (q) console.log(`[series] repIds:`, [...seriesRepIds]);
       const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
+      if (q) console.log(`[series] dedupedItems:`, dedupedItems.map(i => `${i.title}(${i.id})`));
 
       if (q) {
         // When searching: add individual book entry only if the book's own title matches query
