@@ -337,9 +337,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
           .filter(r => r.title.toLowerCase().includes(qLower))
           .map(r => ({
             ...r,
-            displayTitle: undefined,
-            isSeries: undefined,
-            seriesAvgRating: undefined,
+            _forceIndividual: true, // prevents .map() from treating this as a series card
           }));
         finalItems = [...dedupedItems, ...seriesRepsAsIndividualBooks, ...seriesRepresentatives];
       } else {
@@ -542,7 +540,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         // A book is a series card if it's the series representative (lowest seriesNumber in series)
         // When text search active, series cards use individual book rating, not series aggregate
         const isSeriesRep = seriesRepresentatives.some(r => r.id === i.id);
-        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isSeriesRep;
+        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isSeriesRep && !i._forceIndividual;
         const isTvParentCard = i.mediaType === 'TV_SHOW' && !i.parentId;
 
         // avgRating: series-level reviews (written about the whole series/show)
