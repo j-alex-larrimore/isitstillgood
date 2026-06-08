@@ -323,15 +323,26 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // Merge standalone/unnumbered books with series representatives
     let finalItems;
     if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
+      // Always remove series reps from items — they come through seriesRepresentatives
+      // This prevents duplicates whether searching or browsing
+      const seriesRepIds = new Set(seriesRepresentatives.map(r => r.id));
+      const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
+
       if (q) {
-        // When searching: always show both series cards and individual book cards
-        // Series reps that also appear in items are valid — series card + book 1 card are distinct
-        // Only deduplicate when browsing (no search) to avoid cluttering the default view
-        finalItems = [...items, ...seriesRepresentatives];
+        // When searching: add individual book entry only if the book's own title matches query
+        // (not just the series name). This way "blacktongue thief" shows both cards,
+        // but "blacktongue series" shows only the series card.
+        const qLower = q.toLowerCase();
+        const seriesRepsAsIndividualBooks = seriesRepresentatives
+          .filter(r => r.title.toLowerCase().includes(qLower))
+          .map(r => ({
+            ...r,
+            displayTitle: undefined,
+            isSeries: undefined,
+            seriesAvgRating: undefined,
+          }));
+        finalItems = [...dedupedItems, ...seriesRepsAsIndividualBooks, ...seriesRepresentatives];
       } else {
-        // Default browse: series reps replace individual books — only show series card
-        const seriesRepIds = new Set(seriesRepresentatives.map(r => r.id));
-        const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
         finalItems = [...dedupedItems, ...seriesRepresentatives];
       }
     } else {
