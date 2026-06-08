@@ -321,9 +321,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy;
 
     // Merge standalone/unnumbered books with series representatives
-    let finalItems = type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy
-      ? [...items, ...seriesRepresentatives]
-      : items;
+    let finalItems;
+    if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
+      finalItems = [...items, ...seriesRepresentatives];
+    } else {
+      finalItems = items;
+    }
 
     // Compute avg rating per item.
     const itemIds = finalItems.map(i => i.id);
@@ -515,9 +518,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
     res.json({
       items: sortedItems.map(i => {
         // For series representative cards, use aggregated series ratings
-        // A book is a series card only when browsing (no text search) and it's the series rep
-        // When text search is active, books show individually with their own ratings
-        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && !q;
+        // A book is a series card if it's the series representative (lowest seriesNumber in series)
+        // When text search active, series cards use individual book rating, not series aggregate
+        const isSeriesRep = seriesRepresentatives.some(r => r.id === i.id);
+        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isSeriesRep;
         const isTvParentCard = i.mediaType === 'TV_SHOW' && !i.parentId;
 
         // avgRating: series-level reviews (written about the whole series/show)
@@ -539,6 +543,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         // Only use series name as display title when browsing (no text search)
         // When searching by title, show the actual book title
         displayTitle: (isSeriesCard && !q) ? i.seriesName : undefined,
+        isSeries: isSeriesCard || undefined,
         avgRating:   avg   || null,
         reviewCount: count || 0,
         seriesAvgRating,
