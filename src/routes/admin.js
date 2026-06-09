@@ -629,7 +629,7 @@ function cleanBookDescription(raw) {
   }
 
   const cleaned = paragraphs.slice(descStart).join('\n\n') || text;
-  return cleaned.slice(0, 1000).trim();
+  return cleaned.slice(0, 3000).trim();
 }
 
 // ─── GET /api/admin/lookup/googlebooks ───────────────────────────────────────
@@ -819,7 +819,7 @@ router.get('/lookup/openlibrary/:id', requireAdmin, async (req, res, next) => {
     res.json({
       openLibraryId: req.params.id,
       title:         data.title,
-      description:   description.slice(0, 1000),
+      description:   description.slice(0, 3000),
       authors:       authorNames.filter(Boolean),
       releaseYear,
       imageUrl:      coverId

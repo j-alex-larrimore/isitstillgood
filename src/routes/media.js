@@ -256,6 +256,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // IMPORTANT: Apply the same filters (person, genre, tag, text) so searching for an
     // author doesn't return series by unrelated authors.
     let seriesRepresentatives = [];
+    let allSeriesEntries = [];
+    let seriesCountMap = new Map();
     if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
       // Build a series-specific where clause that includes all active filters
       const seriesWhereClauses = [
@@ -268,7 +270,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (personFilter)   seriesWhereClauses.push(personFilter);
       if (req.query.tag)  seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
 
-      const allSeriesEntries = await prisma.mediaItem.findMany({
+      allSeriesEntries = await prisma.mediaItem.findMany({
         where: { AND: seriesWhereClauses },
         include: {
           _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
@@ -279,22 +281,19 @@ router.get('/', optionalAuth, async (req, res, next) => {
         // Deduplicate to lowest seriesNumber per seriesName
       // BUT: if a text search returns multiple books from the same series,
       // show them individually rather than collapsing to the representative.
-      const seriesCountMap = new Map();
+      seriesCountMap = new Map();
       for (const book of allSeriesEntries) {
         seriesCountMap.set(book.seriesName, (seriesCountMap.get(book.seriesName) || 0) + 1);
       }
 
       const seriesMap = new Map();
       for (const book of allSeriesEntries) {
-        // If text search matches multiple books from same series, list individually
-        if (q && seriesCountMap.get(book.seriesName) > 1) continue;
         const existing = seriesMap.get(book.seriesName);
         if (!existing || (book.seriesNumber ?? Infinity) < (existing.seriesNumber ?? Infinity)) {
           seriesMap.set(book.seriesName, book);
         }
       }
       seriesRepresentatives = [...seriesMap.values()];
-      if (q) console.log(`[series] q="${q}" reps:`, seriesRepresentatives.map(r => `${r.title}(${r.id})`));
     }
 
     // For rating/lowest sort: fetch ALL items so we can sort them together
@@ -327,23 +326,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // Always remove series reps from items — they come through seriesRepresentatives
       // This prevents duplicates whether searching or browsing
       const seriesRepIds = new Set(seriesRepresentatives.map(r => r.id));
-      if (q) console.log(`[series] items before dedup:`, items.map(i => `${i.title}(${i.id})`));
-      if (q) console.log(`[series] repIds:`, [...seriesRepIds]);
       const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
-      if (q) console.log(`[series] dedupedItems:`, dedupedItems.map(i => `${i.title}(${i.id})`));
 
       if (q) {
-        // When searching: add individual book entry only if the book's own title matches query
-        // (not just the series name). This way "blacktongue thief" shows both cards,
-        // but "blacktongue series" shows only the series card.
         const qLower = q.toLowerCase();
-        const seriesRepsAsIndividualBooks = seriesRepresentatives
+
+        // Non-rep series books that match (multiple matches in same series)
+        const multiMatchBooks = allSeriesEntries.filter(b =>
+          !seriesRepIds.has(b.id) && // not a series rep
+          (seriesCountMap.get(b.seriesName) || 0) > 1 // series has multiple matches
+        );
+
+        // Series reps whose own title matches (so both series card + individual card shown)
+        const repsThatMatchTitle = seriesRepresentatives
           .filter(r => r.title.toLowerCase().includes(qLower))
-          .map(r => ({
-            ...r,
-            _forceIndividual: true, // prevents .map() from treating this as a series card
-          }));
-        finalItems = [...dedupedItems, ...seriesRepsAsIndividualBooks, ...seriesRepresentatives];
+          .map(r => ({ ...r, _forceIndividual: true }));
+
+        finalItems = [...dedupedItems, ...multiMatchBooks, ...repsThatMatchTitle, ...seriesRepresentatives];
       } else {
         finalItems = [...dedupedItems, ...seriesRepresentatives];
       }
