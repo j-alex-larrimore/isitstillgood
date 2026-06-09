@@ -25,7 +25,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // reviewedBy filter — look up the user and get their reviewed item IDs
     let reviewedByIds = undefined;
     if (reviewedBy) {
-      console.log(`[media] reviewedBy search for: ${reviewedBy}`);
       const reviewedByUser = await prisma.user.findFirst({
         where: {
           OR: [
@@ -36,14 +35,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
         select: { id: true },
       });
       if (reviewedByUser) {
-        console.log(`[media] found user ${reviewedByUser.id}, fetching their reviews`);
         // Get all media IDs this user has reviewed publicly
         const theirReviews = await prisma.review.findMany({
           where: { userId: reviewedByUser.id, visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } },
           select: { mediaItemId: true, rating: true },
         });
         reviewedByIds = theirReviews.map(r => r.mediaItemId);
-        console.log(`[media] user has ${reviewedByIds.length} reviewed items`);
         // Store ratings for enriching results later
         req.reviewedByRatings = Object.fromEntries(theirReviews.map(r => [r.mediaItemId, r.rating]));
       } else {
@@ -329,20 +326,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
 
       if (q) {
-        const qLower = q.toLowerCase();
-
-        // Non-rep series books that match (multiple matches in same series)
-        const multiMatchBooks = allSeriesEntries.filter(b =>
-          !seriesRepIds.has(b.id) && // not a series rep
-          (seriesCountMap.get(b.seriesName) || 0) > 1 // series has multiple matches
-        );
-
-        // Series reps whose own title matches (so both series card + individual card shown)
-        const repsThatMatchTitle = seriesRepresentatives
-          .filter(r => r.title.toLowerCase().includes(qLower))
+        // Non-rep series books are already in dedupedItems — no need for multiMatchBooks
+        // Series reps that matched the query (for any reason: title, author, description, seriesName)
+        // should also appear as individual book cards
+        const queryMatchedIds = new Set(items.map(i => i.id));
+        const repsThatMatchedQuery = seriesRepresentatives
+          .filter(r => queryMatchedIds.has(r.id))
           .map(r => ({ ...r, _forceIndividual: true }));
 
-        finalItems = [...dedupedItems, ...multiMatchBooks, ...repsThatMatchTitle, ...seriesRepresentatives];
+        finalItems = [...dedupedItems, ...repsThatMatchedQuery, ...seriesRepresentatives];
       } else {
         finalItems = [...dedupedItems, ...seriesRepresentatives];
       }
