@@ -11,10 +11,11 @@ function ok(req, res) {
 }
 
 function ratingToVerdict(r) {
-  if (r >= 9) return 'TIMELESS';
-  if (r >= 7) return 'STILL_GOOD';
-  if (r >= 4) return 'MIXED';
-  return 'NOT_GOOD';
+  const words = {
+    10: 'Perfect', 9: 'Excellent', 8: 'Great', 7: 'Good', 6: 'Solid',
+    5: 'Fine', 4: 'Mediocre', 3: 'Bad', 2: 'Awful', 1: 'The Worst',
+  };
+  return words[Math.round(r)] || 'Unrated';
 }
 
 // ─── GET /api/reviews/:id ─────────────────────────────────────────────────

@@ -14,10 +14,13 @@ function esc(s) {
 }
 
 function ratingToVerdict(r) {
-  if (r >= 9) return '★ Timeless';
-  if (r >= 7) return '✓ Still Good';
-  if (r >= 4) return '~ Mixed';
-  return '✗ Not Good';
+  const words = {
+    10: 'Perfect', 9: 'Excellent', 8: 'Great', 7: 'Good', 6: 'Solid',
+    5: 'Fine', 4: 'Mediocre', 3: 'Bad', 2: 'Awful', 1: 'The Worst',
+  };
+  const rounded = Math.round(r);
+  const icon = rounded >= 9 ? '★' : rounded >= 6 ? '✓' : rounded >= 4 ? '~' : '✗';
+  return `${icon} ${words[rounded] || 'Unrated'}`;
 }
 
 // ─── GET /render/item/:slug ───────────────────────────────────────────────────

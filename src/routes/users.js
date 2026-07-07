@@ -206,17 +206,24 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       _count: { rating: true },
     });
 
-    // Verdict breakdown — how many TIMELESS, STILL_GOOD etc.
+    // Verdict breakdown — legacy field kept for compatibility
     const verdicts = await prisma.review.groupBy({
       by: ['verdict'],
       where: { userId: target.id },
       _count: { verdict: true },
     });
 
+    // Rating breakdown — count per rating value 1-10 (the new word-based system)
+    const ratingGroups = await prisma.review.groupBy({
+      by: ['rating'],
+      where: { userId: target.id },
+      _count: { rating: true },
+    });
+    const ratingCounts = Object.fromEntries(ratingGroups.map(g => [g.rating, g._count.rating]));
+
     res.json({
       user: {
         ...target,
-        // Only expose email to the profile owner
         email: isSelf ? target.email : undefined,
       },
       isSelf,
@@ -225,6 +232,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
         totalReviews:  stats._count.rating,
         avgRating:     stats._avg.rating,
         verdictCounts: Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
+        ratingCounts,
       },
     });
   } catch (err) { next(err); }
