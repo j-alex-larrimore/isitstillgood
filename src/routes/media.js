@@ -192,7 +192,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const andClauses = [];
 
     if (type)                             andClauses.push({ mediaType: type });
-    if (type === 'TV_SHOW' && !req.query.individual) andClauses.push({ parentId: null });
+    // TV filtering: normally show only parent shows (parentId: null).
+    // BUT when searching by person/text (which can match an actor), also allow
+    // seasons — a guest actor in one season should surface that specific season.
+    // We dedupe below: if the parent show already matches, we drop its seasons.
+    const tvPersonSearch = (personFilter || (textFilter && q)) && type === 'TV_SHOW';
+    if (type === 'TV_SHOW' && !req.query.individual && !tvPersonSearch) {
+      andClauses.push({ parentId: null });
+    }
     if (type === 'TV_SHOW' && req.query.individual)  andClauses.push({ parentId: { not: null } });
     if (type === 'BOOK' && !req.query.series && !req.query.individual) {
       // When text search is active, series books will be handled individually
@@ -326,20 +333,43 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const dedupedItems = items.filter(i => !seriesRepIds.has(i.id));
 
       if (q) {
-        // Non-rep series books are already in dedupedItems — no need for multiMatchBooks
-        // Series reps that matched the query (for any reason: title, author, description, seriesName)
-        // should also appear as individual book cards
-        const queryMatchedIds = new Set(items.map(i => i.id));
-        const repsThatMatchedQuery = seriesRepresentatives
-          .filter(r => queryMatchedIds.has(r.id))
+        const qLower = q.toLowerCase();
+        // An individual book card should only appear when the query matches the
+        // book's OWN title or description — NOT when it matches the author or series name.
+        // (Author/series-name matches should collapse to the series card only.)
+        const matchesBookText = (b) =>
+          (b.title && b.title.toLowerCase().includes(qLower)) ||
+          (b.description && b.description.toLowerCase().includes(qLower));
+
+        // Non-rep series books: keep only those whose own title/description matched
+        const individualBooks = dedupedItems.filter(b =>
+          !b.seriesName || matchesBookText(b)
+        );
+
+        // Series reps: show as individual book card only if the book's own text matched
+        const repsAsIndividualBooks = seriesRepresentatives
+          .filter(r => matchesBookText(r))
           .map(r => ({ ...r, _forceIndividual: true }));
 
-        finalItems = [...dedupedItems, ...repsThatMatchedQuery, ...seriesRepresentatives];
+        finalItems = [...individualBooks, ...repsAsIndividualBooks, ...seriesRepresentatives];
       } else {
         finalItems = [...dedupedItems, ...seriesRepresentatives];
       }
     } else {
       finalItems = items;
+    }
+
+    // TV person search: if both a parent show AND its seasons matched (e.g. actor is
+    // main cast so the show matches, and also in specific seasons), keep only the parent
+    // show and drop its seasons to avoid clutter. Seasons whose parent did NOT match
+    // (guest actor not in main cast) are kept.
+    if (tvPersonSearch) {
+      const matchedParentIds = new Set(
+        finalItems.filter(i => i.mediaType === 'TV_SHOW' && !i.parentId).map(i => i.id)
+      );
+      finalItems = finalItems.filter(i =>
+        !(i.parentId && matchedParentIds.has(i.parentId))
+      );
     }
 
     // Compute avg rating per item.

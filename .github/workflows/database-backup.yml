@@ -1,0 +1,53 @@
+name: Database Backup to Backblaze B2
+
+on:
+  schedule:
+    - cron: '0 8 * * *'      # daily at 08:00 UTC
+  workflow_dispatch: {}       # manual trigger from the Actions tab
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL client and rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Create compressed database dump
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+        run: |
+          STAMP=$(date +%Y-%m-%d_%H%M%S)
+          pg_dump "$DATABASE_URL" --no-owner --no-privileges \
+            | gzip > "backup_${STAMP}.sql.gz"
+          echo "DUMP_FILE=backup_${STAMP}.sql.gz" >> "$GITHUB_ENV"
+          echo "Created backup_${STAMP}.sql.gz ($(du -h backup_${STAMP}.sql.gz | cut -f1))"
+
+      - name: Configure rclone for Backblaze B2
+        env:
+          B2_KEY_ID:  ${{ secrets.B2_KEY_ID }}
+          B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [b2]
+          type = b2
+          account = ${B2_KEY_ID}
+          key = ${B2_APP_KEY}
+          EOF
+
+      - name: Upload dump to B2
+        env:
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          rclone copy "$DUMP_FILE" "b2:${B2_BUCKET}/daily/" --progress
+          echo "Uploaded $DUMP_FILE to b2:${B2_BUCKET}/daily/"
+
+      - name: Prune B2 backups older than 30 days
+        env:
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          rclone delete "b2:${B2_BUCKET}/daily/" --min-age 30d
+          echo "Pruned backups older than 30 days"
