@@ -2,8 +2,8 @@ name: Database Backup to Backblaze B2
 
 on:
   schedule:
-    - cron: '0 8 * * *'      # daily at 08:00 UTC
-  workflow_dispatch: {}       # manual trigger from the Actions tab
+    - cron: '0 8 * * *'
+  workflow_dispatch: {}
 
 jobs:
   backup:
@@ -11,36 +11,49 @@ jobs:
     steps:
       - name: Install PostgreSQL 18 client and rclone
         run: |
-          # Add the official PostgreSQL apt repo to get pg_dump v18
-          # (Ubuntu's default repo only ships v16, which can't dump a v18 server)
+          set -e
           sudo apt-get update
           sudo apt-get install -y curl ca-certificates gnupg lsb-release
+
+          # Add the official PostgreSQL apt repository (has v18; Ubuntu's default only has v16)
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
             --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          CODENAME=$(lsb_release -cs)
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
+
+          # Remove any pre-installed older client so it can't shadow v18 on PATH
+          sudo apt-get remove -y postgresql-client-common postgresql-client-16 || true
           sudo apt-get install -y postgresql-client-18
+
           curl -fsSL https://rclone.org/install.sh | sudo bash
-          # Confirm we now have v18
-          pg_dump --version
+
+          # Verify: the v18 binary must exist, or fail the job now
+          if [ ! -x /usr/lib/postgresql/18/bin/pg_dump ]; then
+            echo "ERROR: PostgreSQL 18 client did not install correctly"
+            ls -la /usr/lib/postgresql/ || true
+            exit 1
+          fi
+          echo "Installed: $(/usr/lib/postgresql/18/bin/pg_dump --version)"
 
       - name: Create compressed database dump
         env:
           DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
         run: |
+          set -e
           if [ -z "$DATABASE_URL" ]; then
             echo "ERROR: DATABASE_PUBLIC_URL secret is empty or not set"
             exit 1
           fi
 
+          # Use the full path to the v18 binary — do NOT rely on PATH
+          PGDUMP=/usr/lib/postgresql/18/bin/pg_dump
+          echo "Using: $($PGDUMP --version)"
+
           STAMP=$(date +%Y-%m-%d_%H%M%S)
           DUMP="backup_${STAMP}.sql.gz"
-
-          # Use the v18 binary explicitly in case an older one is still on PATH
-          PGDUMP=$(ls /usr/lib/postgresql/18/bin/pg_dump 2>/dev/null || echo pg_dump)
 
           set -o pipefail
           "$PGDUMP" "$DATABASE_URL" --no-owner --no-privileges | gzip > "$DUMP"
@@ -61,6 +74,7 @@ jobs:
           B2_KEY_ID:  ${{ secrets.B2_KEY_ID }}
           B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
         run: |
+          set -e
           if [ -z "$B2_KEY_ID" ] || [ -z "$B2_APP_KEY" ]; then
             echo "ERROR: B2_KEY_ID or B2_APP_KEY secret is empty or not set"
             exit 1
@@ -77,6 +91,7 @@ jobs:
         env:
           B2_BUCKET: ${{ secrets.B2_BUCKET }}
         run: |
+          set -e
           if [ -z "$B2_BUCKET" ]; then
             echo "ERROR: B2_BUCKET secret is empty or not set"
             exit 1
