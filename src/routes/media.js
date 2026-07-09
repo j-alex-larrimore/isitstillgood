@@ -189,7 +189,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     // Build where clause using AND array to avoid OR key collisions when
     // multiple OR-based filters (textFilter, personFilter, book series) are combined.
-    const andClauses = [];
+    // verified:true always applies here — this is the public browse/search endpoint,
+    // items awaiting admin review (scripts/bulk-import.js, admin bulk-import) are
+    // reviewed via GET /api/admin/media/pending instead, not this route.
+    const andClauses = [{ verified: true }];
 
     if (type)                             andClauses.push({ mediaType: type });
     // TV filtering: normally show only parent shows (parentId: null).
@@ -266,6 +269,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // Build a series-specific where clause that includes all active filters
       const seriesWhereClauses = [
         { mediaType: 'BOOK' },
+        { verified: true },
         { seriesName: { not: null } },
         { seriesNumber: { not: null } },
       ];
@@ -631,7 +635,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         },
         // For parent shows: include child seasons ordered by season number
         seasonEntries: {
-          where: { seasonNumber: { not: null } },
+          where: { seasonNumber: { not: null }, verified: true },
           select: {
             id: true, title: true, slug: true,
             seasonNumber: true, releaseYear: true, imageUrl: true,
@@ -642,6 +646,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       },
     });
     if (!item) return res.status(404).json({ error: 'Not found' });
+    // Items awaiting admin review aren't publicly reachable — same as if they
+    // didn't exist. Review happens via GET /api/admin/media/pending instead.
+    if (!item.verified) return res.status(404).json({ error: 'Not found' });
 
     // For TV seasons: merge parent cast with season-specific cast.
     // Exclude any cast members listed in excludedCast (departed actors).
@@ -672,7 +679,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     let seriesRepSlug = null;
     if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
       const lowestInSeries = await prisma.mediaItem.findFirst({
-        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null } },
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true },
         orderBy: { seriesNumber: 'asc' },
         select: { id: true, slug: true },
       });
@@ -703,7 +710,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     } else if (isBookSeries && item.seriesName) {
       // Fetch all books in this series ordered by seriesNumber
       seriesBooks = await prisma.mediaItem.findMany({
-        where: { mediaType: 'BOOK', seriesName: item.seriesName },
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, verified: true },
         select: {
           id: true, title: true, slug: true,
           seriesNumber: true, releaseYear: true, imageUrl: true,

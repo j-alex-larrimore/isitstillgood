@@ -51,7 +51,13 @@ router.get('/', requireAuth, [
     const where = {
       ...(authorIds && { userId: { in: authorIds } }),
       visibility: authorIds ? { in: ['PUBLIC', 'FRIENDS_ONLY'] } : 'PUBLIC',
-      ...(req.query.mediaType && { mediaItem: { mediaType: req.query.mediaType } }),
+      // mediaItem.verified:true guards against a review somehow existing on an
+      // item still awaiting admin approval — shouldn't normally happen since
+      // unverified items aren't reachable to review in the first place.
+      mediaItem: {
+        verified: true,
+        ...(req.query.mediaType && { mediaType: req.query.mediaType }),
+      },
       ...(since && { updatedAt: { gte: since } }),
     };
 
@@ -152,15 +158,17 @@ router.get('/trending', optionalAuth, async (req, res, next) => {
     ]);
 
     const mediaItems = await prisma.mediaItem.findMany({
-      where: { id: { in: trending.map(t => t.mediaItemId) } },
+      where: { id: { in: trending.map(t => t.mediaItemId) }, verified: true },
       select: { id: true, title: true, slug: true, mediaType: true, releaseYear: true, imageUrl: true },
     });
 
-    const result = trending.map(t => ({
-      ...mediaItems.find(m => m.id === t.mediaItemId),
-      reviewCount: t._count.mediaItemId,
-      avgRating:   t._avg.rating,
-    }));
+    const result = trending
+      .map(t => {
+        const media = mediaItems.find(m => m.id === t.mediaItemId);
+        if (!media) return null; // filtered out by verified:true above
+        return { ...media, reviewCount: t._count.mediaItemId, avgRating: t._avg.rating };
+      })
+      .filter(Boolean);
 
     if (!req.user) {
       trendingCache = result;

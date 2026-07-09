@@ -38,6 +38,14 @@ model MediaItem {
   tags            String[]  // freeform tags e.g. Marvel, Star Wars, HBO, Disney
   excludedCast    String[]  // names of cast members excluded from this season (departed actors)
 
+  // Review gate for automated/bulk-added items (scripts/bulk-import.js, the
+  // admin bulk-import route). Defaults to true so existing items and items
+  // added one at a time through the admin form (already reviewed by a human
+  // as they filled the form) stay visible immediately. Bulk-creation paths
+  // explicitly set this to false so new items queue for admin approval
+  // before showing up in public browse/search/feed/sitemap.
+  verified        Boolean    @default(true)
+
   // External ratings — IMDb and RT removed (licensing concerns)
   // Community ratings stored here, fetched via TMDB, Open Library, IGDB
   tmdbId          String?   // TMDB movie/show ID
@@ -81,6 +89,7 @@ model MediaItem {
   @@index([mediaType])
   @@index([title])
   @@index([releaseYear])
+  @@index([verified])
 }
 
 model Person {

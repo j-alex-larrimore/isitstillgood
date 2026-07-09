@@ -36,7 +36,7 @@ router.get('/item/:slug', async (req, res, next) => {
       },
     });
 
-    if (!item) return res.status(404).send('<h1>Not Found</h1>');
+    if (!item || !item.verified) return res.status(404).send('<h1>Not Found</h1>');
 
     // Community stats
     const stats = await prisma.review.aggregate({

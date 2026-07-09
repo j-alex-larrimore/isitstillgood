@@ -90,7 +90,7 @@ v18 client explicitly from the official PGDG apt repo.
 
 ## Adding media to the database
 
-Two ways, both going through the same lookup/normalization logic
+Three ways, all going through the same lookup/normalization logic
 (`src/lib/mediaHelpers.js` + `src/services/mediaLookup.js`):
 
 - **One at a time**: the admin UI's add-media form (calls
@@ -104,6 +104,12 @@ Two ways, both going through the same lookup/normalization logic
   see the header comment in the script for the CSV format and
   `scripts/sample-media-import.csv` for an example. TV seasons and full book
   series still need to be added/linked individually afterward.
+- **Conversationally**: just paste a freeform list of titles into a Claude
+  Code session, grouped by type or with type noted per title (e.g.
+  "Movies: Sinners, The Batman / Books: Project Hail Mary by Andy Weir").
+  Claude Code writes a temporary CSV under `scripts/`, runs the importer
+  with `--dry-run` first, shows the results, and only runs it for real
+  after you confirm — it should never skip the dry-run step for a new list.
 
 ## Conventions
 

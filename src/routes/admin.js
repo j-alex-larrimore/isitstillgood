@@ -199,7 +199,7 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
       'title','description','imageUrl','genres','releaseYear',
       'tmdbId','tmdbRating','tags','excludedCast',
       'goodreadsId','openCriticId','openCriticScore',
-      'seasons','seriesName','seriesNumber',
+      'seasons','seriesName','seriesNumber','verified',
     ];
     const data = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => allowed.includes(k))
@@ -559,6 +559,36 @@ router.get('/media/search', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── GET /api/admin/media/pending ─── Items awaiting review ──────────────────
+// Anything created via scripts/bulk-import.js or the admin bulk-import route
+// lands here with verified:false until an admin approves it (PATCH
+// /api/admin/media/:id with { verified: true }) — see the "verified" field
+// comment in prisma/schema.prisma for why. Newest imports first.
+router.get('/media/pending', requireAdmin, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const take = 50;
+    const where = { verified: false };
+    const [items, total] = await Promise.all([
+      prisma.mediaItem.findMany({
+        where,
+        select: {
+          id: true, slug: true, title: true, mediaType: true, releaseYear: true,
+          imageUrl: true, description: true, genres: true, tags: true,
+          seriesName: true, seriesNumber: true, tmdbId: true, goodreadsId: true,
+          openCriticId: true, createdAt: true,
+          directors: { select: { id: true, name: true }, take: 20 },
+          authors:   { select: { id: true, name: true }, take: 20 },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * take, take,
+      }),
+      prisma.mediaItem.count({ where }),
+    ]);
+    res.json({ items, total, page, pages: Math.ceil(total / take) });
+  } catch (err) { next(err); }
+});
+
 // ─── GET /api/admin/media/by-slug/:slug ──────────────────────────────────────
 // Returns full item data for the edit form — no redirect logic, no aggregation.
 // Used by the Edit Media tab so single-season TV parents load correctly.
@@ -658,6 +688,7 @@ router.post('/bulk-import', requireAdmin, async (req, res, next) => {
           title:       finalTitle,
           slug,
           releaseYear: m.releaseYear,
+          verified:    false, // queues for admin review before showing up publicly
           description: m.description,
           imageUrl:    m.imageUrl,
           genres:      m.genres || [],

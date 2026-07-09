@@ -6,9 +6,12 @@
 //   node scripts/bulk-import.js <file.csv|file.json> [--dry-run] [--tags="Tag One,Tag Two"]
 //
 // Input file formats:
-//   CSV  — header row: mediaType,title,year,author,seriesName,seriesNumber,tags
-//          (year, author, seriesName, seriesNumber, tags are all optional;
-//           tags is semicolon-separated, e.g. "HBO;Prestige TV")
+//   CSV  — header row: mediaType,title,year,author,seriesName,seriesNumber,tags,genres
+//          (everything but mediaType and title is optional; tags and genres
+//           are semicolon-separated, e.g. "HBO;Prestige TV". genres, when
+//           given, overrides whatever the lookup returns — useful for
+//           pinning exact genre strings instead of Google Books/TMDB's own
+//           (often noisy) category text)
 //   JSON — array of objects with the same fields:
 //          [{ "mediaType": "MOVIE", "title": "Sinners", "year": 2025 }, ...]
 //
@@ -80,26 +83,70 @@ function normalizeRow(row) {
     tags: Array.isArray(row.tags)
       ? row.tags
       : (row.tags ? String(row.tags).split(';').map(t => t.trim()).filter(Boolean) : []),
+    // Optional override — when given, replaces whatever genres the lookup returns
+    genres: Array.isArray(row.genres)
+      ? row.genres
+      : (row.genres ? String(row.genres).split(';').map(g => g.trim()).filter(Boolean) : []),
   };
 }
 
 // ─── Best-match selection ─────────────────────────────────────────────────
-// When a year is given, prefer the candidate whose releaseYear matches it;
-// otherwise fall back to the first (most relevant) search result.
-function pickBestMatch(candidates, year) {
+// Popular/heavily-republished titles return a lot of noise in search results —
+// translations, study guides, abridged/split editions, "Title by Author"
+// listings. Prefer candidates whose title exactly matches (after stripping
+// trailing "by <author>" and bracketed/parenthetical annotations) before
+// falling back to year, then to the first (most relevant) result.
+function normalizeTitleForMatch(t) {
+  return (t || '')
+    .toLowerCase()
+    .replace(/\s*\(.*?\)\s*/g, ' ')
+    .replace(/\s*\[.*?\]\s*/g, ' ')
+    .replace(/\s+by\s+[a-z.\s]+$/i, '')
+    .replace(/[.,:;!?'"]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function pickBestMatch(candidates, year, expectedTitle) {
   if (!candidates.length) return null;
-  if (year) {
-    const exact = candidates.find(c => parseInt(c.releaseYear) === year);
-    if (exact) return exact;
+  let pool = candidates;
+  if (expectedTitle) {
+    const normExpected = normalizeTitleForMatch(expectedTitle);
+    const exactTitleMatches = candidates.filter(c => normalizeTitleForMatch(c.title) === normExpected);
+    if (exactTitleMatches.length) pool = exactTitleMatches;
   }
-  return candidates[0];
+  if (year) {
+    const yearMatch = pool.find(c => parseInt(c.releaseYear) === year);
+    if (yearMatch) return yearMatch;
+  }
+  return pool[0];
+}
+
+// Books specifically attract study guides, teacher's editions, and
+// companion volumes that share the real book's title. Score candidates so
+// the actual novel — single expected author, full page count — sorts first,
+// before title/year matching narrows the pool.
+function scoreBookCandidate(c, expectedAuthor) {
+  let score = 0;
+  const authors = c.authors || [];
+  if (expectedAuthor) {
+    const lastName = expectedAuthor.trim().split(/\s+/).pop().toLowerCase();
+    const hasExpectedAuthor = authors.some(a => a.toLowerCase().includes(lastName));
+    if (hasExpectedAuthor && authors.length === 1) score += 2;
+    else if (hasExpectedAuthor) score += 1;
+  }
+  if (typeof c.pageCount === 'number') {
+    if (c.pageCount >= 150) score += 2;
+    else if (c.pageCount >= 50) score += 1;
+  }
+  return score;
 }
 
 // ─── Per-type lookup ───────────────────────────────────────────────────────
 async function lookupMovieOrTv(row) {
   const tmdbType = row.mediaType === 'TV_SHOW' ? 'tv' : 'movie';
   const candidates = await searchTmdb(row.title, tmdbType, row.year);
-  const match = pickBestMatch(candidates, row.year);
+  const match = pickBestMatch(candidates, row.year, row.title);
   if (!match) return null;
   const detail = await getTmdbDetail(match.tmdbId, tmdbType);
   return {
@@ -120,9 +167,16 @@ async function lookupBook(row) {
   let candidates = [];
   if (process.env.GOOGLE_BOOKS_API_KEY) {
     candidates = await searchGoogleBooks(row.title, row.author, row.year);
+    candidates = [...candidates].sort((a, b) => scoreBookCandidate(b, row.author) - scoreBookCandidate(a, row.author));
   }
   if (candidates.length) {
-    const match = pickBestMatch(candidates, row.year);
+    // Don't let year steer selection here — candidates are already sorted by
+    // quality (author match + page count), and a low-quality edition (reader,
+    // study guide) can coincidentally carry the "right" year metadata while a
+    // clean, full-text edition carries a later reprint year. The caller's
+    // row.year (when given) is trusted as the true release year regardless
+    // of which edition record we end up pulling title/genres/cover from.
+    const match = pickBestMatch(candidates, null, row.title);
     const detail = await getGoogleBooksDetail(match.googleBooksId);
     return {
       goodreadsId: null, // Google Books results aren't stored under goodreadsId
@@ -137,7 +191,8 @@ async function lookupBook(row) {
 
   // Fall back to Open Library — no API key required
   candidates = await searchOpenLibrary(row.title, row.year, row.author);
-  const match = pickBestMatch(candidates, row.year);
+  candidates = [...candidates].sort((a, b) => scoreBookCandidate(b, row.author) - scoreBookCandidate(a, row.author));
+  const match = pickBestMatch(candidates, null, row.title);
   if (!match) return null;
   const detail = await getOpenLibraryDetail(match.openLibraryId, row.year);
   return {
@@ -153,7 +208,7 @@ async function lookupBook(row) {
 
 async function lookupGame(row) {
   const candidates = await searchIgdb(row.title, row.year);
-  const match = pickBestMatch(candidates, row.year);
+  const match = pickBestMatch(candidates, row.year, row.title);
   if (!match) return null;
   return {
     openCriticId:    match.igdbId,
@@ -228,24 +283,35 @@ async function main() {
       }
 
       const tags = normalizeTags([...globalTags, ...row.tags]);
+      // Row-level genres override whatever the lookup returned — lets a
+      // caller pin exact genre strings instead of relying on Google Books/
+      // TMDB/IGDB's own (often noisy) category text.
+      const genres = row.genres.length ? row.genres : (data.genres || []);
+      // For books specifically, trust the caller's year over the matched
+      // edition's metadata — Google Books/Open Library editions are often
+      // reprints, and the row's year is usually the true original publication
+      // year (lookupBook already ignores year when picking a candidate, for
+      // the same reason).
+      const releaseYear = (row.mediaType === 'BOOK' && row.year) ? row.year : data.releaseYear;
 
       if (dryRun) {
-        console.log(`+ "${data.title}" (${row.mediaType}, ${data.releaseYear || 'year unknown'}) — would be added`);
+        console.log(`+ "${data.title}" (${row.mediaType}, ${releaseYear || 'year unknown'}) — would be added [${genres.join(', ')}]`);
         results.added.push(data.title);
         await sleep(300);
         continue;
       }
 
-      const slug = await uniqueSlug(slugify(data.title, data.releaseYear));
+      const slug = await uniqueSlug(slugify(data.title, releaseYear));
       await prisma.mediaItem.create({
         data: {
           mediaType:       row.mediaType,
           title:           data.title,
           slug,
-          releaseYear:     data.releaseYear,
+          releaseYear,
+          verified:        false, // queues for admin review before showing up publicly
           description:     data.description || null,
           imageUrl:        data.imageUrl || null,
-          genres:          data.genres || [],
+          genres,
           tags,
           tmdbId:          data.tmdbId || null,
           tmdbRating:      data.tmdbRating || null,
@@ -260,7 +326,7 @@ async function main() {
           authors:         await connectPersons(data.authors || []),
         },
       });
-      console.log(`✓ "${data.title}" (${row.mediaType}, ${data.releaseYear || 'year unknown'}) — added`);
+      console.log(`✓ "${data.title}" (${row.mediaType}, ${releaseYear || 'year unknown'}) — added`);
       results.added.push(data.title);
     } catch (err) {
       console.log(`✗ "${row.title}" — ${err.message}`);

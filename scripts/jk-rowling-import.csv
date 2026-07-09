@@ -1,0 +1,8 @@
+mediaType,title,year,author,seriesName,seriesNumber,tags,genres
+BOOK,Harry Potter and the Philosopher's Stone,1997,J.K. Rowling,Harry Potter,1,Harry Potter,Fantasy;Fiction;Schools;Young Adult
+BOOK,Harry Potter and the Chamber of Secrets,1998,J.K. Rowling,Harry Potter,2,Harry Potter,Fantasy;Fiction;Schools;Young Adult
+BOOK,Harry Potter and the Prisoner of Azkaban,1999,J.K. Rowling,Harry Potter,3,Harry Potter,Fantasy;Fiction;Schools;Young Adult
+BOOK,Harry Potter and the Goblet of Fire,2000,J.K. Rowling,Harry Potter,4,Harry Potter,Fantasy;Fiction;Schools;Young Adult
+BOOK,Harry Potter and the Order of the Phoenix,2003,J.K. Rowling,Harry Potter,5,Harry Potter,Fantasy;Fiction;Schools;Young Adult
+BOOK,Harry Potter and the Half-Blood Prince,2005,J.K. Rowling,Harry Potter,6,Harry Potter,Fantasy;Fiction;Schools;Young Adult
+BOOK,Harry Potter and the Deathly Hallows,2007,J.K. Rowling,Harry Potter,7,Harry Potter,Fantasy;Fiction;Schools;Young Adult

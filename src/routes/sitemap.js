@@ -11,7 +11,7 @@ router.get('/', async (req, res, next) => {
     // Fetch all public-facing media items — exclude TV seasons (parentId not null)
     // since they're accessed via the parent show page
     const items = await prisma.mediaItem.findMany({
-      where: { parentId: null },
+      where: { parentId: null, verified: true },
       select: { slug: true, updatedAt: true, mediaType: true },
       orderBy: { updatedAt: 'desc' },
     });

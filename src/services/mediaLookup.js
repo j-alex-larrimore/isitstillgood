@@ -4,6 +4,22 @@
 // against TMDB/Google Books/Open Library/IGDB identically.
 const { getIgdbToken } = require('./externalRatings');
 
+// ─── Retry wrapper ─────────────────────────────────────────────────────────
+// These APIs (Google Books especially) intermittently return transient 5xx
+// errors under normal use. Retry a couple of times with backoff before
+// giving up, but don't retry 4xx — those won't fix themselves.
+async function fetchWithRetry(url, options, retries = 3, delayMs = 800) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || res.status < 500 || attempt === retries) return res;
+    } catch (err) {
+      if (attempt === retries) throw err;
+    }
+    await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
+  }
+}
+
 // ─── Open Library genre filter ────────────────────────────────────────────────
 // Open Library subjects are very noisy — they include things like
 // "Protected DAISY", "In library", "Large type books", "Internet Archive Wishlist"
@@ -77,7 +93,7 @@ async function searchTmdb(q, type = 'movie', year, token = process.env.TMDB_READ
   if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
   const endpoint = type === 'tv' ? 'tv' : 'movie';
   const yearParam = year ? `&${type === 'tv' ? 'first_air_date_year' : 'year'}=${year}` : '';
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `https://api.themoviedb.org/3/search/${endpoint}?query=${encodeURIComponent(q)}&include_adult=false${yearParam}`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
@@ -96,7 +112,7 @@ async function searchTmdb(q, type = 'movie', year, token = process.env.TMDB_READ
 async function getTmdbDetail(id, type = 'movie', token = process.env.TMDB_READ_ACCESS_TOKEN) {
   if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
   const endpoint = type === 'tv' ? 'tv' : 'movie';
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `https://api.themoviedb.org/3/${endpoint}/${id}?append_to_response=credits`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
@@ -130,7 +146,7 @@ async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BO
   let url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
   if (year) url += `&publishedDate:${year}`;
 
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   if (!res.ok) throw new Error('Google Books search failed');
   const data = await res.json();
 
@@ -154,7 +170,7 @@ async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BO
 
 async function getGoogleBooksDetail(id, apiKey = process.env.GOOGLE_BOOKS_API_KEY) {
   if (!apiKey) throw new Error('GOOGLE_BOOKS_API_KEY not configured');
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes/${id}?key=${apiKey}`);
+  const res = await fetchWithRetry(`https://www.googleapis.com/books/v1/volumes/${id}?key=${apiKey}`);
   if (!res.ok) throw new Error('Google Books fetch failed');
   const item = await res.json();
   const info = item.volumeInfo || {};
@@ -181,7 +197,7 @@ async function searchOpenLibrary(q, year, author) {
   let searchUrl = `https://openlibrary.org/search.json?title=${encodeURIComponent(q)}&limit=20&fields=key,title,author_name,first_publish_year,cover_i,subject`;
   if (author) searchUrl += `&author=${encodeURIComponent(author)}`;
   if (year)   searchUrl += `&first_publish_year=${encodeURIComponent(year)}`;
-  const res = await fetch(searchUrl);
+  const res = await fetchWithRetry(searchUrl);
   if (!res.ok) throw new Error('Open Library search failed');
   const data = await res.json();
 
@@ -197,8 +213,8 @@ async function searchOpenLibrary(q, year, author) {
 
 async function getOpenLibraryDetail(id, year) {
   const [workRes, editionsRes] = await Promise.all([
-    fetch(`https://openlibrary.org/works/${id}.json`),
-    fetch(`https://openlibrary.org/works/${id}/editions.json?limit=10`),
+    fetchWithRetry(`https://openlibrary.org/works/${id}.json`),
+    fetchWithRetry(`https://openlibrary.org/works/${id}/editions.json?limit=10`),
   ]);
   if (!workRes.ok) throw new Error('Open Library fetch failed');
   const data     = await workRes.json();
@@ -258,7 +274,7 @@ async function searchIgdb(q, year, clientId = process.env.IGDB_CLIENT_ID, client
   const token = await getIgdbToken();
   if (!token) throw new Error('IGDB auth failed');
 
-  const res = await fetch('https://api.igdb.com/v4/games', {
+  const res = await fetchWithRetry('https://api.igdb.com/v4/games', {
     method: 'POST',
     headers: {
       'Client-ID':     clientId,
