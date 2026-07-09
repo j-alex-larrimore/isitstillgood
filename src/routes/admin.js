@@ -1,95 +1,24 @@
 // src/routes/admin.js
 const router = require('express').Router();
 
-// ─── Tag and genre normalization helpers ──────────────────────────────────────
-const TAG_OVERRIDES = {
-  'hbo': 'HBO', 'hbo max': 'HBO Max', 'hbomax': 'HBO Max',
-  'apple tv': 'Apple TV', 'apple tv+': 'Apple TV+',
-  'nbc': 'NBC', 'cbs': 'CBS', 'abc': 'ABC', 'amc': 'AMC', 'fx': 'FX',
-  'bbc': 'BBC', 'pbs': 'PBS', 'mtv': 'MTV', 'vh1': 'VH1',
-  'usa': 'USA', 'tnt': 'TNT', 'tbs': 'TBS', 'syfy': 'Syfy',
-  'cnn': 'CNN', 'espn': 'ESPN', 'nfl': 'NFL', 'nba': 'NBA',
-  'mlb': 'MLB', 'nhl': 'NHL', 'dc': 'DC', 'mcu': 'MCU', 'dceu': 'DCEU',
-  'lgbtq': 'LGBTQ', 'lgbtq+': 'LGBTQ+', 'wwii': 'WWII', 'wwi': 'WWI',
-  'uk': 'UK', 'us': 'US',
-};
-
-function normalizeTags(tags) {
-  if (!Array.isArray(tags)) return tags;
-  return tags.map(t => {
-    const trimmed = t.trim();
-    const lower   = trimmed.toLowerCase();
-    if (TAG_OVERRIDES[lower]) return TAG_OVERRIDES[lower];
-    return trimmed.split(' ').map(w => {
-      const wl = w.toLowerCase();
-      if (TAG_OVERRIDES[wl]) return TAG_OVERRIDES[wl];
-      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
-    }).join(' ');
-  });
-}
-
-function normalizeGenres(genres) {
-  if (!Array.isArray(genres)) return genres;
-  const result = [];
-  for (const g of genres) {
-    const parts = g.split(/\s*&\s*/);
-    for (const p of parts) {
-      const s = p.trim();
-      if (!s) continue;
-      if (/^sci[-\s]?fi$/i.test(s)) { result.push('Science Fiction'); continue; }
-      result.push(s);
-    }
-  }
-  return [...new Set(result)];
-}
-
-
 const { body, query, validationResult } = require('express-validator');
 const prisma  = require('../lib/prisma');
 const { requireAdmin } = require('../middleware/admin');
 const { fetchExternalRatings } = require('../services/externalRatings');
+const {
+  normalizeTags, slugify, uniqueSlug, connectPersons,
+} = require('../lib/mediaHelpers');
+const {
+  searchTmdb, getTmdbDetail,
+  searchGoogleBooks, getGoogleBooksDetail,
+  searchOpenLibrary, getOpenLibraryDetail,
+  searchIgdb,
+} = require('../services/mediaLookup');
 
 function ok(req, res) {
   const e = validationResult(req);
   if (!e.isEmpty()) { res.status(422).json({ errors: e.array() }); return false; }
   return true;
-}
-
-function slugify(title, year) {
-  const base = title.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
-  return year ? `${base}-${year}` : base;
-}
-
-async function uniqueSlug(base) {
-  let slug = base, i = 1;
-  while (await prisma.mediaItem.findUnique({ where: { slug } })) slug = `${base}-${i++}`;
-  return slug;
-}
-
-// connectPersons builds the Prisma relation payload for cast/directors/authors.
-// isUpdate=true  → uses {set:[...]} which replaces the full relation (correct for PATCH)
-// isUpdate=false → uses {connect:[...]} which adds relations (correct for CREATE)
-// Empty names + isUpdate → {set:[]} removes all; empty + create → undefined (skip field)
-async function connectPersons(names, isUpdate = false) {
-  if (!names?.length) {
-    // On update, empty array means "remove all relations"
-    // On create, skip the field entirely (no relations to set up)
-    return isUpdate ? { set: [] } : undefined;
-  }
-
-  const persons = await Promise.all(names.map(name => {
-    const personSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-    return prisma.person.upsert({
-      where: { slug: personSlug },
-      update: { name },
-      create: { name, slug: personSlug },
-    });
-  }));
-
-  const ids = persons.map(p => ({ id: p.id }));
-  // set: replaces the entire relation (update) — removes anyone not in the new list
-  // connect: adds to existing relations (create) — only adds, never removes
-  return isUpdate ? { set: ids } : { connect: ids };
 }
 
 // ─── GET /api/admin/stats ─────────────────────────────────────────────────
@@ -482,155 +411,22 @@ router.get('/season-data', requireAdmin, async (req, res, next) => {
 // Used in the admin form to auto-fill movie/TV show data.
 // Query params: q (title), type (movie or tv)
 router.get('/lookup/tmdb', requireAdmin, async (req, res, next) => {
-  const token = process.env.TMDB_READ_ACCESS_TOKEN;
-  if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured in Railway Variables' });
-
+  if (!process.env.TMDB_READ_ACCESS_TOKEN) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured in Railway Variables' });
   const { q, type = 'movie', year } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
-
   try {
-    // Search TMDB for matching titles — optionally filter by year
-    const endpoint = type === 'tv' ? 'tv' : 'movie';
-    const yearParam = year ? `&${type === 'tv' ? 'first_air_date_year' : 'year'}=${year}` : '';
-    const searchRes = await fetch(
-      `https://api.themoviedb.org/3/search/${endpoint}?query=${encodeURIComponent(q)}&include_adult=false${yearParam}`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    if (!searchRes.ok) throw new Error('TMDB search failed');
-    const searchData = await searchRes.json();
-
-    // Return top 15 candidates with enough info to identify them
-    const results = (searchData.results || []).slice(0, 15).map(item => ({
-      tmdbId:      String(item.id),
-      title:       item.title || item.name,
-      releaseYear: (item.release_date || item.first_air_date || '').split('-')[0],
-      overview:    item.overview,
-      // TMDB poster URL — w500 is a good size for admin preview
-      posterUrl:   item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-      rating:      item.vote_average,
-    }));
-
-    res.json(results);
+    res.json(await searchTmdb(q, type, year));
   } catch (err) { next(err); }
 });
 
 // ─── GET /api/admin/lookup/tmdb/:id ──────────────────────────────────────────
 // Fetches full details for a specific TMDB ID to populate all form fields.
 router.get('/lookup/tmdb/:id', requireAdmin, async (req, res, next) => {
-  const token = process.env.TMDB_READ_ACCESS_TOKEN;
-  if (!token) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured' });
-
-  const { type = 'movie' } = req.query;
+  if (!process.env.TMDB_READ_ACCESS_TOKEN) return res.status(503).json({ error: 'TMDB_READ_ACCESS_TOKEN not configured' });
   try {
-    const endpoint = type === 'tv' ? 'tv' : 'movie';
-    const detailRes = await fetch(
-      `https://api.themoviedb.org/3/${endpoint}/${req.params.id}?append_to_response=credits`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    if (!detailRes.ok) throw new Error('TMDB detail fetch failed');
-    const data = await detailRes.json();
-
-    // Extract and normalise the fields we care about
-    const directors = (data.credits?.crew || [])
-      .filter(p => p.job === 'Director')
-      .map(p => p.name);
-
-    const cast = (data.credits?.cast || [])
-      .slice(0, 20) // top 20 cast members
-      .map(p => p.name);
-
-    // For TV shows, get creators instead of directors
-    const creators = (data.created_by || []).map(p => p.name);
-
-    res.json({
-      tmdbId:      String(data.id),
-      title:       data.title || data.name,
-      releaseYear: (data.release_date || data.first_air_date || '').split('-')[0],
-      description: data.overview,
-      imageUrl:    data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-      genres:      (data.genres || []).map(g => g.name),
-      directors:   directors.length ? directors : creators,
-      cast,
-      seasons:     data.number_of_seasons || null,
-      tmdbRating:  data.vote_average || null,
-    });
+    res.json(await getTmdbDetail(req.params.id, req.query.type || 'movie'));
   } catch (err) { next(err); }
 });
-
-
-// ─── Open Library genre filter ────────────────────────────────────────────────
-// Open Library subjects are very noisy — they include things like
-// "Protected DAISY", "In library", "Large type books", "Internet Archive Wishlist"
-// alongside real genres. This filter strips non-genre entries and returns
-// only clean, short, recognisable genre-like terms.
-// Returns empty array if no clean genres found — better than garbage data.
-function filterOpenLibraryGenres(subjects) {
-  // Terms to always exclude — these are metadata tags not genres
-  const blocklist = [
-    'in library', 'protected daisy', 'accessible book', 'internet archive',
-    'large type', 'open library', 'overdrive', 'nglc', 'reading level',
-    'homeschool', 'libraries', 'lending library', 'new york times',
-    'bestseller', 'award', 'prize', 'banned', 'challenged', 'banned books',
-    'juvenile', 'young adult fiction', 'children', 'daisy',
-    'wishlist', 'favourites', 'favorites', 'to read', 'owned',
-    'currently reading', 'read', 'unread',
-  ];
-
-  return subjects
-    .filter(s => {
-      if (!s || typeof s !== 'string') return false;
-      const lower = s.toLowerCase();
-      // Skip if it matches any blocklist term
-      if (blocklist.some(b => lower.includes(b))) return false;
-      // Skip if too long — real genres are short (max 4 words / 30 chars)
-      if (s.length > 30) return false;
-      // Skip if it looks like a place name used as a subject
-      if (/^\d/.test(s)) return false;
-      // Skip if it has parentheses — usually "(Fictitious character)" etc
-      if (s.includes('(') || s.includes(')')) return false;
-      return true;
-    })
-    .slice(0, 5); // return max 5 clean genres
-}
-
-// ─── Clean book description ──────────────────────────────────────────────────
-function cleanBookDescription(raw) {
-  if (!raw) return null;
-
-  let text = raw
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&mdash;/g, '\u2014').replace(/&ndash;/g, '\u2013')
-    .replace(/&ldquo;/g, '\u201C').replace(/&rdquo;/g, '\u201D')
-    .trim();
-
-  const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
-
-  const marketingPatterns = [
-    /bestseller/i,
-    /new york times/i,
-    /wall street journal/i,
-    /named.*best/i,
-    /one of.*favorite/i,
-    /from the.*(?:bestselling )?author of/i,
-    /^["\u201C]/,
-    /^\u2014/,
-    /\u2022.*\u2022/,
-  ];
-
-  let descStart = 0;
-  for (let i = 0; i < paragraphs.length; i++) {
-    if (!marketingPatterns.some(p => p.test(paragraphs[i]))) { descStart = i; break; }
-    descStart = i + 1;
-  }
-
-  const cleaned = paragraphs.slice(descStart).join('\n\n') || text;
-  return cleaned.slice(0, 3000).trim();
-}
 
 // ─── GET /api/admin/lookup/googlebooks ───────────────────────────────────────
 // Searches Google Books API by title (with optional author/year filters).
@@ -638,74 +434,18 @@ function cleanBookDescription(raw) {
 router.get('/lookup/googlebooks', requireAdmin, async (req, res, next) => {
   const { q, author, year } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
-
-  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
-  if (!apiKey) return res.status(503).json({ error: 'GOOGLE_BOOKS_API_KEY not configured in Railway Variables' });
-
+  if (!process.env.GOOGLE_BOOKS_API_KEY) return res.status(503).json({ error: 'GOOGLE_BOOKS_API_KEY not configured in Railway Variables' });
   try {
-    // Build query string — Google Books uses q= with field modifiers
-    let query = `intitle:${q}`;
-    if (author) query += `+inauthor:${author}`;
-
-    let url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
-    if (year) url += `&publishedDate:${year}`;
-
-    const res2 = await fetch(url);
-    if (!res2.ok) throw new Error('Google Books search failed');
-    const data = await res2.json();
-
-    const results = (data.items || []).slice(0, 15).map(item => {
-      const info = item.volumeInfo || {};
-      return {
-        googleBooksId: item.id,
-        title:         info.title || '',
-        authors:       info.authors || [],
-        releaseYear:   info.publishedDate ? parseInt(info.publishedDate) : null,
-        description:   cleanBookDescription(info.description),
-        imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
-        genres:        (info.categories || []).slice(0, 5),
-        pageCount:     info.pageCount || null,
-        isbn:          (info.industryIdentifiers || []).find(i => i.type === 'ISBN_13')?.identifier || null,
-      };
-    });
-
-    // Filter out results without a title
-    res.json(results.filter(r => r.title));
+    res.json(await searchGoogleBooks(q, author, year));
   } catch (err) { next(err); }
 });
 
 // ─── GET /api/admin/lookup/googlebooks/:id ────────────────────────────────────
 // Fetches full details for a specific Google Books volume ID.
 router.get('/lookup/googlebooks/:id', requireAdmin, async (req, res, next) => {
-  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
-  if (!apiKey) return res.status(503).json({ error: 'GOOGLE_BOOKS_API_KEY not configured' });
-
+  if (!process.env.GOOGLE_BOOKS_API_KEY) return res.status(503).json({ error: 'GOOGLE_BOOKS_API_KEY not configured' });
   try {
-    const res2 = await fetch(
-      `https://www.googleapis.com/books/v1/volumes/${req.params.id}?key=${apiKey}`
-    );
-    if (!res2.ok) throw new Error('Google Books fetch failed');
-    const item = await res2.json();
-    const info = item.volumeInfo || {};
-
-    const releaseYear = info.publishedDate ? parseInt(info.publishedDate) : null;
-
-    // Clean categories — Google Books categories are often like "Fiction / Science Fiction"
-    const genres = (info.categories || [])
-      .flatMap(c => c.split('/').map(s => s.trim()))
-      .filter(g => g && g.length < 30)
-      .slice(0, 5);
-
-    res.json({
-      googleBooksId: item.id,
-      title:         info.title,
-      authors:       info.authors || [],
-      releaseYear,
-      description:   cleanBookDescription(info.description),
-      imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
-      genres,
-      isbn:          (info.industryIdentifiers || []).find(i => i.type === 'ISBN_13')?.identifier || null,
-    });
+    res.json(await getGoogleBooksDetail(req.params.id));
   } catch (err) { next(err); }
 });
 
@@ -714,29 +454,8 @@ router.get('/lookup/googlebooks/:id', requireAdmin, async (req, res, next) => {
 router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
   const { q, year, author } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
-
   try {
-    // Build query — can filter by author and/or year
-    let searchUrl = `https://openlibrary.org/search.json?title=${encodeURIComponent(q)}&limit=20&fields=key,title,author_name,first_publish_year,cover_i,subject`;
-    if (author) searchUrl += `&author=${encodeURIComponent(author)}`;
-    if (year)   searchUrl += `&first_publish_year=${encodeURIComponent(year)}`;
-    const searchRes = await fetch(searchUrl);
-    if (!searchRes.ok) throw new Error('Open Library search failed');
-    const data = await searchRes.json();
-
-    const results = (data.docs || []).slice(0, 15).map(item => ({
-      openLibraryId: item.key?.replace('/works/', ''), // e.g. OL45804W
-      title:         item.title,
-      authors:       item.author_name || [],
-      releaseYear:   item.first_publish_year || null,
-      // Cover art URL using cover_i (cover ID)
-      imageUrl:      item.cover_i
-        ? `https://covers.openlibrary.org/b/id/${item.cover_i}-L.jpg`
-        : null,
-      genres: filterOpenLibraryGenres(item.subject || []),
-    }));
-
-    res.json(results);
+    res.json(await searchOpenLibrary(q, year, author));
   } catch (err) { next(err); }
 });
 
@@ -744,158 +463,22 @@ router.get('/lookup/openlibrary', requireAdmin, async (req, res, next) => {
 // Fetches full details for a specific Open Library work ID.
 router.get('/lookup/openlibrary/:id', requireAdmin, async (req, res, next) => {
   try {
-    // Fetch work details and editions in parallel for speed.
-    // The work endpoint has description and subjects but often lacks publish year.
-    // The editions endpoint reliably has publish_date on individual editions.
-    const [workRes, editionsRes] = await Promise.all([
-      fetch(`https://openlibrary.org/works/${req.params.id}.json`),
-      fetch(`https://openlibrary.org/works/${req.params.id}/editions.json?limit=10`),
-    ]);
-
-    if (!workRes.ok) throw new Error('Open Library fetch failed');
-    const data     = await workRes.json();
-    const editions = editionsRes.ok ? await editionsRes.json() : null;
-
-    // Fetch author names separately — the work only has author key IDs
-    const authorIds = (data.authors || []).map(a => a.author?.key).filter(Boolean);
-    const authorNames = await Promise.all(
-      authorIds.slice(0, 3).map(async key => {
-        try {
-          const r = await fetch(`https://openlibrary.org${key}.json`);
-          const d = await r.json();
-          return d.name || null;
-        } catch { return null; }
-      })
-    );
-
-    // Description can be a plain string or { value: "..." } object
-    const description = typeof data.description === 'string'
-      ? data.description
-      : data.description?.value || '';
-
-    // Cover ID — try work record first, then fall back to editions.
-    // Many books only have covers attached to edition records, not the work itself.
-    let coverId = data.covers?.[0] || null;
-
-    if (!coverId && editions?.entries?.length) {
-      // Find the first edition that has a cover
-      for (const edition of editions.entries) {
-        if (edition.covers?.[0]) {
-          coverId = edition.covers[0];
-          break;
-        }
-      }
-    }
-
-    // ── Determine release year ────────────────────────────────────────────────
-    // Priority order:
-    // 1. first_publish_year passed from the search result (most reliable)
-    // 2. first_publish_date on the work record (often missing or malformed)
-    // 3. Earliest publish_date from editions (reliable but needs parsing)
-    let releaseYear = null;
-
-    // 1. Year passed from search as query param (e.g. ?year=1954)
-    if (req.query.year) {
-      releaseYear = parseInt(req.query.year);
-    }
-
-    // 2. first_publish_date on work — extract 4-digit year from string
-    if (!releaseYear && data.first_publish_date) {
-      const match = String(data.first_publish_date).match(/\d{4}/);
-      if (match) releaseYear = parseInt(match[0]);
-    }
-
-    // 3. Earliest year from editions
-    if (!releaseYear && editions?.entries?.length) {
-      const years = editions.entries
-        .map(e => {
-          const m = String(e.publish_date || '').match(/\d{4}/);
-          return m ? parseInt(m[0]) : null;
-        })
-        .filter(y => y && y > 1000 && y < 2100);
-      if (years.length) releaseYear = Math.min(...years);
-    }
-
-    res.json({
-      openLibraryId: req.params.id,
-      title:         data.title,
-      description:   description.slice(0, 3000),
-      authors:       authorNames.filter(Boolean),
-      releaseYear,
-      imageUrl:      coverId
-        ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
-        : null,
-      genres: filterOpenLibraryGenres(data.subjects || []),
-    });
+    res.json(await getOpenLibraryDetail(req.params.id, req.query.year));
   } catch (err) { next(err); }
 });
 
 // ─── GET /api/admin/lookup/igdb ───────────────────────────────────────────────
 // Searches IGDB by title for video games.
 router.get('/lookup/igdb', requireAdmin, async (req, res, next) => {
-  const { q } = req.query;
+  const { q, year } = req.query;
   if (!q) return res.status(400).json({ error: 'q is required' });
-
-  const clientId     = process.env.IGDB_CLIENT_ID;
-  const clientSecret = process.env.IGDB_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
+  if (!process.env.IGDB_CLIENT_ID || !process.env.IGDB_CLIENT_SECRET) {
     return res.status(503).json({ error: 'IGDB_CLIENT_ID and IGDB_CLIENT_SECRET not configured in Railway Variables' });
   }
-
   try {
-    // Get Twitch OAuth token for IGDB
-    const tokenRes = await fetch(
-      `https://id.twitch.tv/oauth2/token?client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`,
-      { method: 'POST' }
-    );
-    if (!tokenRes.ok) throw new Error('IGDB auth failed');
-    const tokenData = await tokenRes.json();
-    const token = tokenData.access_token;
-
-    // Search IGDB
-    const searchRes = await fetch('https://api.igdb.com/v4/games', {
-      method: 'POST',
-      headers: {
-        'Client-ID':     clientId,
-        'Authorization': `Bearer ${token}`,
-        'Content-Type':  'text/plain',
-      },
-      // Search by name, get cover art and basic info
-      body: `search "${q}"; fields name,cover.url,first_release_date,genres.name,involved_companies.company.name,summary,rating; limit 15;`,
-    });
-    if (!searchRes.ok) throw new Error('IGDB search failed');
-    let games = await searchRes.json();
-
-    // Filter by year if provided (IGDB doesn't support year in search query)
-    if (req.query.year) {
-      const filterYear = parseInt(req.query.year);
-      games = games.filter(g => {
-        if (!g.first_release_date) return false;
-        return new Date(g.first_release_date * 1000).getFullYear() === filterYear;
-      });
-    }
-
-    const results = games.map(game => ({
-      igdbId:      String(game.id),
-      title:       game.name,
-      releaseYear: game.first_release_date
-        ? new Date(game.first_release_date * 1000).getFullYear()
-        : null,
-      description: game.summary || null,
-      // IGDB cover URLs need //images.igdb.com → https://images.igdb.com
-      // and t_thumb → t_cover_big for a better size
-      imageUrl:    game.cover?.url
-        ? 'https:' + game.cover.url.replace('t_thumb', 't_cover_big')
-        : null,
-      genres:      (game.genres || []).map(g => g.name),
-      developers:  (game.involved_companies || []).map(c => c.company?.name).filter(Boolean),
-      rating:      game.rating ? Math.round(game.rating) : null,
-    }));
-
-    res.json(results);
+    res.json(await searchIgdb(q, year));
   } catch (err) { next(err); }
 });
-
 
 // ─── GET /api/admin/check-duplicate ──────────────────────────────────────────
 // Quick check before adding a title — returns any existing items with the

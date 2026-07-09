@@ -121,4 +121,4 @@ async function refreshStaleRatings() {
   for (const item of stale) await fetchExternalRatings(item.id).catch(console.error);
 }
 
-module.exports = { fetchExternalRatings, refreshStaleRatings, fetchTmdbData, fetchIgdbData, fetchOpenLibraryData };
+module.exports = { fetchExternalRatings, refreshStaleRatings, fetchTmdbData, fetchIgdbData, fetchOpenLibraryData, getIgdbToken };

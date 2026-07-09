@@ -13,7 +13,8 @@
     "db:reset": "prisma migrate reset",
     "db:generate": "prisma generate",
     "postinstall": "prisma generate",
-    "ratings:refresh": "node -e \"require('./src/services/externalRatings').refreshStaleRatings().then(() => process.exit(0))\""
+    "ratings:refresh": "node -e \"require('./src/services/externalRatings').refreshStaleRatings().then(() => process.exit(0))\"",
+    "media:import": "node scripts/bulk-import.js"
   },
   "keywords": [],
   "author": "",
