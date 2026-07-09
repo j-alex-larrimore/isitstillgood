@@ -568,17 +568,33 @@ router.get('/media/pending', requireAdmin, async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const take = 50;
-    const where = { verified: false };
+    // parentId:null — only top-level items (movies, books, games, TV parent
+    // shows) show up as their own review row. A season is reviewed as part
+    // of its parent show's row (see seasonEntries below), never standalone.
+    const where = { verified: false, parentId: null };
     const [items, total] = await Promise.all([
       prisma.mediaItem.findMany({
         where,
         select: {
           id: true, slug: true, title: true, mediaType: true, releaseYear: true,
           imageUrl: true, description: true, genres: true, tags: true,
-          seriesName: true, seriesNumber: true, tmdbId: true, goodreadsId: true,
-          openCriticId: true, createdAt: true,
-          directors: { select: { id: true, name: true }, take: 20 },
-          authors:   { select: { id: true, name: true }, take: 20 },
+          seriesName: true, seriesNumber: true, tmdbId: true, tmdbRating: true,
+          goodreadsId: true, openCriticId: true, openCriticScore: true,
+          seasons: true, createdAt: true,
+          directors: { select: { id: true, name: true }, take: 50 },
+          authors:   { select: { id: true, name: true }, take: 50 },
+          cast:      { select: { id: true, name: true }, take: 50 },
+          // TV parent shows — include existing seasons (regardless of their
+          // own verified state) so cast/guest-star edits can happen inline
+          // alongside the parent's review, without a separate lookup.
+          seasonEntries: {
+            where: { seasonNumber: { not: null } },
+            select: {
+              id: true, title: true, seasonNumber: true, releaseYear: true, excludedCast: true,
+              cast: { select: { id: true, name: true }, take: 50 },
+            },
+            orderBy: { seasonNumber: 'asc' },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * take, take,
