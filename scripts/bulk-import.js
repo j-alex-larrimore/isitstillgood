@@ -274,6 +274,7 @@ async function main() {
         tmdbId:        data.tmdbId,
         igdbId:        data.openCriticId,
         openLibraryId: data.goodreadsId,
+        releaseYear:   data.releaseYear,
       });
       if (duplicate) {
         console.log(`⚠ "${data.title}" — already in database (${duplicate.slug}), skipping`);

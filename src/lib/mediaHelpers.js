@@ -83,7 +83,7 @@ async function connectPersons(names, isUpdate = false) {
 // ─── Duplicate detection ──────────────────────────────────────────────────
 // Mirrors GET /api/admin/check-duplicate — checks by external ID first
 // (most reliable), then falls back to a case-insensitive title match.
-async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId }) {
+async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, releaseYear }) {
   const idChecks = [];
   if (tmdbId) {
     const tmdbCheck = { tmdbId };
@@ -101,7 +101,16 @@ async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId }
 
   if (title) {
     const titleMatch = await prisma.mediaItem.findFirst({
-      where: { title: { equals: title.trim(), mode: 'insensitive' }, mediaType },
+      where: {
+        title: { equals: title.trim(), mode: 'insensitive' },
+        mediaType,
+        // Guard against an unrelated film/show that happens to share an exact
+        // title from a different era (West Side Story 1961 vs. 2021, The
+        // Color Purple 1985 vs. 2023, etc.) — a title-only match only counts
+        // as the same work when release years are close. No year given (or
+        // no releaseYear on the existing row) falls back to the old behavior.
+        ...(releaseYear ? { OR: [{ releaseYear: null }, { releaseYear: { gte: releaseYear - 2, lte: releaseYear + 2 } }] } : {}),
+      },
     });
     if (titleMatch) return titleMatch;
   }
