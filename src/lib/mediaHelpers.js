@@ -45,6 +45,30 @@ function normalizeGenres(genres) {
   return [...new Set(result)];
 }
 
+// ─── Setting genres (TV) ───────────────────────────────────────────────────
+// Schools/Police/Legal/Courtroom/Medical — derived from TMDB per-show
+// keyword data (see getTvKeywords in mediaLookup.js), matched by substring
+// so compound keywords like "police corruption" still count as a Police
+// signal. Deliberately excludes generic terms (bare "detective"/"fbi"/
+// "sheriff"/"doctor") that fire on unrelated shows — see git history on
+// this file and apply-setting-genres-tv.js for the false positives
+// (Jessica Jones, The X-Files, Deadwood, Sherlock) that led to narrowing it.
+const SETTING_GENRE_VOCAB = {
+  Schools: ['school', 'elementary school', 'high school', 'middle school', 'boarding school', 'private school', 'elementary school teacher', 'high school teacher'],
+  Police: ['police', 'police investigation', 'police procedural', 'homicide detective', 'nypd', 'lapd', 'female cop', 'male cop'],
+  Legal: ['lawyer', 'law firm', 'legal drama', 'criminal law', 'corporate law', 'paralegal', 'attorney', 'district attorney', 'prosecutor'],
+  Courtroom: ['courtroom drama', 'courtroom', 'trial', 'court case', 'jury'],
+  Medical: ['medical', 'medicine', 'hospital', 'medical drama', 'emergency room'],
+};
+
+function settingGenresFor(keywords) {
+  const matched = [];
+  for (const [genre, terms] of Object.entries(SETTING_GENRE_VOCAB)) {
+    if (terms.some(t => keywords.some(k => k.includes(t)))) matched.push(genre);
+  }
+  return matched;
+}
+
 // ─── Slugs ─────────────────────────────────────────────────────────────────
 function slugify(title, year) {
   const base = title.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
@@ -121,6 +145,8 @@ async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, 
 module.exports = {
   normalizeTags,
   normalizeGenres,
+  settingGenresFor,
+  SETTING_GENRE_VOCAB,
   slugify,
   uniqueSlug,
   connectPersons,

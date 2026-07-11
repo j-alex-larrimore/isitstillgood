@@ -134,7 +134,52 @@ async function getTmdbDetail(id, type = 'movie', token = process.env.TMDB_READ_A
     cast,
     seasons:     data.number_of_seasons || null,
     tmdbRating:  data.vote_average || null,
+    runtime:     data.runtime || null, // movies only — used by sync-new-releases.js to filter out specials/shorts
   };
+}
+
+// Real (non-special) season numbers currently on TMDB for a show — used by
+// scripts/sync-new-seasons.js to detect seasons that exist on TMDB but not
+// yet as a MediaItem row. Season 0 (specials) is excluded; this site doesn't
+// model specials as their own reviewable season.
+async function getTvSeasonNumbers(id, token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/tv/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error('TMDB TV detail fetch failed');
+  const data = await res.json();
+  return {
+    seasonNumbers: (data.seasons || []).filter(s => s.season_number > 0).map(s => s.season_number),
+    totalSeasons: data.number_of_seasons || 0,
+  };
+}
+
+// A single season's cast — used by every script that creates TV season rows
+// (scripts/import-tv-show-with-seasons.js, import-missing-tv.js,
+// sync-new-tv.js, sync-new-seasons.js). Season "cast" on this site means
+// guest stars only (main-cast members are filtered out by the caller before
+// storing) — see the excludedCast field comment in prisma/schema.prisma.
+async function getTvSeasonCast(id, seasonNumber, token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/tv/${id}/season/${seasonNumber}?append_to_response=credits`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return {
+    releaseYear: (data.air_date || '').split('-')[0] || null,
+    cast: (data.credits?.cast || []).slice(0, 20).map(c => c.name),
+  };
+}
+
+// TMDB per-show keyword data — used by the setting-genre heuristic
+// (Schools/Police/Legal/Courtroom/Medical) in apply-setting-genres-tv.js,
+// import-missing-tv.js, and sync-new-tv.js/sync-new-seasons.js.
+async function getTvKeywords(id, token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/tv/${id}/keywords`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.results || []).map(k => k.name.toLowerCase());
 }
 
 // ─── Google Books ──────────────────────────────────────────────────────────────
@@ -306,6 +351,131 @@ async function searchIgdb(q, year, clientId = process.env.IGDB_CLIENT_ID, client
   }));
 }
 
+// ─── TMDB discovery — used by scripts/sync-new-releases.js ────────────────
+// Unlike searchTmdb (title lookup for a known movie), this finds NEW movies
+// matching filters (release window + major studio/streamer) without a title
+// to search for. Resolves human-readable provider/company names to TMDB's
+// numeric IDs at call time rather than hardcoding IDs, since those aren't
+// documented anywhere stable enough to trust from memory.
+async function resolveWatchProviderIds(names, region = 'US', mediaKind = 'movie', token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  const res = await fetchWithRetry(
+    `https://api.themoviedb.org/3/watch/providers/${mediaKind}?watch_region=${region}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error('TMDB watch-provider list fetch failed');
+  const data = await res.json();
+  const lowerNames = names.map(n => n.toLowerCase());
+  return (data.results || [])
+    .filter(p => lowerNames.includes(p.provider_name.toLowerCase()))
+    .map(p => p.provider_id);
+}
+
+// Resolves TV genre names (e.g. "News", "Talk") to TMDB's numeric genre IDs
+// at call time — same reasoning as the provider/company resolvers above,
+// don't trust hardcoded genre IDs from memory.
+async function resolveTvGenreIds(names, token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  const res = await fetchWithRetry('https://api.themoviedb.org/3/genre/tv/list', { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error('TMDB TV genre list fetch failed');
+  const data = await res.json();
+  const lowerNames = names.map(n => n.toLowerCase());
+  return (data.genres || []).filter(g => lowerNames.includes(g.name.toLowerCase())).map(g => g.id);
+}
+
+async function resolveCompanyIds(names, token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  const ids = [];
+  for (const name of names) {
+    const res = await fetchWithRetry(
+      `https://api.themoviedb.org/3/search/company?query=${encodeURIComponent(name)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) continue;
+    const data = await res.json();
+    // exact (case-insensitive) name match only — avoid pulling in unrelated
+    // companies that merely contain the search term
+    const exact = (data.results || []).find(c => c.name.toLowerCase() === name.toLowerCase());
+    if (exact) ids.push(exact.id);
+  }
+  return ids;
+}
+
+// Discover movies released in [sinceDate, untilDate] (YYYY-MM-DD) from the
+// given studios (with_companies, OR'd) or now available on the given
+// streaming services (with_watch_providers, OR'd). Two separate discover
+// calls combined, since a brand-new theatrical release often has no watch
+// provider listed yet, and a streaming original has no notable "studio".
+async function discoverNewMovies({ sinceDate, untilDate, studioNames = [], providerNames = [], region = 'US', token = process.env.TMDB_READ_ACCESS_TOKEN }) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const results = new Map(); // tmdbId -> result, dedupes across both queries
+
+  async function runDiscover(extraParams) {
+    let page = 1, totalPages = 1;
+    do {
+      const url = `https://api.themoviedb.org/3/discover/movie?primary_release_date.gte=${sinceDate}&primary_release_date.lte=${untilDate}&region=${region}&page=${page}&${extraParams}`;
+      const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error('TMDB discover failed');
+      const data = await res.json();
+      totalPages = data.total_pages || 1;
+      for (const item of data.results || []) {
+        results.set(String(item.id), {
+          tmdbId: String(item.id),
+          title: item.title,
+          releaseYear: (item.release_date || '').split('-')[0],
+        });
+      }
+      page++;
+    } while (page <= totalPages && page <= 25); // sane upper bound
+  }
+
+  if (studioNames.length) {
+    const companyIds = await resolveCompanyIds(studioNames, token);
+    if (companyIds.length) await runDiscover(`with_companies=${companyIds.join('|')}`);
+  }
+  if (providerNames.length) {
+    const providerIds = await resolveWatchProviderIds(providerNames, region, 'movie', token);
+    if (providerIds.length) await runDiscover(`with_watch_providers=${providerIds.join('|')}&watch_region=${region}`);
+  }
+
+  return [...results.values()];
+}
+
+// Discover TV shows first aired in [sinceDate, untilDate] from the given
+// networks (with_networks — IDs must be pre-resolved, TMDB has no reliable
+// name-to-ID search for networks, unlike movie companies) or streaming
+// services (with_watch_providers). Excludes News/Talk genres by default.
+async function discoverNewTvShows({ sinceDate, untilDate, networkIds = [], providerNames = [], region = 'US', excludeGenreNames = ['News', 'Talk', 'Reality'], token = process.env.TMDB_READ_ACCESS_TOKEN }) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const results = new Map();
+  const excludeIds = excludeGenreNames.length ? await resolveTvGenreIds(excludeGenreNames, token) : [];
+  const withoutGenres = excludeIds.length ? `&without_genres=${excludeIds.join(',')}` : '';
+
+  async function runDiscover(extraParams) {
+    let page = 1, totalPages = 1;
+    do {
+      const url = `https://api.themoviedb.org/3/discover/tv?first_air_date.gte=${sinceDate}&first_air_date.lte=${untilDate}&page=${page}${withoutGenres}&${extraParams}`;
+      const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error('TMDB TV discover failed');
+      const data = await res.json();
+      totalPages = data.total_pages || 1;
+      for (const item of data.results || []) {
+        results.set(String(item.id), {
+          tmdbId: String(item.id),
+          title: item.name,
+          releaseYear: (item.first_air_date || '').split('-')[0],
+        });
+      }
+      page++;
+    } while (page <= totalPages && page <= 25);
+  }
+
+  if (networkIds.length) await runDiscover(`with_networks=${networkIds.join('|')}`);
+  if (providerNames.length) {
+    const providerIds = await resolveWatchProviderIds(providerNames, region, 'tv', token);
+    if (providerIds.length) await runDiscover(`with_watch_providers=${providerIds.join('|')}&watch_region=${region}`);
+  }
+
+  return [...results.values()];
+}
+
 module.exports = {
   filterOpenLibraryGenres,
   cleanBookDescription,
@@ -316,4 +486,10 @@ module.exports = {
   searchOpenLibrary,
   getOpenLibraryDetail,
   searchIgdb,
+  discoverNewMovies,
+  discoverNewTvShows,
+  resolveTvGenreIds,
+  getTvSeasonNumbers,
+  getTvSeasonCast,
+  getTvKeywords,
 };

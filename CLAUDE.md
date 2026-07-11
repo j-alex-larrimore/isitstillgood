@@ -88,6 +88,21 @@ if it breaks again the known gotcha is that Ubuntu's default `apt` only has
 Postgres client v16 but Railway runs Postgres 18 — the workflow installs the
 v18 client explicitly from the official PGDG apt repo.
 
+New releases sync weekly (Mondays) via `.github/workflows/sync-new-releases.yml`,
+running `scripts/sync-new-releases.js` (movies) and `scripts/sync-new-tv.js`
+(TV shows) against a curated list of major studios/networks/streamers —
+see each script's header comment for the studio/network/provider lists and
+the setting-genre (Schools/Police/Legal/Courtroom/Medical) keyword heuristic
+they apply. Both auto-publish (`verified: true`) rather than queuing for
+review, a deliberate exception to the bulk-import default — see "Adding
+media" below. The workflow needs a `TMDB_READ_ACCESS_TOKEN` secret in GitHub
+(Settings → Secrets → Actions) in addition to the `DATABASE_PUBLIC_URL`
+secret the backup workflow already uses — these are GitHub Actions secrets,
+separate from Railway's env vars, and must be added there directly.
+`sync-new-tv.js` only catches brand-new shows premiering their first season
+(TMDB's discover filters on a show's overall first-air-date) — it does not
+detect new seasons of shows already in the DB.
+
 ## Adding media to the database
 
 Three ways, all going through the same lookup/normalization logic
@@ -110,6 +125,11 @@ Three ways, all going through the same lookup/normalization logic
   Claude Code writes a temporary CSV under `scripts/`, runs the importer
   with `--dry-run` first, shows the results, and only runs it for real
   after you confirm — it should never skip the dry-run step for a new list.
+- **Automatically, on a schedule**: `.github/workflows/sync-new-releases.yml`
+  (weekly) pulls newly-released movies and newly-premiered TV shows from a
+  curated studio/network/streamer list — see "Deploy flow" above. Unlike
+  every other path here, this one auto-publishes instead of queuing for
+  review.
 
 ## Conventions
 

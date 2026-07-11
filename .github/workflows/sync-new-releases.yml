@@ -1,0 +1,42 @@
+name: Sync New Releases
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync new movies
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: node scripts/sync-new-releases.js
+
+      - name: Sync new TV shows
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: node scripts/sync-new-tv.js
+
+      # Full-catalog sweep (~9,700+ shows, one TMDB call each) — checks for
+      # new seasons of shows already in the DB, which the "new TV shows"
+      # step above can't see (it only catches brand-new premieres). Slower
+      # than the other two steps; GitHub Actions' default 6-hour job timeout
+      # gives plenty of headroom.
+      - name: Sync new seasons of existing shows
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: node scripts/sync-new-seasons.js
