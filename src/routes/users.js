@@ -490,6 +490,60 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── GET /api/users/:username/card-data ────────────────────────────────────
+// Full review set for the shareable tier-card builder (profile.html "Share
+// a Card" modal). Deliberately separate from GET /:username, which caps
+// reviews at take:20 as a "recent activity" preview and omits
+// seriesName/seriesNumber — the tier-list card needs every review (to
+// bucket by rating) plus series metadata (to group books by series and
+// average the user's own ratings within one, mirroring the site-wide
+// convention that the lowest seriesNumber represents the series).
+// Same visibility rules as taste-profile: self always, otherwise only if
+// profilePublic or friends.
+router.get('/:username/card-data', optionalAuth, async (req, res, next) => {
+  try {
+    const target = await prisma.user.findUnique({
+      where: { username: req.params.username },
+      select: { id: true, profilePublic: true },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
+
+    const isSelf = req.user?.id === target.id;
+    if (!target.profilePublic && !isSelf) {
+      if (!req.user) return res.status(403).json({ error: 'This profile is private' });
+      const areFriends = await prisma.friendship.findFirst({
+        where: {
+          status: 'ACCEPTED',
+          OR: [
+            { initiatorId: req.user.id, receiverId: target.id },
+            { initiatorId: target.id,   receiverId: req.user.id },
+          ],
+        },
+      });
+      if (!areFriends) return res.status(403).json({ error: 'This profile is friends only' });
+    }
+
+    const reviews = await prisma.review.findMany({
+      where: {
+        userId: target.id,
+        visibility: isSelf ? undefined : { in: ['PUBLIC', 'FRIENDS_ONLY'] },
+      },
+      select: {
+        rating: true,
+        mediaItem: {
+          select: {
+            id: true, title: true, slug: true, mediaType: true,
+            releaseYear: true, imageUrl: true, genres: true,
+            seriesName: true, seriesNumber: true,
+          },
+        },
+      },
+      take: 2000, // safety cap, not a real-world limit for a single user
+    });
+
+    res.json({ reviews });
+  } catch (err) { next(err); }
+});
 
 // ─── GET /api/users/:username/ignored-genres ─────────────────────────────────
 router.get('/:username/ignored-genres', requireAuth, async (req, res, next) => {

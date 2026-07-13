@@ -104,6 +104,7 @@ app.use('/api/lists',   require('./routes/lists'));
 app.use('/api/admin',   require('./routes/admin'));
 app.use('/api/requests',require('./routes/requests'));
 app.use('/api/invites', require('./routes/invites'));  // email invite system
+app.use('/api/image-proxy', require('./routes/imageProxy'));
 
 // ─── Health check ────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date() }));

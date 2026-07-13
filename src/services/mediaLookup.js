@@ -188,11 +188,21 @@ async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BO
   let query = `intitle:${q}`;
   if (author) query += `+inauthor:${author}`;
 
-  let url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
-  if (year) url += `&publishedDate:${year}`;
+  // year is deliberately not applied as a query filter here — same
+  // reasoning as searchOpenLibrary below: book publication years are
+  // unreliable for filtering, only for ranking. (This used to append
+  // `&publishedDate:${year}` as a bare top-level param, which Google's API
+  // silently ignored since it's missing `=` and isn't valid query syntax
+  // anyway — dead code, not an active bug, but confusing to leave in.)
+  // pickBestMatch() handles year-based ranking among returned candidates.
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
 
   const res = await fetchWithRetry(url);
-  if (!res.ok) throw new Error('Google Books search failed');
+  // Fail soft (empty results) rather than throwing — a Google Books outage
+  // or exhausted daily quota (confirmed live: 429 rateLimitExceeded) should
+  // fall through to the Open Library fallback in bulk-import.js's
+  // lookupBook(), not kill the whole row before that fallback ever runs.
+  if (!res.ok) return [];
   const data = await res.json();
 
   const results = (data.items || []).slice(0, 15).map(item => {
@@ -223,7 +233,10 @@ async function searchGoogleBooksByIsbn(isbn, apiKey = process.env.GOOGLE_BOOKS_A
   if (!isbn) return null;
   const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`isbn:${isbn}`)}&key=${apiKey}`;
   const res = await fetchWithRetry(url);
-  if (!res.ok) throw new Error('Google Books ISBN search failed');
+  // Fail soft (null) rather than throwing — sync-new-books.js already
+  // treats a null return as "no match, skip" rather than a hard failure;
+  // an outage/quota error should be categorized the same way, not crash the row.
+  if (!res.ok) return null;
   const data = await res.json();
   const item = (data.items || [])[0];
   if (!item) return null;
@@ -291,7 +304,14 @@ async function getGoogleBooksDetail(id, apiKey = process.env.GOOGLE_BOOKS_API_KE
 async function searchOpenLibrary(q, year, author) {
   let searchUrl = `https://openlibrary.org/search.json?title=${encodeURIComponent(q)}&limit=20&fields=key,title,author_name,first_publish_year,cover_i,subject`;
   if (author) searchUrl += `&author=${encodeURIComponent(author)}`;
-  if (year)   searchUrl += `&first_publish_year=${encodeURIComponent(year)}`;
+  // Deliberately NOT filtering by first_publish_year at the API level —
+  // confirmed live that this returns zero results for well-catalogued
+  // classics (Macbeth: 432 hits with no year filter, 0 hits with
+  // &first_publish_year=1606, even though hundreds of editions exist).
+  // Open Library's indexed "first publish year" frequently doesn't match
+  // the historically correct year for older/public-domain works. year is
+  // still used downstream by pickBestMatch() to rank candidates, just not
+  // to pre-filter them away from the API.
   const res = await fetchWithRetry(searchUrl);
   if (!res.ok) throw new Error('Open Library search failed');
   const data = await res.json();

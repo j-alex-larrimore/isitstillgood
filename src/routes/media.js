@@ -262,10 +262,16 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // This avoids pagination issues where book 2 would appear on page 2 without book 1.
     // IMPORTANT: Apply the same filters (person, genre, tag, text) so searching for an
     // author doesn't return series by unrelated authors.
+    // Also runs for an untyped (all-media) text search — not just type=BOOK — so
+    // searching "Jordan" without narrowing to Books still collapses Wheel of Time
+    // to one series card instead of 15 individual books. Untyped browse (no q) is
+    // left alone since that's an edge case with no reported problem, and collapsing
+    // it would require also generalizing the standalone-books andClauses restriction.
+    const collapseBookSeries = (type === 'BOOK' || (!type && q)) && !req.query.series && !req.query.individual && !reviewedBy;
     let seriesRepresentatives = [];
     let allSeriesEntries = [];
     let seriesCountMap = new Map();
-    if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
+    if (collapseBookSeries) {
       // Build a series-specific where clause that includes all active filters
       const seriesWhereClauses = [
         { mediaType: 'BOOK' },
@@ -326,11 +332,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }),
       prisma.mediaItem.count({ where }),
     ]);
-    const bookRatingSort = ratingSort && type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy;
+    const bookRatingSort = ratingSort && collapseBookSeries;
 
     // Merge standalone/unnumbered books with series representatives
     let finalItems;
-    if (type === 'BOOK' && !req.query.series && !req.query.individual && !reviewedBy) {
+    if (collapseBookSeries) {
       // Always remove series reps from items — they come through seriesRepresentatives
       // This prevents duplicates whether searching or browsing
       const seriesRepIds = new Set(seriesRepresentatives.map(r => r.id));
@@ -339,11 +345,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (q) {
         const qLower = q.toLowerCase();
         // An individual book card should only appear when the query matches the
-        // book's OWN title or description — NOT when it matches the author or series name.
-        // (Author/series-name matches should collapse to the series card only.)
-        const matchesBookText = (b) =>
-          (b.title && b.title.toLowerCase().includes(qLower)) ||
-          (b.description && b.description.toLowerCase().includes(qLower));
+        // book's OWN title — NOT its description, author, or series name. Deliberately
+        // excludes description: Google Books blurbs routinely credit the author by name
+        // ("...Robert Jordan's #1 New York Times bestselling epic fantasy series...")
+        // and often mention the series name too, so an author/series search like "Jordan"
+        // would match nearly every book's description and defeat the whole point of
+        // collapsing to a series card — confirmed live against the Wheel of Time books.
+        const matchesBookText = (b) => b.title && b.title.toLowerCase().includes(qLower);
 
         // Non-rep series books: keep only those whose own title/description matched
         const individualBooks = dedupedItems.filter(b =>

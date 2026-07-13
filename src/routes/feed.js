@@ -5,7 +5,12 @@ const prisma = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 
 // ─── GET /api/feed ─── Friend activity + timeframe support ──────────────
-router.get('/', requireAuth, [
+// optionalAuth (not requireAuth) — logged-out visitors can load mode=all/
+// trending too, so the homepage always shows real reviews instead of
+// falling back to a raw, unreviewed catalog browse (see index.html's
+// loadFeed, which used to special-case the logged-out path this way).
+// mode=friends with no req.user just returns an empty feed below.
+router.get('/', optionalAuth, [
   query('page').optional().isInt({ min: 1 }),
   query('mediaType').optional().isIn(['MOVIE','BOOK','TV_SHOW','BOARD_GAME','VIDEO_GAME']),
   query('mode').optional().isIn(['friends', 'all', 'trending']),
@@ -23,14 +28,14 @@ router.get('/', requireAuth, [
       days = setting ? parseInt(setting.value) : 30;
     }
 
-    // Get friend IDs
-    const friendships = await prisma.friendship.findMany({
+    // Get friend IDs (only meaningful when logged in)
+    const friendships = req.user ? await prisma.friendship.findMany({
       where: {
         status: 'ACCEPTED',
         OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }],
       },
       select: { initiatorId: true, receiverId: true },
-    });
+    }) : [];
     const friendIds = friendships.map(f =>
       f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
     );
@@ -39,7 +44,8 @@ router.get('/', requireAuth, [
     let authorIds;
     if (mode === 'friends') {
       // Friends feed shows only friends, not the current user's own reviews
-      // (user's own reviews appear under Everyone)
+      // (user's own reviews appear under Everyone). No req.user (logged out)
+      // or no friends both fall through to an empty result.
       authorIds = friendIds.length ? friendIds : ['__none__'];
     } else {
       authorIds = undefined; // all users
