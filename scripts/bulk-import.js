@@ -126,6 +126,28 @@ function pickBestMatch(candidates, year, expectedTitle) {
 // companion volumes that share the real book's title. Score candidates so
 // the actual novel — single expected author, full page count — sorts first,
 // before title/year matching narrows the pool.
+//
+// Also attracts omnibus/collection editions ("The Complete Broken Empire
+// Trilogy", "The Silo Series Collection") — these have high page counts
+// that would otherwise score *well* under the check above, exactly
+// backwards from what we want. Per explicit direction: only original
+// individual books should be entered, never bundled/omnibus editions.
+function looksLikeOmnibus(title) {
+  const t = title || '';
+  if (/\b(omnibus|collection|box(ed)?\s*set|bundle)\b/i.test(t)) return true;
+  // "complete" and "trilogy/series/saga/duology/quartet" often aren't
+  // adjacent ("Complete Broken Empire Trilogy" has two words between them),
+  // so check both appear anywhere rather than requiring \s+ between them.
+  if (/\bcomplete\b/i.test(t) && /\b(trilogy|series|saga|duology|quartet)\b/i.test(t)) return true;
+  // "Books 4-6", "Books 1 and 2", "Vol 2: Books 4 - 6", "Volumes 1-3"
+  if (/\b(books?|vol(ume)?s?)\s*\.?\s*\d+\s*(-|to|and)\s*\d+/i.test(t)) return true;
+  // Omnibus titles frequently list every constituent book after a colon,
+  // comma-separated ("...Trilogy: Prince of Thorns, King of Thorns, Emperor
+  // of Thorns") — 2+ commas after the colon is a strong standalone signal.
+  const afterColon = t.split(':')[1];
+  if (afterColon && (afterColon.match(/,/g) || []).length >= 2) return true;
+  return false;
+}
 function scoreBookCandidate(c, expectedAuthor) {
   let score = 0;
   const authors = c.authors || [];
@@ -139,6 +161,7 @@ function scoreBookCandidate(c, expectedAuthor) {
     if (c.pageCount >= 150) score += 2;
     else if (c.pageCount >= 50) score += 1;
   }
+  if (looksLikeOmnibus(c.title)) score -= 10;
   return score;
 }
 
@@ -264,7 +287,7 @@ async function main() {
       if (!data) {
         console.log(`⚠ "${row.title}" — no match found, skipping`);
         results.skipped.push(row.title);
-        await sleep(300);
+        await sleep(1100);
         continue;
       }
 
@@ -275,11 +298,12 @@ async function main() {
         igdbId:        data.openCriticId,
         openLibraryId: data.goodreadsId,
         releaseYear:   data.releaseYear,
+        authors:       data.authors,
       });
       if (duplicate) {
         console.log(`⚠ "${data.title}" — already in database (${duplicate.slug}), skipping`);
         results.skipped.push(data.title);
-        await sleep(300);
+        await sleep(1100);
         continue;
       }
 
@@ -298,7 +322,7 @@ async function main() {
       if (dryRun) {
         console.log(`+ "${data.title}" (${row.mediaType}, ${releaseYear || 'year unknown'}) — would be added [${genres.join(', ')}]`);
         results.added.push(data.title);
-        await sleep(300);
+        await sleep(1100);
         continue;
       }
 
@@ -334,7 +358,7 @@ async function main() {
       results.failed.push({ title: row.title, error: err.message });
     }
 
-    await sleep(300); // be polite to external APIs, especially IGDB/TMDB rate limits
+    await sleep(1100); // be polite to external APIs, especially IGDB/TMDB rate limits
   }
 
   console.log(`\nDone. Added ${results.added.length}, skipped ${results.skipped.length}, failed ${results.failed.length}.`);

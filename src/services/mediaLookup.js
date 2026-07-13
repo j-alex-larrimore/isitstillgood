@@ -213,6 +213,56 @@ async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BO
   return results.filter(r => r.title);
 }
 
+// ISBN lookup — used by sync-new-books.js instead of the fuzzy title/author
+// search above, since the NYT Bestsellers API gives an exact ISBN-13 per
+// book. An exact ISBN match sidesteps the wrong-edition/study-guide
+// mismatches that scoreBookCandidate/normalizeTitleForMatch in
+// bulk-import.js exist to work around — there's no ambiguity to resolve.
+async function searchGoogleBooksByIsbn(isbn, apiKey = process.env.GOOGLE_BOOKS_API_KEY) {
+  if (!apiKey) throw new Error('GOOGLE_BOOKS_API_KEY not configured');
+  if (!isbn) return null;
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`isbn:${isbn}`)}&key=${apiKey}`;
+  const res = await fetchWithRetry(url);
+  if (!res.ok) throw new Error('Google Books ISBN search failed');
+  const data = await res.json();
+  const item = (data.items || [])[0];
+  if (!item) return null;
+  const info = item.volumeInfo || {};
+  return {
+    googleBooksId: item.id,
+    title:         info.title || '',
+    authors:       info.authors || [],
+    releaseYear:   info.publishedDate ? parseInt(info.publishedDate) : null,
+    description:   cleanBookDescription(info.description),
+    imageUrl:      info.imageLinks?.thumbnail?.replace('http://', 'https://').replace('zoom=1', 'zoom=3') || null,
+    genres:        (info.categories || []).slice(0, 5),
+    pageCount:     info.pageCount || null,
+    isbn,
+  };
+}
+
+// ─── NYT Books API ─────────────────────────────────────────────────────────
+// Current-week bestseller lists — used by sync-new-books.js for ongoing new
+// release sync (unlike Google Books, this is a real, purpose-built "what's
+// current" endpoint — see that script's header comment for why Google
+// Books' own date/recency filtering was abandoned as unreliable).
+// Requires a free key from developer.nytimes.com (Books API product).
+async function getNytBestsellerList(listName, apiKey = process.env.NYT_API_KEY) {
+  if (!apiKey) throw new Error('NYT_API_KEY not configured');
+  const url = `https://api.nytimes.com/svc/books/v3/lists/current/${listName}.json?api-key=${apiKey}`;
+  const res = await fetchWithRetry(url);
+  if (!res.ok) throw new Error(`NYT bestseller list fetch failed for "${listName}" (${res.status})`);
+  const data = await res.json();
+  const books = data.results?.books || [];
+  return books.map(b => ({
+    title:      b.title,
+    author:     b.author,
+    isbn13:     b.primary_isbn13 || null,
+    publisher:  b.publisher || null,
+    rank:       b.rank,
+  }));
+}
+
 async function getGoogleBooksDetail(id, apiKey = process.env.GOOGLE_BOOKS_API_KEY) {
   if (!apiKey) throw new Error('GOOGLE_BOOKS_API_KEY not configured');
   const res = await fetchWithRetry(`https://www.googleapis.com/books/v1/volumes/${id}?key=${apiKey}`);
@@ -351,6 +401,64 @@ async function searchIgdb(q, year, clientId = process.env.IGDB_CLIENT_ID, client
   }));
 }
 
+function mapIgdbGame(game) {
+  return {
+    igdbId:      String(game.id),
+    title:       game.name,
+    releaseYear: game.first_release_date ? new Date(game.first_release_date * 1000).getFullYear() : null,
+    description: game.summary || null,
+    imageUrl:    game.cover?.url ? 'https:' + game.cover.url.replace('t_thumb', 't_cover_big') : null,
+    genres:      (game.genres || []).map(g => g.name),
+    developers:  (game.involved_companies || []).map(c => c.company?.name).filter(Boolean),
+    rating:      game.rating ? Math.round(game.rating) : null,
+  };
+}
+
+// Discover games by release-date window + popularity filter, without a
+// title to search for — used by the historical backfill and
+// scripts/sync-new-games.js. IGDB gives full game details in one call
+// (unlike TMDB's separate discover+detail split), so results are ready to
+// insert directly.
+//
+// IMPORTANT: the filter field is `game_type` (main game = 0) in IGDB v4 —
+// NOT `category`, which is the v3 field name and silently returns zero
+// results if used (confirmed empirically; don't trust remembered IGDB
+// field names without testing, same lesson as the TMDB network-ID saga).
+//
+// ratingCountFloor filters on accumulated post-release ratings — useless
+// for not-yet-released games, which is what hypesFloor is for instead
+// (IGDB's pre-release anticipation metric). Pass whichever fits the query.
+async function discoverNewGames({ sinceDate, untilDate, ratingCountFloor, hypesFloor, token }) {
+  const clientId = process.env.IGDB_CLIENT_ID;
+  if (!token) token = await getIgdbToken();
+  if (!token) throw new Error('IGDB auth failed (check IGDB_CLIENT_ID/IGDB_CLIENT_SECRET)');
+  const since = Math.floor(new Date(sinceDate).getTime() / 1000);
+  const until = Math.floor(new Date(untilDate).getTime() / 1000);
+
+  const filters = [`first_release_date >= ${since}`, `first_release_date <= ${until}`, 'game_type = 0'];
+  if (ratingCountFloor != null) filters.push(`rating_count > ${ratingCountFloor}`);
+  if (hypesFloor != null) filters.push(`hypes > ${hypesFloor}`);
+
+  const results = [];
+  let offset = 0;
+  const pageSize = 500; // IGDB's max per request
+  while (true) {
+    const body = `fields name,cover.url,first_release_date,genres.name,involved_companies.company.name,summary,rating,rating_count,hypes; where ${filters.join(' & ')}; sort rating_count desc; limit ${pageSize}; offset ${offset};`;
+    const res = await fetchWithRetry('https://api.igdb.com/v4/games', {
+      method: 'POST',
+      headers: { 'Client-ID': clientId, Authorization: `Bearer ${token}`, 'Content-Type': 'text/plain' },
+      body,
+    });
+    if (!res.ok) throw new Error('IGDB discover failed');
+    const games = await res.json();
+    results.push(...games.map(mapIgdbGame));
+    if (games.length < pageSize) break;
+    offset += pageSize;
+    if (offset > 20000) break; // sanity cap
+  }
+  return results;
+}
+
 // ─── TMDB discovery — used by scripts/sync-new-releases.js ────────────────
 // Unlike searchTmdb (title lookup for a known movie), this finds NEW movies
 // matching filters (release window + major studio/streamer) without a title
@@ -482,10 +590,13 @@ module.exports = {
   searchTmdb,
   getTmdbDetail,
   searchGoogleBooks,
+  searchGoogleBooksByIsbn,
   getGoogleBooksDetail,
+  getNytBestsellerList,
   searchOpenLibrary,
   getOpenLibraryDetail,
   searchIgdb,
+  discoverNewGames,
   discoverNewMovies,
   discoverNewTvShows,
   resolveTvGenreIds,

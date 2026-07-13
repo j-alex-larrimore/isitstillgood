@@ -61,13 +61,19 @@ Postgres connection string — scripts run locally write directly to
 production data, be careful. To use `scripts/bulk-import.js` for real
 lookups (not just dry-runs), add these too, copied from Railway's Variables
 tab: `TMDB_READ_ACCESS_TOKEN`, `GOOGLE_BOOKS_API_KEY`, `IGDB_CLIENT_ID`,
-`IGDB_CLIENT_SECRET`.
+`IGDB_CLIENT_SECRET`. `scripts/sync-new-books.js` additionally needs
+`NYT_API_KEY` — a free key from the Books API product at
+developer.nytimes.com (Apps → New App → enable Books API), not something
+Railway already has.
 
 Full list of vars the app itself uses (set in Railway, not locally):
 `DATABASE_URL`, `NODE_ENV`, `PORT`, `CLIENT_URL`, `SESSION_SECRET`,
 `JWT_SECRET`, `JWT_EXPIRES_IN`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_CALLBACK_URL`, `RESEND_API_KEY`, `TMDB_READ_ACCESS_TOKEN`,
-`GOOGLE_BOOKS_API_KEY`, `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`.
+`GOOGLE_BOOKS_API_KEY`, `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`. `NYT_API_KEY`
+is used by the sync workflow but not by the app itself, so it doesn't need
+to go in Railway — only in local `.env` (for testing) and GitHub Actions
+secrets (for the scheduled job).
 
 ## Deploy flow
 
@@ -103,6 +109,23 @@ separate from Railway's env vars, and must be added there directly.
 (TMDB's discover filters on a show's overall first-air-date) — it does not
 detect new seasons of shows already in the DB.
 
+`scripts/sync-new-books.js` (also part of the same weekly workflow) is a
+different shape from the other two — Google Books has no reliable
+discover-by-date API (verified empirically: `orderBy=newest` doesn't sort by
+actual recency, and publisher+date-range queries returned zero results for
+a major publisher's current-year catalog), so it isn't built on Google Books
+for discovery. It uses the NYT Books API's current-week bestseller lists
+instead (a real "what's current" endpoint), then does a precise Google Books
+**ISBN** lookup (not fuzzy title/author search) for each book's
+description/cover/metadata. Needs `GOOGLE_BOOKS_API_KEY` and `NYT_API_KEY`
+as GitHub Actions secrets in addition to the ones the other two steps use.
+Genres come from which NYT list a book appeared on
+(`LIST_GENRE_MAP` in the script), not from Google Books' own genre field —
+Google Books' genre and release-date data is unreliable for fuzzy-matched
+results specifically (wrong-edition mismatches); an exact ISBN lookup
+doesn't have that problem for release year, but genre quality is still poor
+across the board on Google Books, hence the override either way.
+
 ## Adding media to the database
 
 Three ways, all going through the same lookup/normalization logic
@@ -127,9 +150,9 @@ Three ways, all going through the same lookup/normalization logic
   after you confirm — it should never skip the dry-run step for a new list.
 - **Automatically, on a schedule**: `.github/workflows/sync-new-releases.yml`
   (weekly) pulls newly-released movies and newly-premiered TV shows from a
-  curated studio/network/streamer list — see "Deploy flow" above. Unlike
-  every other path here, this one auto-publishes instead of queuing for
-  review.
+  curated studio/network/streamer list, plus newly-published books from NYT
+  current bestseller lists — see "Deploy flow" above. Unlike every other
+  path here, this one auto-publishes instead of queuing for review.
 
 ## Conventions
 

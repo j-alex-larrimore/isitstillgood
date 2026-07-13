@@ -104,10 +104,52 @@ async function connectPersons(names, isUpdate = false) {
   return isUpdate ? { set: ids } : { connect: ids };
 }
 
+// Title normalization for BOOK duplicate matching — an exact (even
+// case-insensitive) string match misses real near-duplicates: leading
+// articles ("Blue Mage Raised by Dragons" vs "The Blue Mage Raised by
+// Dragons"), spelled-out vs numeral volume numbers ("Volume One:
+// 1920–1963" vs "Volume 1"), and parenthetical edition/tie-in noise. Both
+// of these are confirmed-live misses, not hypothetical.
+const NUMBER_WORDS = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10' };
+function normalizeBookTitle(t) {
+  let s = (t || '').toLowerCase();
+  s = s.replace(/\s*\([^)]*\)\s*/g, ' ');   // strip parenthetical edition/series notes
+  // NOTE: deliberately does NOT truncate at colon — "Mother of Learning:
+  // Arc 1" vs "Arc 4" and "The Land: Founding" vs "Forging" showed live
+  // that the text after a colon is often the part that distinguishes
+  // different volumes in a series, not decorative subtitle fluff. Blindly
+  // stripping it caused real false-positive matches between genuinely
+  // different books. See bookTitlesMatch() for how the remaining
+  // same-book-different-subtitle-completeness case (e.g. "Volume One:
+  // 1920–1963" vs "Volume 1") is handled more conservatively instead.
+  s = s.replace(/^(the|a|an)\s+/i, '');       // strip leading article
+  s = s.replace(/[^a-z0-9\s]/g, ' ');
+  s = s.replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/g, w => NUMBER_WORDS[w]);
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// Exact match after normalization ONLY — deliberately no prefix/fuzzy
+// leniency. A prefix-match variant was tried and tried again (60% length
+// floor, requiring a trailing space) and still produced two different
+// false-positive patterns live: "Mother of Learning: Arc 1" vs "Arc 4"
+// (colon+suffix distinguishes volumes) and "He Who Fights With Monsters"
+// vs "...Monsters 2" (bare trailing number distinguishes volumes) both
+// matched as "the same book" when they're sequential, genuinely different
+// entries. Numbered-series naming is too common in this catalog (LitRPG/
+// fantasy series) for prefix-matching to be safe. A same-book-different-
+// subtitle-completeness case (e.g. "Volume One: 1920–1963" vs "Volume 1")
+// will be missed by exact-match — that's an acceptable false negative
+// (occasional uncaught duplicate, fixable later) vs. the false positive
+// risk of deleting a real, different book.
+function bookTitlesMatch(a, b) {
+  const na = normalizeBookTitle(a), nb = normalizeBookTitle(b);
+  return !!na && na === nb;
+}
+
 // ─── Duplicate detection ──────────────────────────────────────────────────
 // Mirrors GET /api/admin/check-duplicate — checks by external ID first
 // (most reliable), then falls back to a case-insensitive title match.
-async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, releaseYear }) {
+async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, releaseYear, authors }) {
   const idChecks = [];
   if (tmdbId) {
     const tmdbCheck = { tmdbId };
@@ -124,6 +166,26 @@ async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, 
   }
 
   if (title) {
+    // BOOKS: an exact title+author match is virtually always the same work
+    // in a different edition, not a genuine remake — and Google Books'
+    // release-year data for self-published/indie titles is proven
+    // unreliable (confirmed live: "House of Blades" resolved to 2026
+    // instead of its real 2013, a 13-year gap that slipped past the ±2
+    // year guard below and created a true duplicate). So for BOOK, match on
+    // title+author with no year constraint at all, checked first.
+    if (mediaType === 'BOOK' && authors?.length) {
+      // Fetch every book by any of these authors, then compare normalized
+      // titles in JS — Prisma/Postgres can't apply the article-stripping /
+      // number-word / parenthetical normalization above inside a WHERE
+      // clause, and an author's book count is small enough that this is
+      // cheap.
+      const byAuthor = await prisma.mediaItem.findMany({
+        where: { mediaType: 'BOOK', authors: { some: { name: { in: authors, mode: 'insensitive' } } } },
+      });
+      const authorMatch = byAuthor.find(b => bookTitlesMatch(b.title, title));
+      if (authorMatch) return authorMatch;
+    }
+
     const titleMatch = await prisma.mediaItem.findFirst({
       where: {
         title: { equals: title.trim(), mode: 'insensitive' },
@@ -151,4 +213,6 @@ module.exports = {
   uniqueSlug,
   connectPersons,
   findDuplicate,
+  normalizeBookTitle,
+  bookTitlesMatch,
 };

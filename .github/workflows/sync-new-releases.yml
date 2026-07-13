@@ -40,3 +40,10 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
         run: node scripts/sync-new-seasons.js
+
+      - name: Sync new books
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          GOOGLE_BOOKS_API_KEY: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
+          NYT_API_KEY: ${{ secrets.NYT_API_KEY }}
+        run: node scripts/sync-new-books.js
