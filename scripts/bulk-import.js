@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeBookGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -239,7 +239,7 @@ async function lookupGame(row) {
     releaseYear:     match.releaseYear,
     description:     match.description,
     imageUrl:        match.imageUrl,
-    genres:          normalizeGenres(match.genres || []),
+    genres:          normalizeGameGenres(match.genres || []),
     openCriticScore: match.rating || null,
   };
 }

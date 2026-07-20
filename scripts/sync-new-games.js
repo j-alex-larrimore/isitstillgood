@@ -16,7 +16,7 @@
 // Usage: node scripts/sync-new-games.js [--dry-run]
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, normalizeGameGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const { discoverNewGames } = require('../src/services/mediaLookup');
 
 const RATING_COUNT_FLOOR = 10; // matches the historical backfill's threshold
@@ -36,7 +36,7 @@ async function importCandidates(candidates, dryRun, results) {
         continue;
       }
 
-      const genres = normalizeGenres(g.genres || []);
+      const genres = normalizeGameGenres(g.genres || []);
 
       if (dryRun) {
         console.log(`+ "${g.title}" (${g.releaseYear || 'year unknown'}) — genres: ${genres.join(', ')} — would be added`);

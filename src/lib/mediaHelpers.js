@@ -45,6 +45,59 @@ function normalizeGenres(genres) {
   return [...new Set(result)];
 }
 
+// ─── Video game genre normalization ───────────────────────────────────────
+// Unlike Open Library's freeform subject headings, IGDB's genre field is
+// already a small controlled vocabulary (confirmed live: 34 distinct raw
+// strings across 8,500+ games) — so this doesn't need book-genre-style
+// keyword rules, just a direct cleanup map. Three problems in the raw IGDB
+// names: awkward compound labels ("Hack and slash/Beat 'em up" — mapped to
+// the cleaner umbrella term "Action"), redundant parenthetical abbreviations
+// ("Role-playing (RPG)", "Turn-based strategy (TBS)"), and inconsistent
+// splitting of "&"-joined names ("Card & Board Game" showing up standalone
+// on some games alongside separately-split "Card"/"Board Game" on others —
+// caused by some import paths not calling this normalizer at all; additive,
+// so the combined form expands into both canonical tags rather than being
+// dropped). Anything not in this map is kept as-is rather than dropped —
+// IGDB's vocabulary is already curated, so an unrecognized value is more
+// likely a genre this map hasn't been extended to cover yet than junk.
+const VIDEO_GAME_GENRE_CANON = [
+  'Action', 'Adventure', 'Platformer', 'Puzzle', 'Racing', 'Role-Playing',
+  'Shooter', 'Simulation', 'Sports', 'Strategy', 'Turn-Based Strategy',
+  'Real-Time Strategy', 'Tactical', 'Fighting', 'Arcade', 'Indie',
+  'Point-and-Click', 'Visual Novel', 'Music', 'Card Game', 'Board Game',
+  'Trivia', 'MOBA', 'Pinball', 'City Builder', 'Interactive Film',
+  'Roguelike', 'Deck Builder',
+];
+const VIDEO_GAME_GENRE_MAP = {
+  "hack and slash/beat 'em up": 'Action',
+  'platform': 'Platformer',
+  'role-playing (rpg)': 'Role-Playing',
+  'rpg': 'Role-Playing',
+  'simulator': 'Simulation',
+  'sport': 'Sports',
+  'turn-based strategy (tbs)': 'Turn-Based Strategy',
+  'real time strategy (rts)': 'Real-Time Strategy',
+  'point-and-click': 'Point-and-Click',
+  'card': 'Card Game',
+  'card & board game': ['Card Game', 'Board Game'],
+  'quiz/trivia': 'Trivia',
+  "rogue-like": 'Roguelike',
+};
+
+function normalizeGameGenres(genres) {
+  if (!Array.isArray(genres)) return genres;
+  const result = new Set();
+  for (const raw of genres) {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) continue;
+    const mapped = VIDEO_GAME_GENRE_MAP[trimmed.toLowerCase()];
+    if (Array.isArray(mapped)) mapped.forEach(m => result.add(m));
+    else if (mapped) result.add(mapped);
+    else result.add(trimmed);
+  }
+  return [...result];
+}
+
 // ─── Book genre normalization ─────────────────────────────────────────────
 // Open Library's `subject` field (and to a lesser extent Google Books'
 // `categories`) is a bag of Library-of-Congress-style subject headings, not
@@ -397,6 +450,8 @@ async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, 
 module.exports = {
   normalizeTags,
   normalizeGenres,
+  normalizeGameGenres,
+  VIDEO_GAME_GENRE_CANON,
   normalizeBookGenres,
   looksLikeBookGenreSubject,
   BOOK_GENRE_CANON,

@@ -6,8 +6,22 @@ const prisma  = require('../lib/prisma');
 const { requireAdmin } = require('../middleware/admin');
 const { fetchExternalRatings } = require('../services/externalRatings');
 const {
-  normalizeTags, slugify, uniqueSlug, connectPersons,
+  normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres,
+  slugify, uniqueSlug, connectPersons,
 } = require('../lib/mediaHelpers');
+
+// Genres are normalized server-side, by mediaType, no matter what the
+// client sends — the admin UI's single-add and edit forms used to write
+// raw external-API genre strings straight through (e.g. IGDB's "Hack and
+// slash/Beat 'em up", TMDB's unsplit "Sci-Fi & Fantasy"), which is how
+// those ended up inconsistent with the bulk-import/sync paths that already
+// called the right normalizer.
+function normalizeGenresForType(mediaType, genres) {
+  if (!Array.isArray(genres)) return genres;
+  if (mediaType === 'BOOK') return normalizeBookGenres(genres);
+  if (mediaType === 'VIDEO_GAME') return normalizeGameGenres(genres);
+  return normalizeGenres(genres);
+}
 const {
   searchTmdb, getTmdbDetail,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -158,7 +172,7 @@ router.post('/media', requireAdmin, [
         releaseYear: releaseYear ? parseInt(releaseYear) : null,
         description:     description || null,
         imageUrl:        imageUrl    || null,
-        genres:          genres      || [],
+        genres:          normalizeGenresForType(mediaType, genres || []),
         // Tags — franchise, studio, network etc. e.g. "Marvel", "HBO", "Star Wars"
         tags:            normalizeTags(tags || []),
         excludedCast:    excludedCast || [],  // cast members who left before this season
@@ -224,6 +238,16 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
 
     // Normalize tags if being updated
     if (data.tags) data.tags = normalizeTags(data.tags);
+
+    // Normalize genres if being updated — mediaType isn't in the request
+    // body (it's immutable after creation), so look up the existing row's.
+    if (data.genres) {
+      const existing = await prisma.mediaItem.findUnique({
+        where: { id: req.params.id },
+        select: { mediaType: true },
+      });
+      if (existing) data.genres = normalizeGenresForType(existing.mediaType, data.genres);
+    }
 
     const item = await prisma.mediaItem.update({
       where: { id: req.params.id },

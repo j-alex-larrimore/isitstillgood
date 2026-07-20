@@ -12,7 +12,7 @@
 // Usage: node scripts/backfill-games.js [--dry-run]
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, normalizeGameGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const { discoverNewGames } = require('../src/services/mediaLookup');
 
 const RATING_COUNT_FLOOR = 10;
@@ -38,7 +38,7 @@ async function main() {
         continue;
       }
 
-      const genres = normalizeGenres(g.genres || []);
+      const genres = normalizeGameGenres(g.genres || []);
 
       if (dryRun) {
         results.added.push(g.title);
