@@ -126,6 +126,15 @@ results specifically (wrong-edition mismatches); an exact ISBN lookup
 doesn't have that problem for release year, but genre quality is still poor
 across the board on Google Books, hence the override either way.
 
+`scripts/sync-new-games.js` (also part of the same weekly workflow) runs
+two IGDB discovery passes, since a single popularity metric doesn't work
+across both: recently-released games (last 8 days) filtered by
+`rating_count` (same threshold as the historical backfill), and upcoming
+games (next ~90 days) filtered by `hypes` instead, IGDB's pre-release
+anticipation metric, since an unreleased game has zero accumulated ratings
+by definition. Needs `IGDB_CLIENT_ID` and `IGDB_CLIENT_SECRET` as GitHub
+Actions secrets in addition to the ones the other steps use.
+
 ## Adding media to the database
 
 Three ways, all going through the same lookup/normalization logic
@@ -150,9 +159,10 @@ Three ways, all going through the same lookup/normalization logic
   after you confirm — it should never skip the dry-run step for a new list.
 - **Automatically, on a schedule**: `.github/workflows/sync-new-releases.yml`
   (weekly) pulls newly-released movies and newly-premiered TV shows from a
-  curated studio/network/streamer list, plus newly-published books from NYT
-  current bestseller lists — see "Deploy flow" above. Unlike every other
-  path here, this one auto-publishes instead of queuing for review.
+  curated studio/network/streamer list, newly-published books from NYT
+  current bestseller lists, and newly-released/upcoming video games from
+  IGDB — see "Deploy flow" above. Unlike every other path here, this one
+  auto-publishes instead of queuing for review.
 
 ## Conventions
 
