@@ -4,9 +4,17 @@
 // cool" or "it is awesome", or just the title restated) — with a real
 // description re-fetched from Google Books (langRestrict=en). Same
 // conservative approach as fix-non-english-descriptions.js: only replaces
-// when a candidate passes quality checks, otherwise leaves the row
-// untouched and logs it for manual review rather than guessing or
-// deleting content.
+// when a candidate passes quality checks.
+//
+// When no good replacement is found, most rows are simply left untouched —
+// but if the existing description mechanically matches a confirmed-junk
+// pattern (see isDefinitelyJunk below: reprint-publisher boilerplate,
+// alternate-title notes, casual reader comments, bibliographic notes, bare
+// title lists, non-Latin-script dumps, or near-empty text), it's cleared to
+// null instead of leaving unprofessional text in place. A genuinely terse
+// but real description (e.g. The Silver Chair's "Jill and Eustace must
+// rescue the Prince from the evil Witch.") is left alone — this only clears
+// mechanically-recognizable junk, never guesses based on length alone.
 //
 // Usage: node scripts/fix-low-quality-descriptions.js [--dry-run]
 require('dotenv').config();
@@ -56,6 +64,37 @@ function isLowQuality(text) {
 // instead of an actual description.
 const TITLE_LIST_DUMP = /\)\)/;
 
+// Patterns confirmed, by direct user review, to be unprofessional junk
+// rather than genuine (if terse) descriptions — a real one-sentence
+// description like The Silver Chair's "Jill and Eustace must rescue the
+// Prince from the evil Witch." should NOT be cleared just for being short.
+// This only covers mechanically-recognizable junk; anything else that fails
+// to find a replacement is left alone rather than guessed at.
+const REPRINT_BOILERPLATE = /reprint of the original edition|includes bibliography|chronology.*explanatory notes|selected by scholars.*culturally important|knowledge base of civilization|rare manuscript.*great librar/i;
+const ALTERNATE_TITLE_NOTE = /^AKA\b/i;
+const CASUAL_READER_VOICE = /^(i |i'|it is |it's |very |good book|great book|nice book|love (it|this)|really (enjoy|like)|awesome\b|funny\b)/i;
+
+function isNonLatinScript(text) {
+  const letters = text.replace(/[^\p{L}]/gu, '');
+  if (letters.length < 5) return false;
+  const nonLatin = letters.replace(/[a-zA-ZÀ-ÿ]/g, '');
+  return nonLatin.length / letters.length > 0.5;
+}
+
+function isDefinitelyJunk(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (REPRINT_BOILERPLATE.test(trimmed)) return true;
+  if (ALTERNATE_TITLE_NOTE.test(trimmed)) return true;
+  if (CASUAL_READER_VOICE.test(trimmed)) return true;
+  if (isAllCaps(trimmed)) return true;
+  if (BIBLIOGRAPHIC_NOTE.test(trimmed)) return true;
+  if (TITLE_LIST_DUMP.test(trimmed)) return true;
+  if (isNonLatinScript(trimmed)) return true;
+  if (trimmed.split(/\s+/).length <= 4) return true; // "Funny", "A novel.", etc.
+  return false;
+}
+
 function isGoodCandidate(text, currentLength) {
   if (!text || text.length < SHORT_THRESHOLD) return false;
   if (text.length <= currentLength) return false; // must be a real improvement
@@ -83,7 +122,7 @@ async function main() {
   const flagged = books.filter(b => isLowQuality(b.description));
   console.log(`Found ${flagged.length} low-quality book description(s)${dryRun ? ' (dry run)' : ''}...`);
 
-  let fixed = 0, noGoodMatch = 0;
+  let fixed = 0, cleared = 0, noGoodMatch = 0;
   for (const book of flagged) {
     const author = book.authors[0]?.name || null;
     let results = [];
@@ -102,6 +141,12 @@ async function main() {
       if (!dryRun) {
         await prisma.mediaItem.update({ where: { id: book.id }, data: { description: candidate.description } });
       }
+    } else if (isDefinitelyJunk(book.description)) {
+      cleared++;
+      console.log(`"${book.title}": no replacement found, clearing junk description (was: ${JSON.stringify(book.description.slice(0, 60))})`);
+      if (!dryRun) {
+        await prisma.mediaItem.update({ where: { id: book.id }, data: { description: null } });
+      }
     } else {
       noGoodMatch++;
       console.log(`"${book.title}": no better description found — left unchanged (current: ${JSON.stringify(book.description.slice(0, 60))})`);
@@ -111,7 +156,8 @@ async function main() {
 
   console.log(`\n=== SUMMARY ===`);
   console.log(`Fixed: ${fixed} / ${flagged.length}`);
-  console.log(`No good match (unchanged): ${noGoodMatch}`);
+  console.log(`Cleared (junk, no replacement found): ${cleared}`);
+  console.log(`No good match (left unchanged): ${noGoodMatch}`);
   await prisma.$disconnect();
 }
 main().catch(e => { console.error(e); process.exit(1); });
