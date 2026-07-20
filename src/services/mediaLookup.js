@@ -397,7 +397,12 @@ async function getOpenLibraryDetail(id, year) {
   return {
     openLibraryId: id,
     title:         data.title,
-    description:   description.slice(0, 3000),
+    // Unlike the Google Books path, Open Library descriptions were never run
+    // through cleanBookDescription() — they went straight from the raw API
+    // field (often containing literal HTML like <p>/<a href> tags, since
+    // Open Library descriptions are user-contributed wiki-style text) into
+    // the DB. Fixed here; existing rows need a separate backfill.
+    description:   cleanBookDescription(description),
     authors:       authorNames.filter(Boolean),
     releaseYear,
     imageUrl:      coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : null,
