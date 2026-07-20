@@ -26,7 +26,7 @@
 
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeBookGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const { getNytBestsellerList, searchGoogleBooksByIsbn } = require('../src/services/mediaLookup');
 
 // A curated subset of NYT's bestseller lists (see
@@ -98,7 +98,7 @@ async function main() {
         continue;
       }
 
-      const genres = normalizeGenres(candidate.genres);
+      const genres = normalizeBookGenres(candidate.genres);
 
       if (dryRun) {
         console.log(`+ "${detail.title}" by ${candidate.author} (${detail.releaseYear || 'year unknown'}) — genres: ${genres.join(', ')} — would be added`);

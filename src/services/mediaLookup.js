@@ -3,6 +3,7 @@
 // and scripts/bulk-import.js (the CLI importer) so both resolve titles
 // against TMDB/Google Books/Open Library/IGDB identically.
 const { getIgdbToken } = require('./externalRatings');
+const { looksLikeBookGenreSubject } = require('../lib/mediaHelpers');
 
 // ─── Retry wrapper ─────────────────────────────────────────────────────────
 // These APIs (Google Books especially) intermittently return transient 5xx
@@ -31,22 +32,30 @@ function filterOpenLibraryGenres(subjects) {
     'large type', 'open library', 'overdrive', 'nglc', 'reading level',
     'homeschool', 'libraries', 'lending library', 'new york times',
     'bestseller', 'award', 'prize', 'banned', 'challenged', 'banned books',
-    'juvenile', 'young adult fiction', 'children', 'daisy',
+    'daisy',
     'wishlist', 'favourites', 'favorites', 'to read', 'owned',
     'currently reading', 'read', 'unread',
   ];
 
-  return subjects
-    .filter(s => {
-      if (!s || typeof s !== 'string') return false;
-      const lower = s.toLowerCase();
-      if (blocklist.some(b => lower.includes(b))) return false;
-      if (s.length > 30) return false;
-      if (/^\d/.test(s)) return false;
-      if (s.includes('(') || s.includes(')')) return false;
-      return true;
-    })
-    .slice(0, 5);
+  const filtered = subjects.filter(s => {
+    if (!s || typeof s !== 'string') return false;
+    const lower = s.toLowerCase();
+    if (blocklist.some(b => lower.includes(b))) return false;
+    if (s.length > 30) return false;
+    if (/^\d/.test(s)) return false;
+    if (s.includes('(') || s.includes(')')) return false;
+    return true;
+  });
+
+  // Open Library's subject order is arbitrary insertion order, not
+  // relevance-ranked — a real genre signal like "Juvenile fiction" can sit
+  // well past position 5 behind blocklist-surviving noise ("Amistad",
+  // "Homeless persons", foreign-language duplicates like "Fluch"). Sort
+  // recognized-genre subjects first so the slice cap below doesn't starve
+  // out genuine signal before normalizeBookGenres ever sees it.
+  filtered.sort((a, b) => Number(looksLikeBookGenreSubject(b)) - Number(looksLikeBookGenreSubject(a)));
+
+  return filtered.slice(0, 8);
 }
 
 // ─── Clean book description ──────────────────────────────────────────────────
@@ -182,8 +191,20 @@ async function getTvKeywords(id, token = process.env.TMDB_READ_ACCESS_TOKEN) {
   return (data.results || []).map(k => k.name.toLowerCase());
 }
 
+// Movie keywords — same idea as getTvKeywords, but TMDB's movie endpoint
+// uses a `keywords` field in the response, not `results` (a real,
+// confirmed difference between the /tv and /movie keyword endpoints, not a
+// typo — don't "fix" this to match the TV version).
+async function getMovieKeywords(id, token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/movie/${id}/keywords`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.keywords || []).map(k => k.name.toLowerCase());
+}
+
 // ─── Google Books ──────────────────────────────────────────────────────────────
-async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BOOKS_API_KEY) {
+async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BOOKS_API_KEY, langRestrict = null) {
   if (!apiKey) throw new Error('GOOGLE_BOOKS_API_KEY not configured');
   let query = `intitle:${q}`;
   if (author) query += `+inauthor:${author}`;
@@ -195,7 +216,8 @@ async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BO
   // silently ignored since it's missing `=` and isn't valid query syntax
   // anyway — dead code, not an active bug, but confusing to leave in.)
   // pickBestMatch() handles year-based ranking among returned candidates.
-  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
+  let url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=20&printType=books&key=${apiKey}`;
+  if (langRestrict) url += `&langRestrict=${encodeURIComponent(langRestrict)}`;
 
   const res = await fetchWithRetry(url);
   // Fail soft (empty results) rather than throwing — a Google Books outage
@@ -623,4 +645,5 @@ module.exports = {
   getTvSeasonNumbers,
   getTvSeasonCast,
   getTvKeywords,
+  getMovieKeywords,
 };

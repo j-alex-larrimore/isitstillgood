@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeBookGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -207,7 +207,7 @@ async function lookupBook(row) {
       releaseYear: detail.releaseYear,
       description: detail.description,
       imageUrl:    detail.imageUrl,
-      genres:      normalizeGenres(detail.genres || []),
+      genres:      normalizeBookGenres(detail.genres || []),
       authors:     detail.authors || [],
     };
   }
@@ -224,7 +224,7 @@ async function lookupBook(row) {
     releaseYear: detail.releaseYear,
     description: detail.description,
     imageUrl:    detail.imageUrl,
-    genres:      normalizeGenres(detail.genres || []),
+    genres:      normalizeBookGenres(detail.genres || []),
     authors:     detail.authors || [],
   };
 }
