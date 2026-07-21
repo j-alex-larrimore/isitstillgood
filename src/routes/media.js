@@ -221,8 +221,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (type === 'BOOK' && !req.query.series && !req.query.individual) {
       // When text search is active, series books will be handled individually
       // if multiple from same series match — otherwise via seriesRepresentatives
-      // Only apply the standalone-books filter when no text search
-      if (!q) andClauses.push({ OR: [{ seriesName: null }, { seriesNumber: null }] });
+      // Only apply the standalone-books filter when no text search.
+      // Deliberately just seriesName: null, NOT seriesNumber: null too — a
+      // companion/interstitial volume (seriesNumber left null on purpose,
+      // per the site-wide convention for books like "1.5") still has a real
+      // seriesName, so treating null-seriesNumber as "standalone" let those
+      // leak into Browse as orphaned individual cards outside their series
+      // — confirmed live with two Murderbot Diaries novellas ("Home",
+      // "Rapport") showing up ahead of the actual series card.
+      if (!q) andClauses.push({ seriesName: null });
     }
     if (year && !req.query.yearFrom && !req.query.yearTo) {
       andClauses.push({ releaseYear: parseInt(year) });
@@ -570,9 +577,17 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // Helper to get the effective rating for an item (series aggregate or individual)
+    // Helper to get the effective rating for an item (series aggregate or individual).
+    // Only the actual series-representative card gets the series-wide aggregate —
+    // any other book sharing that seriesName (e.g. a companion novella shown
+    // individually) must sort by its own rating. Previously this checked only
+    // `i.seriesName` truthy, so an unrated companion book inherited its whole
+    // series' aggregate rating for sort purposes while still *displaying* "No
+    // reviews yet" (that part already correctly checked isSeriesRep) — the
+    // mismatch put unrated books ahead of genuinely-rated ones under Top Rated.
     function effectiveRating(i) {
-      return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual)
+      const isRep = seriesRepresentatives.some(r => r.id === i.id);
+      return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isRep)
         ? (bookSeriesRatingMap[i.seriesName]?.avg || ratingMap[i.id]?.avg || null)
         : (ratingMap[i.id]?.avg || null);
     }
