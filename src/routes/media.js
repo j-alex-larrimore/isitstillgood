@@ -421,15 +421,31 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const bookSeriesItems = finalItems.filter(i => i.mediaType === 'BOOK' && i.seriesName);
     const bookSeriesNames = bookSeriesItems.map(i => i.seriesName);
 
+    // seasonNumber: 0 is the book-series sentinel (a review of the SERIES,
+    // not of the individual book whose row hosts the series page) — excluded
+    // here so a book's own individual rating never gets blended with a
+    // series-level review that happens to share the same mediaItemId.
     const ratings = await prisma.review.groupBy({
       by: ['mediaItemId'],
-      where: { mediaItemId: { in: itemIds }, visibility: 'PUBLIC', ...friendFilter },
+      where: { mediaItemId: { in: itemIds }, OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }], visibility: 'PUBLIC', ...friendFilter },
       _avg: { rating: true },
       _count: { rating: true },
     });
     const ratingMap = Object.fromEntries(ratings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
-    // Keep direct ratings (series-level reviews) before TV aggregation overwrites them
-    const directRatingMap = { ...ratingMap };
+
+    // Direct/series-level reviews for book series cards — the counterpart of
+    // the above: ONLY seasonNumber:0 reviews, i.e. reviews actually written
+    // about the series as a whole. Confirmed live: Browse was showing "2
+    // reviews" on a series card that had exactly one genuine series review,
+    // because it was also counting the representative book's own individual
+    // review (previously the two were never distinguished here).
+    const directSeriesRatings = await prisma.review.groupBy({
+      by: ['mediaItemId'],
+      where: { mediaItemId: { in: itemIds }, seasonNumber: 0, visibility: 'PUBLIC', ...friendFilter },
+      _avg: { rating: true },
+      _count: { rating: true },
+    });
+    const directRatingMap = Object.fromEntries(directSeriesRatings.map(r => [r.mediaItemId, { avg: r._avg.rating, count: r._count.rating }]));
 
     let seasonCountMap = {};
 
@@ -530,7 +546,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (allBookIds.length) {
         const bookRatings = await prisma.review.groupBy({
           by: ['mediaItemId'],
-          where: { mediaItemId: { in: allBookIds }, visibility: 'PUBLIC', ...friendFilter, ...consumedFilter },
+          // Exclude seasonNumber:0 (series-level reviews) — "Avg book" should
+          // only ever average actual per-book ratings, never a review of the
+          // series as a whole that happens to share the representative's id.
+          where: { mediaItemId: { in: allBookIds }, OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }], visibility: 'PUBLIC', ...friendFilter, ...consumedFilter },
           _avg: { rating: true },
           _count: { rating: true },
         });
@@ -552,6 +571,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         const allBookReviews = await prisma.review.findMany({
           where: {
             mediaItemId: { in: allBookIds },
+            OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }], // exclude series-level reviews, same reasoning as bookRatings above
             visibility: 'PUBLIC',
             ...friendFilter,
           },
@@ -817,12 +837,19 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         select: {
           id: true, title: true, slug: true,
           seriesNumber: true, releaseYear: true, imageUrl: true,
-          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          // seasonNumber: {not: 0} excludes series-level reviews — otherwise the
+          // representative book's own count here double-counts once a series-
+          // level review exists too, since both share that book's mediaItemId.
+          _count: { select: { reviews: { where: { visibility: 'PUBLIC', OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }] } } } },
         },
         orderBy: { seriesNumber: 'asc' },
       });
       const seriesBookIds = seriesBooks.map(b => b.id);
-      statsWhere = { mediaItemId: { in: seriesBookIds }, visibility: 'PUBLIC' };
+      // Exclude seasonNumber:0 (series-level reviews) — these per-book stats
+      // should only count actual individual-book ratings. Without this, the
+      // representative book's own row double-counts once a series-level
+      // review exists too, since both share that same mediaItemId.
+      statsWhere = { mediaItemId: { in: seriesBookIds }, OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }], visibility: 'PUBLIC' };
     }
 
     const [stats, seriesLevelStats] = await Promise.all([
@@ -864,7 +891,10 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       const bookIds = seriesBooks.map(b => b.id);
       const bookRatings = await prisma.review.groupBy({
         by: ['mediaItemId'],
-        where: { mediaItemId: { in: bookIds }, visibility: 'PUBLIC' },
+        // seasonNumber: {not: 0} — same reasoning as the _count above: don't
+        // blend the representative book's series-level review into its own
+        // individual rating/count.
+        where: { mediaItemId: { in: bookIds }, OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }], visibility: 'PUBLIC' },
         _avg: { rating: true },
         _count: { rating: true },
       });
