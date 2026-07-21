@@ -328,6 +328,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // and paginate in JS. This ensures unrated items always appear at the bottom
     // of the last page rather than being pushed off by pagination.
     const ratingSort = sort === 'rating' || sort === 'lowest';
+    // When a text query is active, results need a relevance pass in JS too —
+    // otherwise the chosen sort (recency, rating, etc.) is the ONLY ordering,
+    // and since most items in a fresh catalog have zero reviews, "Top Rated"
+    // (the default) degenerates to no-op ties broken by DB fetch order. That's
+    // exactly why searching "halo" surfaced unrelated zero-review items above
+    // the actual Halo games — confirmed live. Fetch everything matching so the
+    // relevance sort below can consider the whole result set before paginating.
+    const textActive = !!(q && q.trim().length > 0);
+    const fullFetchMode = ratingSort || textActive;
 
     const [items, total] = await Promise.all([
       prisma.mediaItem.findMany({
@@ -340,9 +349,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
           parent:    { select: { id: true, title: true, slug: true } },
         },
         orderBy,
-        // For rating sort, fetch all — pagination handled in JS after sort
-        skip: ratingSort ? 0 : (parseInt(page) - 1) * take,
-        take: ratingSort ? undefined : take,
+        // For rating sort (or any text search), fetch all — pagination handled in JS after sort
+        skip: fullFetchMode ? 0 : (parseInt(page) - 1) * take,
+        take: fullFetchMode ? undefined : take,
       }),
       prisma.mediaItem.count({ where }),
     ]);
@@ -372,12 +381,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
           !b.seriesName || matchesBookText(b)
         );
 
-        // Series reps: show as individual book card only if the book's own text matched
-        const repsAsIndividualBooks = seriesRepresentatives
-          .filter(r => matchesBookText(r))
-          .map(r => ({ ...r, _forceIndividual: true }));
-
-        finalItems = [...individualBooks, ...repsAsIndividualBooks, ...seriesRepresentatives];
+        // The series representative is never re-added as a second "individual"
+        // card here — it already appears via seriesRepresentatives below, and
+        // that card IS this exact book (its own page is one click away via the
+        // series page's "?book=1" override). Confirmed live: The Wandering Inn's
+        // book 1 shares its title with the series name, so re-adding it as a
+        // separate individual match produced two identical-looking result cards.
+        finalItems = [...individualBooks, ...seriesRepresentatives];
       } else {
         finalItems = [...dedupedItems, ...seriesRepresentatives];
       }
@@ -567,19 +577,57 @@ router.get('/', optionalAuth, async (req, res, next) => {
         : (ratingMap[i.id]?.avg || null);
     }
 
-    // For rating/lowest sort: sort ALL items together (series + standalones) then paginate.
-    // We must do this in JS since avgRating is computed post-fetch and can't be done in DB.
+    // Relevance tier for a text query — checked against both the item's own
+    // title and (for book series cards) the series name, since that's what's
+    // actually displayed to the user. Higher is better; 0 means the match
+    // came from somewhere else entirely (description, cast/author name).
+    const qLower = textActive ? q.trim().toLowerCase() : null;
+    function relevance(i) {
+      if (!textActive) return 0;
+      const candidates = [i.title, i.seriesName].filter(Boolean).map(s => s.toLowerCase());
+      let best = 0;
+      for (const c of candidates) {
+        if (c === qLower)            best = Math.max(best, 3);
+        else if (c.startsWith(qLower)) best = Math.max(best, 2);
+        else if (c.includes(qLower))   best = Math.max(best, 1);
+      }
+      return best;
+    }
+
+    // Secondary ordering key — whatever the user's chosen sort represents —
+    // used only to break ties within the same relevance tier.
+    function secondaryKey(i) {
+      switch (sort) {
+        case 'rating': case 'lowest': return effectiveRating(i);
+        case 'popular': return i._count?.reviews ?? 0;
+        case 'year':    return i.releaseYear ?? null;
+        case 'title':   return (i.title || '').toLowerCase();
+        case 'recent':  default: return new Date(i.createdAt).getTime();
+      }
+    }
+    function compareSecondary(a, b) {
+      const aKey = secondaryKey(a), bKey = secondaryKey(b);
+      if (sort === 'title') return String(aKey).localeCompare(String(bKey));
+      // Nulls (no rating / no year) always sort last regardless of direction
+      if (aKey === null && bKey === null) return 0;
+      if (aKey === null) return 1;
+      if (bKey === null) return -1;
+      return sort === 'lowest' || sort === 'year' ? aKey - bKey : bKey - aKey;
+    }
+
+    // Sort ALL matching items together (series + standalones) then paginate in JS —
+    // required whenever avgRating drives the order (computed post-fetch) or a text
+    // query is active (relevance can't be expressed as a DB-level orderBy).
     let sortedItems = finalItems;
-    if (sort === 'rating' || sort === 'lowest') {
+    if (textActive) {
       sortedItems = [...finalItems].sort((a, b) => {
-        const aRating = effectiveRating(a);
-        const bRating = effectiveRating(b);
-        // Items with no rating always go last regardless of sort direction
-        if (aRating === null && bRating === null) return 0;
-        if (aRating === null) return 1;
-        if (bRating === null) return -1;
-        return sort === 'lowest' ? aRating - bRating : bRating - aRating;
+        const relDiff = relevance(b) - relevance(a);
+        return relDiff !== 0 ? relDiff : compareSecondary(a, b);
       });
+      const pageNum = parseInt(page) - 1;
+      sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
+    } else if (sort === 'rating' || sort === 'lowest') {
+      sortedItems = [...finalItems].sort(compareSecondary);
       // Re-apply pagination after sorting
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
@@ -591,7 +639,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         // A book is a series card if it's the series representative (lowest seriesNumber in series)
         // When text search active, series cards use individual book rating, not series aggregate
         const isSeriesRep = seriesRepresentatives.some(r => r.id === i.id);
-        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isSeriesRep && !i._forceIndividual;
+        const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isSeriesRep;
         const isTvParentCard = i.mediaType === 'TV_SHOW' && !i.parentId;
 
         // avgRating: series-level reviews (written about the whole series/show)
@@ -630,9 +678,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
         }; // close the return object for isSeriesCard
       }),
       // For rating sort, total reflects the full sorted set (including series reps for books)
-      total: ratingSort ? finalItems.length : total,
+      total: fullFetchMode ? finalItems.length : total,
       page: parseInt(page),
-      pages: ratingSort ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
+      pages: fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
       friendsOnly: friendsOnly && friendIds.length > 0,
     });
   } catch (err) { next(err); }

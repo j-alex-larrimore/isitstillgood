@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "serve", "-l", "5500", "C:\\Users\\jalex\\Documents\\Websites"],
+      "port": 5500
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/server.js"],
+      "port": 3001
+    }
+  ]
+}
