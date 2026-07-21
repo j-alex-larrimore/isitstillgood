@@ -23,7 +23,11 @@ function normalizePersonName(name) {
   let n = (name || '').trim();
   const commaMatch = n.match(/^([^,]+),\s*(.+)$/);
   if (commaMatch) n = `${commaMatch[2]} ${commaMatch[1]}`;
-  return n.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  n = n.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  // Collapse spacing around single-letter initials so "M.A. Carrick" and
+  // "M. A. Carrick" normalize identically — confirmed live these show up
+  // as separate Person records for the same real author.
+  return n.replace(/\b([a-z])\s+(?=[a-z]\b)/g, '$1');
 }
 
 async function main() {
