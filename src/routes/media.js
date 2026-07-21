@@ -577,19 +577,27 @@ router.get('/', optionalAuth, async (req, res, next) => {
         : (ratingMap[i.id]?.avg || null);
     }
 
-    // Relevance tier for a text query — checked against both the item's own
+    // Relevance tier for a text query — checked first against the item's own
     // title and (for book series cards) the series name, since that's what's
-    // actually displayed to the user. Higher is better; 0 means the match
-    // came from somewhere else entirely (description, cast/author name).
+    // actually displayed to the user. If neither matches, an author/director/
+    // cast name containing the query still ranks above a match that only came
+    // from the description — confirmed live that an author search (e.g. an
+    // author's surname) should surface their books above unrelated titles
+    // that merely mention the name in passing text. 0 means the match came
+    // from somewhere else entirely (description only).
     const qLower = textActive ? q.trim().toLowerCase() : null;
     function relevance(i) {
       if (!textActive) return 0;
       const candidates = [i.title, i.seriesName].filter(Boolean).map(s => s.toLowerCase());
       let best = 0;
       for (const c of candidates) {
-        if (c === qLower)            best = Math.max(best, 3);
-        else if (c.startsWith(qLower)) best = Math.max(best, 2);
-        else if (c.includes(qLower))   best = Math.max(best, 1);
+        if (c === qLower)              best = Math.max(best, 4);
+        else if (c.startsWith(qLower)) best = Math.max(best, 3);
+        else if (c.includes(qLower))   best = Math.max(best, 2);
+      }
+      if (best === 0) {
+        const people = [...(i.authors || []), ...(i.directors || []), ...(i.cast || [])];
+        if (people.some(p => p.name && p.name.toLowerCase().includes(qLower))) best = 1;
       }
       return best;
     }
