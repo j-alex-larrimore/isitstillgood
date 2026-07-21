@@ -537,6 +537,11 @@ router.get('/:username/card-data', optionalAuth, async (req, res, next) => {
             id: true, title: true, slug: true, mediaType: true,
             releaseYear: true, imageUrl: true, genres: true,
             seriesName: true, seriesNumber: true,
+            // TV reviews are per-season rows — parentId/parent let the card
+            // builder group seasons back under their show, the same way
+            // seriesName groups books under their series.
+            parentId: true,
+            parent: { select: { id: true, title: true, imageUrl: true } },
             cast: { select: { name: true, slug: true } },
             directors: { select: { name: true, slug: true } },
             authors: { select: { name: true, slug: true } },
