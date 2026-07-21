@@ -8,6 +8,14 @@ const { fetchExternalRatings } = require('../services/externalRatings');
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
+  // qScope narrows what the `q` text search matches against — 'keyword'
+  // (default, unchanged) searches title/description/seriesName/person
+  // names; 'title' restricts to title+seriesName only. Added because a
+  // spam-stuffed description (e.g. a self-published book listing dozens of
+  // unrelated famous titles/authors "fans of X will enjoy this") could
+  // surface in a search for any of those names — title-only search sidesteps
+  // that class of noise entirely.
+  const qScope = req.query.qScope === 'title' ? 'title' : 'keyword';
   const friendsOnly      = req.query.friendsOnly === 'true';
   // excludeFriends: comma-separated usernames to exclude from friend ratings
   const excludeFriends   = req.query.excludeFriends
@@ -84,10 +92,16 @@ router.get('/', optionalAuth, async (req, res, next) => {
       genreFilter = { genres: { has: genre.trim() } };
     }
 
-    // Text search across title, description, series name
+    // Text search across title, description, series name — or, when
+    // qScope is 'title', just title/seriesName (see comment above).
     let textFilter = undefined;
     if (q && q.trim().length > 0) {
-      textFilter = {
+      textFilter = qScope === 'title' ? {
+        OR: [
+          { title:      { contains: q.trim(), mode: 'insensitive' } },
+          { seriesName: { contains: q.trim(), mode: 'insensitive' } },
+        ],
+      } : {
         OR: [
           { title:       { contains: q.trim(), mode: 'insensitive' } },
           { description: { contains: q.trim(), mode: 'insensitive' } },
