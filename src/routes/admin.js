@@ -313,13 +313,35 @@ router.get('/users', requireAdmin, async (req, res, next) => {
     const [users, total] = await Promise.all([
       prisma.user.findMany({
         where,
-        select: { id: true, username: true, displayName: true, email: true, avatarUrl: true, isAdmin: true, createdAt: true, _count: { select: { reviews: true } } },
+        select: { id: true, username: true, displayName: true, email: true, avatarUrl: true, isAdmin: true, createdAt: true, canceledAt: true, _count: { select: { reviews: true } } },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * take, take,
       }),
       prisma.user.count({ where }),
     ]);
     res.json({ users, total, page, pages: Math.ceil(total / take) });
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/admin/users/:id/spam ─────────────────────────────────────
+// Purges a confirmed spam/fake account. Unlike the self-service cancellation
+// flow (DELETE /api/users/:username, which keeps star ratings so aggregate
+// scores don't shift), this is a full hard delete: the User row and every
+// Review it wrote — text AND rating — are gone, along with reactions,
+// comments, friendships, and messages, via the cascade rules already declared
+// on the User model. Use only for confirmed spam/bot accounts, never as a
+// substitute for a real user's own cancellation request.
+router.delete('/users/:id/spam', requireAdmin, async (req, res, next) => {
+  try {
+    const target = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, username: true, isAdmin: true },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.isAdmin) return res.status(400).json({ error: 'Cannot purge an admin account' });
+
+    await prisma.user.delete({ where: { id: target.id } });
+    res.json({ message: `Purged spam account "${target.username}"` });
   } catch (err) { next(err); }
 });
 
