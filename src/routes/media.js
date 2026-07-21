@@ -965,7 +965,25 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
     if (!item) return res.status(404).json({ error: 'Not found' });
     const page = parseInt(req.query.page) || 1;
     const take = 20;
-    const seasonFilter = req.query.season ? { seasonNumber: parseInt(req.query.season) } : {};
+    let seasonFilter = req.query.season ? { seasonNumber: parseInt(req.query.season) } : {};
+
+    // A book series page reuses the lowest-numbered book's own MediaItem row —
+    // its reviews list must show series-level reviews (seasonNumber: 0) only,
+    // NOT that book's own individual review (seasonNumber: null), which would
+    // otherwise leak in as if someone had reviewed the whole series. Mirrors
+    // the isBookSeries check in GET /:slug. Confirmed live: the Cradle series
+    // page was showing book 1's ("Unsouled") own review as if it were a
+    // series review, because this endpoint applied no season filter at all.
+    if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
+      const forceIndividual = req.query.book === '1';
+      const lowestInSeries = await prisma.mediaItem.findFirst({
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true },
+        orderBy: { seriesNumber: 'asc' },
+        select: { id: true },
+      });
+      const isBookSeries = !forceIndividual && lowestInSeries?.id === item.id;
+      seasonFilter = { seasonNumber: isBookSeries ? 0 : null };
+    }
 
     // Friends-only filter — restrict to reviews by friends of the logged-in user
     let userFilter = {};
