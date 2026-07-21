@@ -36,6 +36,7 @@ router.get('/:username/reviews', optionalAuth, [
   query('rating').optional().isInt({ min: 1, max: 10 }),
   query('type').optional().isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
   query('mediaType').optional().isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
+  query('seasonNumber').optional().custom(v => v === 'null' || /^-?\d+$/.test(v)),
 ], async (req, res, next) => {
   try {
     const target = await prisma.user.findUnique({ where: { username: req.params.username } });
@@ -70,6 +71,15 @@ router.get('/:username/reviews', optionalAuth, [
       visibility: visibilityFilter,
       ...(req.query.rating && { rating: parseInt(req.query.rating) }),
       ...(typeFilter && { mediaItem: { is: { mediaType: typeFilter } } }),
+      // seasonNumber: 0 is the book-series sentinel — passed explicitly by
+      // the rating-comparison widget when the item being rated is a series,
+      // so it compares against the user's other series-level reviews rather
+      // than their individual book ratings. "null" (literal string) is the
+      // opposite case: rating an individual book excludes seasonNumber:0 so
+      // a series-level review doesn't show up as if it were a book rating.
+      ...(req.query.seasonNumber !== undefined && {
+        seasonNumber: req.query.seasonNumber === 'null' ? null : parseInt(req.query.seasonNumber),
+      }),
     };
 
     const [reviews, total] = await Promise.all([
@@ -81,6 +91,7 @@ router.get('/:username/reviews', optionalAuth, [
               id: true, title: true, mediaType: true, releaseYear: true,
               imageUrl: true, slug: true, genres: true, tags: true,
               tmdbRating: true, openCriticScore: true,
+              seriesName: true, seriesNumber: true,
             },
           },
           _count: { select: { reactions: true, comments: true } },
