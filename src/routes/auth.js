@@ -2,10 +2,31 @@
 const router   = require('express').Router();
 const passport = require('../middleware/passport');
 const bcrypt   = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
 const prisma   = require('../lib/prisma');
 const { signAccessToken, issueRefreshToken, rotateRefreshToken, setAuthCookies, clearAuthCookies } = require('../lib/tokens');
 const { requireAuth } = require('../middleware/auth');
+
+// ─── Rate limiting ───────────────────────────────────────────────────────────
+// Per-IP throttles on the two endpoints a scripted bot would actually hit —
+// mass account creation and credential-stuffing/brute-force login. Google
+// OAuth isn't limited here: it requires a real Google account per attempt,
+// so it isn't a practical scripted-abuse vector the way email/password is.
+const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many accounts created from this network. Please try again later.' },
+});
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again later.' },
+});
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function validate(req, res) {
@@ -45,12 +66,19 @@ async function sendAuthResponse(res, user) {
 }
 
 // ─── POST /api/auth/register ─────────────────────────────────────────────────
-router.post('/register', [
+router.post('/register', registerLimiter, [
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   body('username').matches(/^[a-zA-Z0-9_]{3,30}$/).withMessage('Username: 3-30 chars, letters/numbers/underscores only'),
   body('displayName').trim().isLength({ min: 1, max: 60 }),
 ], async (req, res, next) => {
+  // Honeypot: join.html has a "website" field hidden off-screen that a real
+  // user never sees or fills, but a scripted form-filler often does. Report
+  // a normal-looking success without creating anything, so the bot has no
+  // signal to adapt on.
+  if (req.body.website) {
+    return res.status(200).json({ message: 'Registration received' });
+  }
   if (!validate(req, res)) return;
   const { email, password, username, displayName } = req.body;
   try {
@@ -82,7 +110,7 @@ router.post('/register', [
 });
 
 // ─── POST /api/auth/login ─────────────────────────────────────────────────────
-router.post('/login', [
+router.post('/login', loginLimiter, [
   body('email').isEmail().normalizeEmail(),
   body('password').notEmpty(),
 ], async (req, res, next) => {
