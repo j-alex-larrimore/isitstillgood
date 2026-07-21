@@ -607,8 +607,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // mismatch put unrated books ahead of genuinely-rated ones under Top Rated.
     function effectiveRating(i) {
       const isRep = seriesRepresentatives.some(r => r.id === i.id);
+      // Priority mirrors what the card actually displays as its primary
+      // number: a genuine series-level review (directRatingMap) outranks the
+      // "Avg book" aggregate (bookSeriesRatingMap), which outranks the
+      // representative's own individual rating. Previously this checked
+      // bookSeriesRatingMap first, so a series with a real 9.0 series review
+      // but a 6.7 average across its books sorted by the 6.7 — Cradle's card
+      // showed "9.0" but ranked as if it were a 6.7 under Top Rated.
       return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isRep)
-        ? (bookSeriesRatingMap[i.seriesName]?.avg || ratingMap[i.id]?.avg || null)
+        ? (directRatingMap[i.id]?.avg || bookSeriesRatingMap[i.seriesName]?.avg || ratingMap[i.id]?.avg || null)
         : (ratingMap[i.id]?.avg || null);
     }
 
