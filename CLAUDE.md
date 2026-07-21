@@ -45,6 +45,9 @@ know before touching media data:
   string and are ordered by `seriesNumber`. The lowest-numbered book in a
   series acts as the "series page" dynamically (whichever book currently has
   the lowest number), aggregating ratings across the whole series.
+  `seriesNumber` is a `Float?`, so interstitial/companion volumes (e.g. a
+  novella between books 2 and 3) get their real fractional number (`2.5`)
+  rather than being left unnumbered.
 
 `Review.rating` (1–10) drives an auto-computed `verdict`: 1–3 `NOT_GOOD`,
 4–6 `MIXED`, 7–8 `STILL_GOOD`, 9–10 `TIMELESS`. Visibility is per-review:

@@ -188,7 +188,7 @@ router.post('/media', requireAdmin, [
 
         // Book
         seriesName:      seriesName  || null,
-        seriesNumber:    seriesNumber ? parseInt(seriesNumber) : null,
+        seriesNumber:    seriesNumber ? parseFloat(seriesNumber) : null,
         // Person relations
         directors: await connectPersons(directorNames),
         cast:      await connectPersons(castNames),

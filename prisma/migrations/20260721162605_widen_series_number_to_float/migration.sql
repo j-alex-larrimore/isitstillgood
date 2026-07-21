@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "MediaItem" ALTER COLUMN "seriesNumber" SET DATA TYPE DOUBLE PRECISION;
+

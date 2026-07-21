@@ -72,7 +72,7 @@ model MediaItem {
   // Book-specific
   authors         Person[]   @relation("AuthoredBy")
   seriesName      String?    // e.g. "The Dark Tower"
-  seriesNumber    Int?       // e.g. 3
+  seriesNumber    Float?     // e.g. 3, or 2.5 for an interstitial/companion volume
 
   // Video game-specific
   openCriticId2   String?    // kept for compat, use openCriticId
@@ -125,6 +125,14 @@ model User {
   ignoredGenres   String[]  @default([])  // false = friends only, true = public
   excludedFriends String[]  @default([])  // usernames excluded from friend rating filters
   consumedWithin  String?                 // e.g. "12m" or "2y" — default recency filter
+
+  // Self-service account cancellation (soft — distinct from the admin
+  // spam-purge hard delete). When set: login is blocked (passwordHash/googleId
+  // are cleared at cancellation time), the profile page 404s, and all of this
+  // user's reviews have reviewText/spoilerText cleared while rating/verdict
+  // stay intact so aggregate scores don't shift. The User row itself and its
+  // Review rows are kept — only the written content is removed.
+  canceledAt      DateTime?
   reviews         Review[]
   reactions       Reaction[]
   comments        Comment[]

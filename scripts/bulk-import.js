@@ -79,7 +79,7 @@ function normalizeRow(row) {
     year:         row.year ? parseInt(row.year) : null,
     author:       row.author ? String(row.author).trim() : null,
     seriesName:   row.seriesName ? String(row.seriesName).trim() : null,
-    seriesNumber: row.seriesNumber ? parseInt(row.seriesNumber) : null,
+    seriesNumber: row.seriesNumber ? parseFloat(row.seriesNumber) : null,
     tags: Array.isArray(row.tags)
       ? row.tags
       : (row.tags ? String(row.tags).split(';').map(t => t.trim()).filter(Boolean) : []),
