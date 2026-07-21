@@ -25,6 +25,11 @@ passport.use(new LocalStrategy(
       if (!user || !user.passwordHash) {
         return done(null, false, { message: 'Invalid credentials' });
       }
+      // Canceled accounts have passwordHash cleared already, but check
+      // canceledAt explicitly too — it's the single source of truth.
+      if (user.canceledAt) {
+        return done(null, false, { message: 'This account has been canceled' });
+      }
       const valid = await bcrypt.compare(password, user.passwordHash);
       if (!valid) return done(null, false, { message: 'Invalid credentials' });
       return done(null, user);
@@ -51,11 +56,17 @@ passport.use(new GoogleStrategy(
 
       // 1. Already linked via Google ID
       let user = await prisma.user.findUnique({ where: { googleId } });
-      if (user) return done(null, user);
+      if (user) {
+        if (user.canceledAt) return done(null, false, { message: 'This account has been canceled' });
+        return done(null, user);
+      }
 
       // 2. Email exists — link Google to existing account
       user = await prisma.user.findUnique({ where: { email } });
       if (user) {
+        // A canceled account's googleId was cleared at cancellation time — don't
+        // let a fresh Google sign-in silently re-link and reactivate it.
+        if (user.canceledAt) return done(null, false, { message: 'This account has been canceled' });
         user = await prisma.user.update({
           where: { email },
           data: { googleId, googleEmail: email, avatarUrl: user.avatarUrl || avatar },

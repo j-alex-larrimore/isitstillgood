@@ -107,6 +107,7 @@ router.get('/search', requireAuth, [
   try {
     const users = await prisma.user.findMany({
       where: {
+        canceledAt: null,
         OR: [
           // Search by username (partial match, case-insensitive)
           { username:    { contains: req.query.q, mode: 'insensitive' } },
@@ -145,12 +146,13 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       select: {
         id: true, username: true, displayName: true,
         bio: true, avatarUrl: true, profilePublic: true,
-        createdAt: true, email: true,
+        createdAt: true, email: true, canceledAt: true,
         // Count total reviews for the stats section
         _count: { select: { reviews: true } },
       },
     });
-    if (!target) return res.status(404).json({ error: 'User not found' });
+    // A canceled profile is gone — same response as a nonexistent username
+    if (!target || target.canceledAt) return res.status(404).json({ error: 'User not found' });
 
     const isSelf = req.user?.id === target.id;
 
@@ -291,9 +293,9 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // Look up the target user
     const target = await prisma.user.findUnique({
       where: { username: req.params.username },
-      select: { id: true, username: true, displayName: true, profilePublic: true, ignoredGenres: true },
+      select: { id: true, username: true, displayName: true, profilePublic: true, ignoredGenres: true, canceledAt: true },
     });
-    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (!target || target.canceledAt) return res.status(404).json({ error: 'User not found' });
 
     const isSelf = req.user?.id === target.id;
 
@@ -504,9 +506,9 @@ router.get('/:username/card-data', optionalAuth, async (req, res, next) => {
   try {
     const target = await prisma.user.findUnique({
       where: { username: req.params.username },
-      select: { id: true, profilePublic: true },
+      select: { id: true, profilePublic: true, canceledAt: true },
     });
-    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (!target || target.canceledAt) return res.status(404).json({ error: 'User not found' });
 
     const isSelf = req.user?.id === target.id;
     if (!target.profilePublic && !isSelf) {
@@ -614,18 +616,33 @@ router.put('/:username/browse-prefs', requireAuth, async (req, res, next) => {
 });
 
 
-// ─── DELETE /api/users/:username ─── Delete own account ──────────────────────
+// ─── DELETE /api/users/:username ─── Cancel own account (soft) ────────────────
+// This is a soft cancellation, not a hard delete. The User row and all Review
+// rows are kept — star ratings stay visible and keep counting toward
+// aggregate/community scores — but written review text is wiped, login is
+// blocked (passwordHash/googleId cleared, and canceledAt is checked at every
+// auth chokepoint: both passport strategies, requireAuth, optionalAuth), and
+// the profile page 404s like the username never existed. Contrast with the
+// admin spam-purge action (POST /api/admin/users/:id/spam), which hard-deletes
+// everything including the ratings themselves.
 router.delete('/:username', requireAuth, async (req, res, next) => {
   try {
     if (req.user.username !== req.params.username)
-      return res.status(403).json({ error: 'You can only delete your own account' });
+      return res.status(403).json({ error: 'You can only cancel your own account' });
 
-    // Delete by authenticated user's ID — safer than username which comes from URL
-    // Cascade deletes: reviews, reactions, comments, friendships, messages,
-    // notifications, refresh tokens are all set to onDelete: Cascade in schema
-    await prisma.user.delete({ where: { id: req.user.id } });
+    await prisma.$transaction([
+      prisma.review.updateMany({
+        where: { userId: req.user.id },
+        data: { reviewText: null, spoilerText: null },
+      }),
+      prisma.user.update({
+        where: { id: req.user.id },
+        data: { canceledAt: new Date(), passwordHash: null, googleId: null },
+      }),
+      prisma.refreshToken.deleteMany({ where: { userId: req.user.id } }),
+    ]);
 
-    res.json({ message: 'Account deleted successfully' });
+    res.json({ message: 'Account canceled successfully' });
   } catch (err) { next(err); }
 });
 

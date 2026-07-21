@@ -33,11 +33,13 @@ async function requireAuth(req, res, next) {
       select: {
         id: true, email: true, username: true,
         displayName: true, avatarUrl: true, profilePublic: true,
-        defaultVisibility: true, isAdmin: true,
+        defaultVisibility: true, isAdmin: true, canceledAt: true,
       },
     });
 
     if (!user) return res.status(401).json({ error: 'User not found' });
+    // A still-valid access token issued before cancellation shouldn't keep working
+    if (user.canceledAt) return res.status(401).json({ error: 'Account canceled', code: 'ACCOUNT_CANCELED' });
 
     req.user = user;
     next();
@@ -64,9 +66,10 @@ async function optionalAuth(req, res, next) {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, username: true, displayName: true, avatarUrl: true },
+      select: { id: true, username: true, displayName: true, avatarUrl: true, canceledAt: true },
     });
-    req.user = user || null;
+    // Treat a canceled account as logged-out on optional-auth (public) routes
+    req.user = (user && !user.canceledAt) ? user : null;
   } catch {
     req.user = null;
   }
