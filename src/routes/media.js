@@ -583,9 +583,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // cast name containing the query still ranks above a match that only came
     // from the description — confirmed live that an author search (e.g. an
     // author's surname) should surface their books above unrelated titles
-    // that merely mention the name in passing text. 0 means the match came
-    // from somewhere else entirely (description only).
+    // that merely mention the name in passing text. Within that person-name
+    // tier, a complete first/last/middle name match outranks a mere substring
+    // match — confirmed live that searching "anders" should surface Charlie
+    // Jane Anders (a real name token) above Sanderson (which just happens to
+    // contain the letters "anders" mid-word). 0 means the match came from
+    // somewhere else entirely (description only).
     const qLower = textActive ? q.trim().toLowerCase() : null;
+    const qWordRe = textActive ? new RegExp(`\\b${qLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`) : null;
     function relevance(i) {
       if (!textActive) return 0;
       const candidates = [i.title, i.seriesName].filter(Boolean).map(s => s.toLowerCase());
@@ -597,7 +602,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
       if (best === 0) {
         const people = [...(i.authors || []), ...(i.directors || []), ...(i.cast || [])];
-        if (people.some(p => p.name && p.name.toLowerCase().includes(qLower))) best = 1;
+        for (const p of people) {
+          if (!p.name) continue;
+          const nameLower = p.name.toLowerCase();
+          if (qWordRe.test(nameLower))        best = Math.max(best, 1);
+          else if (nameLower.includes(qLower)) best = Math.max(best, 0.5);
+        }
       }
       return best;
     }
