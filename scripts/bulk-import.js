@@ -113,7 +113,23 @@ function pickBestMatch(candidates, year, expectedTitle) {
   if (expectedTitle) {
     const normExpected = normalizeTitleForMatch(expectedTitle);
     const exactTitleMatches = candidates.filter(c => normalizeTitleForMatch(c.title) === normExpected);
-    if (exactTitleMatches.length) pool = exactTitleMatches;
+    if (exactTitleMatches.length) {
+      pool = exactTitleMatches;
+    } else {
+      // No exact title match. Confirmed live: for a numbered self-published
+      // volume ("Defiance of the Fall 3") that isn't well-indexed, falling
+      // back to "just take the first raw search result" can silently return
+      // a *different* volume of the same series (e.g. "...2" instead of
+      // "...3") — same author, plausible title, wrong book entirely. When
+      // the expected title ends in a number, require the candidate's title
+      // to end in that same number; otherwise there's no confident match.
+      const expectedNum = normExpected.match(/(\d+)$/)?.[1];
+      if (expectedNum) {
+        const numberMatches = candidates.filter(c => normalizeTitleForMatch(c.title).match(/(\d+)$/)?.[1] === expectedNum);
+        if (!numberMatches.length) return null;
+        pool = numberMatches;
+      }
+    }
   }
   if (year) {
     const yearMatch = pool.find(c => parseInt(c.releaseYear) === year);
@@ -200,16 +216,23 @@ async function lookupBook(row) {
     // row.year (when given) is trusted as the true release year regardless
     // of which edition record we end up pulling title/genres/cover from.
     const match = pickBestMatch(candidates, null, row.title);
-    const detail = await getGoogleBooksDetail(match.googleBooksId);
-    return {
-      goodreadsId: null, // Google Books results aren't stored under goodreadsId
-      title:       detail.title,
-      releaseYear: detail.releaseYear,
-      description: detail.description,
-      imageUrl:    detail.imageUrl,
-      genres:      normalizeBookGenres(detail.genres || []),
-      authors:     detail.authors || [],
-    };
+    // pickBestMatch can return null even with non-empty candidates (e.g. a
+    // numbered volume like "...3" where nothing matches that exact number —
+    // see its comment) — fall through to the Open Library path below rather
+    // than crashing or treating "found something on Google Books, just not
+    // this book" as a final answer.
+    if (match) {
+      const detail = await getGoogleBooksDetail(match.googleBooksId);
+      return {
+        goodreadsId: null, // Google Books results aren't stored under goodreadsId
+        title:       detail.title,
+        releaseYear: detail.releaseYear,
+        description: detail.description,
+        imageUrl:    detail.imageUrl,
+        genres:      normalizeBookGenres(detail.genres || []),
+        authors:     detail.authors || [],
+      };
+    }
   }
 
   // Fall back to Open Library — no API key required
