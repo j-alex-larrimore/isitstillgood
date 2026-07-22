@@ -636,22 +636,32 @@ router.get('/', optionalAuth, async (req, res, next) => {
     function relevance(i) {
       if (!textActive) return 0;
       const candidates = [i.title, i.seriesName].filter(Boolean).map(s => s.toLowerCase());
-      let best = 0;
+      let titleTier = 0;
       for (const c of candidates) {
-        if (c === qLower)              best = Math.max(best, 4);
-        else if (c.startsWith(qLower)) best = Math.max(best, 3);
-        else if (c.includes(qLower))   best = Math.max(best, 2);
+        if (c === qLower)              titleTier = Math.max(titleTier, 5);
+        else if (c.startsWith(qLower)) titleTier = Math.max(titleTier, 4);
+        else if (c.includes(qLower))   titleTier = Math.max(titleTier, 2);
       }
-      if (best === 0) {
-        const people = [...(i.authors || []), ...(i.directors || []), ...(i.cast || [])];
-        for (const p of people) {
-          if (!p.name) continue;
-          const nameLower = p.name.toLowerCase();
-          if (qWordRe.test(nameLower))        best = Math.max(best, 1);
-          else if (nameLower.includes(qLower)) best = Math.max(best, 0.5);
-        }
+      // An exact or prefix title match is unambiguous enough to always win —
+      // no need to check people at all.
+      if (titleTier >= 4) return titleTier;
+
+      // A complete first/last name match outranks a mere "title contains the
+      // query somewhere" match — confirmed live: searching "Card" should
+      // surface Orson Scott Card's books before "The Cardturner"/"The
+      // Cardinal" (which merely contain "card" mid-word) or even "The
+      // Library Card" (which contains it as a whole word, but isn't the
+      // point of the search — the author clearly is). A partial/substring
+      // name match (tier 1) still ranks below a real title-contains match.
+      const people = [...(i.authors || []), ...(i.directors || []), ...(i.cast || [])];
+      let personTier = 0;
+      for (const p of people) {
+        if (!p.name) continue;
+        const nameLower = p.name.toLowerCase();
+        if (qWordRe.test(nameLower))        personTier = Math.max(personTier, 3);
+        else if (nameLower.includes(qLower)) personTier = Math.max(personTier, 1);
       }
-      return best;
+      return Math.max(titleTier, personTier);
     }
 
     // Secondary ordering key — whatever the user's chosen sort represents —
