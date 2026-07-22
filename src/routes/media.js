@@ -639,26 +639,30 @@ router.get('/', optionalAuth, async (req, res, next) => {
       let titleTier = 0;
       for (const c of candidates) {
         if (c === qLower)              titleTier = Math.max(titleTier, 5);
-        else if (c.startsWith(qLower)) titleTier = Math.max(titleTier, 4);
+        else if (c.startsWith(qLower)) titleTier = Math.max(titleTier, 3);
         else if (c.includes(qLower))   titleTier = Math.max(titleTier, 2);
       }
-      // An exact or prefix title match is unambiguous enough to always win —
-      // no need to check people at all.
-      if (titleTier >= 4) return titleTier;
+      // Only a genuine exact title/series match is unambiguous enough to
+      // always win outright, before ever checking people. A prefix match
+      // ("Kingdoms and Chaos" starting with "king") is NOT that unambiguous —
+      // confirmed live: searching "King" was ranking "Kingdoms and Chaos",
+      // "Kingsblood Royal", etc. above Stephen King's own books, since those
+      // titles' startsWith match used to short-circuit before any author
+      // check ran at all.
+      if (titleTier >= 5) return titleTier;
 
-      // A complete first/last name match outranks a mere "title contains the
-      // query somewhere" match — confirmed live: searching "Card" should
-      // surface Orson Scott Card's books before "The Cardturner"/"The
-      // Cardinal" (which merely contain "card" mid-word) or even "The
-      // Library Card" (which contains it as a whole word, but isn't the
-      // point of the search — the author clearly is). A partial/substring
-      // name match (tier 1) still ranks below a real title-contains match.
+      // A complete first/last name match now outranks BOTH a title-starts-
+      // with match and a plain title-contains match — confirmed live for
+      // both "Card" (Orson Scott Card over "The Cardturner"/"The Library
+      // Card") and "King" (Stephen King over every "Kingdoms of X"/"King of
+      // X" title). A partial/substring name match (tier 1) still ranks below
+      // either kind of real title match.
       const people = [...(i.authors || []), ...(i.directors || []), ...(i.cast || [])];
       let personTier = 0;
       for (const p of people) {
         if (!p.name) continue;
         const nameLower = p.name.toLowerCase();
-        if (qWordRe.test(nameLower))        personTier = Math.max(personTier, 3);
+        if (qWordRe.test(nameLower))        personTier = Math.max(personTier, 4);
         else if (nameLower.includes(qLower)) personTier = Math.max(personTier, 1);
       }
       return Math.max(titleTier, personTier);
