@@ -96,20 +96,35 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // qScope is 'title', just title/seriesName (see comment above).
     let textFilter = undefined;
     if (q && q.trim().length > 0) {
+      const qTrimmed = q.trim();
+      // Multi-word queries also match titles/series names where every word
+      // appears somewhere, not just as one contiguous phrase — confirmed
+      // live: searching "Mario Baseball" found nothing because the only
+      // real match, "Mario Superstar Baseball", doesn't contain "mario
+      // baseball" as a substring. relevance() below still ranks a
+      // contiguous phrase match higher than this word-scatter fallback.
+      const qWords = qTrimmed.split(/\s+/).filter(Boolean);
+      const wordFallbacks = qWords.length > 1 ? [
+        { AND: qWords.map(w => ({ title:      { contains: w, mode: 'insensitive' } })) },
+        { AND: qWords.map(w => ({ seriesName: { contains: w, mode: 'insensitive' } })) },
+      ] : [];
+
       textFilter = qScope === 'title' ? {
         OR: [
-          { title:      { contains: q.trim(), mode: 'insensitive' } },
-          { seriesName: { contains: q.trim(), mode: 'insensitive' } },
+          { title:      { contains: qTrimmed, mode: 'insensitive' } },
+          { seriesName: { contains: qTrimmed, mode: 'insensitive' } },
+          ...wordFallbacks,
         ],
       } : {
         OR: [
-          { title:       { contains: q.trim(), mode: 'insensitive' } },
-          { description: { contains: q.trim(), mode: 'insensitive' } },
-          { seriesName:  { contains: q.trim(), mode: 'insensitive' } },
+          { title:       { contains: qTrimmed, mode: 'insensitive' } },
+          { description: { contains: qTrimmed, mode: 'insensitive' } },
+          { seriesName:  { contains: qTrimmed, mode: 'insensitive' } },
           // Also search via person names in the same query
-          { directors: { some: { name: { contains: q.trim(), mode: 'insensitive' } } } },
-          { cast:      { some: { name: { contains: q.trim(), mode: 'insensitive' } } } },
-          { authors:   { some: { name: { contains: q.trim(), mode: 'insensitive' } } } },
+          { directors: { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
+          { cast:      { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
+          { authors:   { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
+          ...wordFallbacks,
         ],
       };
     }
@@ -633,6 +648,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // somewhere else entirely (description only).
     const qLower = textActive ? q.trim().toLowerCase() : null;
     const qWordRe = textActive ? new RegExp(`\\b${qLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`) : null;
+    // Words of the query, used to rank the word-scatter fallback (see
+    // wordFallbacks above) below a real contiguous-phrase match.
+    const qWords = textActive ? qLower.split(/\s+/).filter(Boolean) : [];
     function relevance(i) {
       if (!textActive) return 0;
       const candidates = [i.title, i.seriesName].filter(Boolean).map(s => s.toLowerCase());
@@ -641,6 +659,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
         if (c === qLower)              titleTier = Math.max(titleTier, 5);
         else if (c.startsWith(qLower)) titleTier = Math.max(titleTier, 3);
         else if (c.includes(qLower))   titleTier = Math.max(titleTier, 2);
+        // All query words present, just not as one contiguous phrase (e.g.
+        // "Mario Baseball" against "Mario Superstar Baseball") — a real
+        // title match, but weaker than an actual phrase-contains hit.
+        else if (qWords.length > 1 && qWords.every(w => c.includes(w))) titleTier = Math.max(titleTier, 1.5);
       }
       // Only a genuine exact title/series match is unambiguous enough to
       // always win outright, before ever checking people. A prefix match
