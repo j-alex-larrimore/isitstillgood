@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -328,6 +328,16 @@ async function main() {
         results.skipped.push(data.title);
         await sleep(1100);
         continue;
+      }
+
+      if (row.mediaType === 'BOOK' && row.seriesName) {
+        const collision = await checkSeriesCollision(row.seriesName, data.authors);
+        if (collision) {
+          console.log(`⚠ "${data.title}" — series "${row.seriesName}" already used by ${collision.collidingAuthors.join(', ')} (different author), skipping`);
+          results.skipped.push(data.title);
+          await sleep(1100);
+          continue;
+        }
       }
 
       const tags = normalizeTags([...globalTags, ...row.tags]);

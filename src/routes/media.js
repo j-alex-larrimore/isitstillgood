@@ -5,6 +5,34 @@ const prisma = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
 
+// Clusters a list of `{ seriesName, seriesNumber, authors }`-shaped books
+// into distinct series — an exact `seriesName` match is necessary but not
+// sufficient, since two unrelated authors can each have a series with the
+// identical name (confirmed live: Brandon Mull's and Toby Neighbors'
+// unrelated "Five Kingdoms" series). A cluster requires overlapping
+// authorship with its own books, unioned by shared-author rather than
+// exact-set equality, so a series that gains a co-author partway through
+// (the Wheel of Time: solely Robert Jordan for books 1-11, Jordan & Brandon
+// Sanderson for 12-14) still stays one cluster. Returns an array of
+// `{ authorIds: Set, books: [] }` groups per distinct seriesName.
+function clusterBookSeries(books) {
+  const clustersByName = new Map(); // seriesName -> array of clusters
+  for (const book of books) {
+    if (!book.seriesName) continue;
+    const bookAuthorIds = new Set((book.authors || []).map(a => a.id));
+    const clusters = clustersByName.get(book.seriesName) || [];
+    let cluster = clusters.find(c => [...c.authorIds].some(id => bookAuthorIds.has(id)));
+    if (!cluster) {
+      cluster = { authorIds: new Set(), books: [] };
+      clusters.push(cluster);
+      clustersByName.set(book.seriesName, clusters);
+    }
+    for (const id of bookAuthorIds) cluster.authorIds.add(id);
+    cluster.books.push(book);
+  }
+  return [...clustersByName.values()].flat();
+}
+
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
@@ -274,6 +302,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
       tagVariants = [...new Set([rawTag, lower, titleCase, normalized])];
       andClauses.push({ tags: { hasSome: tagVariants } });
     }
+    // NOTE: seriesName-only, no author scoping — same collision class as
+    // clusterBookSeries above. Confirmed this param isn't exercised by any
+    // live frontend navigation today (browse.html/search.html never link
+    // with ?series=, and item.html's own series back-link uses the
+    // author-safe seriesRepSlug instead), so left as-is rather than guessing
+    // at what a direct API caller would want disambiguated by.
     if (req.query.series)   andClauses.push({ seriesName: req.query.series });
     if (textFilter)         andClauses.push(textFilter);
     if (personFilter)       andClauses.push(personFilter);
@@ -328,22 +362,20 @@ router.get('/', optionalAuth, async (req, res, next) => {
           parent:  { select: { id: true, title: true, slug: true } },
         },
       });
-        // Deduplicate to lowest seriesNumber per seriesName
+        // Deduplicate to lowest seriesNumber per series cluster — same
+      // seriesName is necessary but not sufficient (see clusterBookSeries).
       // BUT: if a text search returns multiple books from the same series,
       // show them individually rather than collapsing to the representative.
+      const clusters = clusterBookSeries(allSeriesEntries);
       seriesCountMap = new Map();
-      for (const book of allSeriesEntries) {
-        seriesCountMap.set(book.seriesName, (seriesCountMap.get(book.seriesName) || 0) + 1);
+      for (const cluster of clusters) {
+        seriesCountMap.set(cluster.books[0].seriesName, (seriesCountMap.get(cluster.books[0].seriesName) || 0) + cluster.books.length);
       }
-
-      const seriesMap = new Map();
-      for (const book of allSeriesEntries) {
-        const existing = seriesMap.get(book.seriesName);
-        if (!existing || (book.seriesNumber ?? Infinity) < (existing.seriesNumber ?? Infinity)) {
-          seriesMap.set(book.seriesName, book);
-        }
-      }
-      seriesRepresentatives = [...seriesMap.values()];
+      seriesRepresentatives = clusters.map(cluster =>
+        cluster.books.reduce((rep, book) =>
+          (book.seriesNumber ?? Infinity) < (rep.seriesNumber ?? Infinity) ? book : rep
+        )
+      );
     }
 
     // For rating/lowest sort: fetch ALL items so we can sort them together
@@ -542,19 +574,41 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // For book series: count books in each series and aggregate ratings
+    // For book series: count books in each series and aggregate ratings.
+    // Keyed by the representative's own id, not the raw seriesName string —
+    // two unrelated authors can share an identical seriesName (see
+    // clusterBookSeries), so the string alone can't safely key these maps.
     const bookSeriesCountMap = {};
     let bookCompletionMap = {};
     const bookSeriesRatingMap = {};
     if (bookSeriesNames.length && !reviewedBy) {
       const allSeriesBooks = await prisma.mediaItem.findMany({
         where: { mediaType: 'BOOK', seriesName: { in: bookSeriesNames } },
-        select: { id: true, seriesName: true, seriesNumber: true },
+        select: { id: true, seriesName: true, seriesNumber: true, authors: { select: { id: true } } },
       });
-      // Count books per series
+      // Assign each fetched book to the specific series representative it
+      // actually belongs to — same seriesName is necessary but not
+      // sufficient, a book only belongs to a representative's series when it
+      // shares at least one author with that representative.
+      const repsByName = new Map();
+      for (const rep of seriesRepresentatives) {
+        const arr = repsByName.get(rep.seriesName) || [];
+        arr.push(rep);
+        repsByName.set(rep.seriesName, arr);
+      }
+      const bookIdToRepId = {};
       for (const b of allSeriesBooks) {
         if (!b.seriesName) continue;
-        bookSeriesCountMap[b.seriesName] = (bookSeriesCountMap[b.seriesName] || 0) + 1;
+        const bAuthorIds = new Set((b.authors || []).map(a => a.id));
+        const candidates = repsByName.get(b.seriesName) || [];
+        const rep = candidates.find(r => (r.authors || []).some(a => bAuthorIds.has(a.id))) || candidates[0];
+        if (rep) bookIdToRepId[b.id] = rep.id;
+      }
+      // Count books per series
+      for (const b of allSeriesBooks) {
+        const repId = bookIdToRepId[b.id];
+        if (!repId) continue;
+        bookSeriesCountMap[repId] = (bookSeriesCountMap[repId] || 0) + 1;
       }
       // Aggregate ratings for all books in each series
       const allBookIds = allSeriesBooks.map(b => b.id);
@@ -568,17 +622,16 @@ router.get('/', optionalAuth, async (req, res, next) => {
           _avg: { rating: true },
           _count: { rating: true },
         });
-        const bookIdToSeries = Object.fromEntries(allSeriesBooks.map(b => [b.id, b.seriesName]));
         const seriesAccum = {};
         for (const r of bookRatings) {
-          const sn = bookIdToSeries[r.mediaItemId];
-          if (!sn) continue;
-          if (!seriesAccum[sn]) seriesAccum[sn] = { sum: 0, count: 0 };
-          seriesAccum[sn].sum   += (r._avg.rating || 0) * r._count.rating;
-          seriesAccum[sn].count += r._count.rating;
+          const repId = bookIdToRepId[r.mediaItemId];
+          if (!repId) continue;
+          if (!seriesAccum[repId]) seriesAccum[repId] = { sum: 0, count: 0 };
+          seriesAccum[repId].sum   += (r._avg.rating || 0) * r._count.rating;
+          seriesAccum[repId].count += r._count.rating;
         }
-        for (const [sn, acc] of Object.entries(seriesAccum)) {
-          if (acc.count > 0) bookSeriesRatingMap[sn] = { avg: acc.sum / acc.count, count: acc.count };
+        for (const [repId, acc] of Object.entries(seriesAccum)) {
+          if (acc.count > 0) bookSeriesRatingMap[repId] = { avg: acc.sum / acc.count, count: acc.count };
         }
 
         // Average completion: avg number of books reviewed per user (who reviewed at least one)
@@ -592,20 +645,20 @@ router.get('/', optionalAuth, async (req, res, next) => {
           },
           select: { userId: true, mediaItemId: true },
         });
-        const bySeriesByUser = {};
+        const byRepByUser = {};
         for (const r of allBookReviews) {
-          const sn = bookIdToSeries[r.mediaItemId];
-          if (!sn) continue;
-          if (!bySeriesByUser[sn]) bySeriesByUser[sn] = {};
-          if (!bySeriesByUser[sn][r.userId]) bySeriesByUser[sn][r.userId] = new Set();
-          bySeriesByUser[sn][r.userId].add(r.mediaItemId);
+          const repId = bookIdToRepId[r.mediaItemId];
+          if (!repId) continue;
+          if (!byRepByUser[repId]) byRepByUser[repId] = {};
+          if (!byRepByUser[repId][r.userId]) byRepByUser[repId][r.userId] = new Set();
+          byRepByUser[repId][r.userId].add(r.mediaItemId);
         }
-        for (const [sn, userMap] of Object.entries(bySeriesByUser)) {
+        for (const [repId, userMap] of Object.entries(byRepByUser)) {
           const userCounts = Object.values(userMap).map(s => s.size);
           const avgCompletion = userCounts.reduce((a, b) => a + b, 0) / userCounts.length;
-          bookCompletionMap[sn] = {
+          bookCompletionMap[repId] = {
             avg: Math.round(avgCompletion * 10) / 10,
-            total: bookSeriesCountMap[sn] || 0,
+            total: bookSeriesCountMap[repId] || 0,
             reviewerCount: userCounts.length,
           };
         }
@@ -630,7 +683,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // but a 6.7 average across its books sorted by the 6.7 — Cradle's card
       // showed "9.0" but ranked as if it were a 6.7 under Top Rated.
       return (i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isRep)
-        ? (directRatingMap[i.id]?.avg || bookSeriesRatingMap[i.seriesName]?.avg || ratingMap[i.id]?.avg || null)
+        ? (directRatingMap[i.id]?.avg || bookSeriesRatingMap[i.id]?.avg || ratingMap[i.id]?.avg || null)
         : (ratingMap[i.id]?.avg || null);
     }
 
@@ -747,7 +800,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
         // seriesAvgRating: aggregate of all books/seasons (only for series cards)
         const seriesAvgRating = isSeriesCard
-          ? (bookSeriesRatingMap[i.seriesName]?.avg || null)
+          ? (bookSeriesRatingMap[i.id]?.avg || null)
           : isTvParentCard
             ? (ratingMap[i.id]?.avg || null)  // ratingMap for TV parents = season aggregate
             : undefined;
@@ -763,12 +816,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
         seasonCount: i.mediaType === 'TV_SHOW' && !i.parentId
           ? (seasonCountMap?.[i.id] || 0)
           : isSeriesCard
-            ? (bookSeriesCountMap[i.seriesName] || 0)
+            ? (bookSeriesCountMap[i.id] || 0)
             : undefined,
         avgCompletion: i.mediaType === 'TV_SHOW' && !i.parentId
           ? (tvCompletionMap?.[i.id] || null)
           : isSeriesCard
-            ? (bookCompletionMap?.[i.seriesName] || null)
+            ? (bookCompletionMap?.[i.id] || null)
             : undefined,
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
@@ -844,8 +897,13 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     let isBookSeries = false;
     let seriesRepSlug = null;
     if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
+      // Same seriesName isn't sufficient on its own — two unrelated authors
+      // can share an identical series name (see clusterBookSeries in the GET
+      // / handler above), so this must also require sharing an author with
+      // THIS book, or an unrelated same-named series would get pulled in.
+      const authorIds = (item.authors || []).map(a => a.id);
       const lowestInSeries = await prisma.mediaItem.findFirst({
-        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true },
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true, authors: { some: { id: { in: authorIds } } } },
         orderBy: { seriesNumber: 'asc' },
         select: { id: true, slug: true },
       });
@@ -874,9 +932,11 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       const seasonIds = item.seasonEntries.map(s => s.id);
       statsWhere = { mediaItemId: { in: seasonIds }, visibility: 'PUBLIC' };
     } else if (isBookSeries && item.seriesName) {
-      // Fetch all books in this series ordered by seriesNumber
+      // Fetch all books in this series ordered by seriesNumber — author
+      // overlap required for the same reason as the lowestInSeries query above.
+      const authorIds = (item.authors || []).map(a => a.id);
       seriesBooks = await prisma.mediaItem.findMany({
-        where: { mediaType: 'BOOK', seriesName: item.seriesName, verified: true },
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, verified: true, authors: { some: { id: { in: authorIds } } } },
         select: {
           id: true, title: true, slug: true,
           seriesNumber: true, releaseYear: true, imageUrl: true,
@@ -1034,7 +1094,10 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
 // ─── GET /api/media/:slug/reviews ─────────────────────────────────────────
 router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
   try {
-    const item = await prisma.mediaItem.findUnique({ where: { slug: req.params.slug } });
+    const item = await prisma.mediaItem.findUnique({
+      where: { slug: req.params.slug },
+      include: { authors: { select: { id: true } } },
+    });
     if (!item) return res.status(404).json({ error: 'Not found' });
     const page = parseInt(req.query.page) || 1;
     const take = 20;
@@ -1049,8 +1112,11 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
     // series review, because this endpoint applied no season filter at all.
     if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
       const forceIndividual = req.query.book === '1';
+      // Author overlap required, not just seriesName — see clusterBookSeries
+      // in GET / above (two unrelated authors can share an identical name).
+      const authorIds = (item.authors || []).map(a => a.id);
       const lowestInSeries = await prisma.mediaItem.findFirst({
-        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true },
+        where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true, authors: { some: { id: { in: authorIds } } } },
         orderBy: { seriesNumber: 'asc' },
         select: { id: true },
       });

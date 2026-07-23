@@ -7,7 +7,7 @@ const { requireAdmin } = require('../middleware/admin');
 const { fetchExternalRatings } = require('../services/externalRatings');
 const {
   normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres,
-  slugify, uniqueSlug, connectPersons,
+  slugify, uniqueSlug, connectPersons, checkSeriesCollision,
 } = require('../lib/mediaHelpers');
 
 // Genres are normalized server-side, by mediaType, no matter what the
@@ -164,6 +164,15 @@ router.post('/media', requireAdmin, [
 
     const slug = await uniqueSlug(slugify(finalTitle, releaseYear));
 
+    // Warn (don't block) when this series name is already used by a
+    // completely different author — same real-world resolution as the
+    // "Five Kingdoms" collision this check exists for (flagged, then a
+    // human decided). The write still goes through either way.
+    let seriesCollisionWarning = null;
+    if (mediaType === 'BOOK' && seriesName) {
+      seriesCollisionWarning = await checkSeriesCollision(seriesName, authorNames || []);
+    }
+
     const item = await prisma.mediaItem.create({
       data: {
         mediaType,
@@ -201,7 +210,7 @@ router.post('/media', requireAdmin, [
       fetchExternalRatings(item.id).catch(console.error);
     }
 
-    res.status(201).json(item);
+    res.status(201).json(seriesCollisionWarning ? { ...item, seriesCollisionWarning } : item);
   } catch (err) { next(err); }
 });
 
@@ -249,6 +258,23 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
       if (existing) data.genres = normalizeGenresForType(existing.mediaType, data.genres);
     }
 
+    // Warn (don't block) when the series name being set/kept collides with a
+    // completely different author — same check as on create, only run when
+    // either the series name or the author list is actually part of this
+    // update (skips a lookup on unrelated field edits).
+    let seriesCollisionWarning = null;
+    if (data.seriesName !== undefined || authorNames !== undefined) {
+      const existing = await prisma.mediaItem.findUnique({
+        where: { id: req.params.id },
+        select: { mediaType: true, seriesName: true, authors: { select: { name: true } } },
+      });
+      const effectiveSeriesName = data.seriesName !== undefined ? data.seriesName : existing?.seriesName;
+      const effectiveAuthorNames = authorNames !== undefined ? authorNames : (existing?.authors || []).map(a => a.name);
+      if (existing?.mediaType === 'BOOK' && effectiveSeriesName) {
+        seriesCollisionWarning = await checkSeriesCollision(effectiveSeriesName, effectiveAuthorNames);
+      }
+    }
+
     const item = await prisma.mediaItem.update({
       where: { id: req.params.id },
       data,
@@ -263,7 +289,7 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     if (item.cast)      item.cast      = item.cast.sort(sbn);
     if (item.directors) item.directors = item.directors.sort(sbn);
     if (item.authors)   item.authors   = item.authors.sort(sbn);
-    res.json(item);
+    res.json(seriesCollisionWarning ? { ...item, seriesCollisionWarning } : item);
   } catch (err) { next(err); }
 });
 

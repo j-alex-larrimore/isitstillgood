@@ -447,6 +447,39 @@ async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, 
   return null;
 }
 
+// A real series always shares at least one author across every book in it —
+// even the Wheel of Time, which adds Brandon Sanderson as co-author for its
+// last 3 books, still has Robert Jordan on all 14. So "same seriesName, zero
+// shared authors" reliably means two DIFFERENT authors' series that just
+// happen to have the same name (confirmed live: Brandon Mull's and Toby
+// Neighbors' unrelated "Five Kingdoms" series) — not one continuous series.
+// Warn-but-allow, not a hard block: same real-world resolution as the Five
+// Kingdoms case itself (flagged, then a human decided how to proceed).
+async function checkSeriesCollision(seriesName, authorNames) {
+  if (!seriesName || !authorNames?.length) return null;
+
+  const existing = await prisma.mediaItem.findMany({
+    where: { mediaType: 'BOOK', seriesName: { equals: seriesName, mode: 'insensitive' } },
+    select: { authors: { select: { name: true } } },
+  });
+  if (!existing.length) return null;
+
+  const newNames = new Set(authorNames.map(n => n.toLowerCase()));
+  const collidingAuthors = new Set();
+  let anyOverlap = false;
+  for (const item of existing) {
+    const itemNames = item.authors.map(a => a.name);
+    if (itemNames.some(n => newNames.has(n.toLowerCase()))) {
+      anyOverlap = true;
+    } else {
+      itemNames.forEach(n => collidingAuthors.add(n));
+    }
+  }
+  if (anyOverlap || !collidingAuthors.size) return null;
+
+  return { seriesName, collidingAuthors: [...collidingAuthors] };
+}
+
 module.exports = {
   normalizeTags,
   normalizeGenres,
@@ -462,6 +495,7 @@ module.exports = {
   uniqueSlug,
   connectPersons,
   findDuplicate,
+  checkSeriesCollision,
   normalizeBookTitle,
   bookTitlesMatch,
 };
