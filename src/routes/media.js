@@ -33,6 +33,28 @@ function clusterBookSeries(books) {
   return [...clustersByName.values()].flat();
 }
 
+// Shared by the `tag` param (tags array only, AND-combined with other active
+// filters — used by search.html's dedicated tag field) and the `filter` param
+// (tags OR genres, used by browse.html's single quick-filter box — a user
+// typing "LitRPG" there shouldn't need to know whether that's stored as a
+// tag or a genre). Case-insensitive matching against a free-text input
+// requires generating the likely stored forms ourselves, since Prisma's
+// array `has`/`hasSome` is exact-string, not case-insensitive.
+const FILTER_TERM_OVERRIDES = {
+  'hbo':'HBO','hbo max':'HBO Max','apple tv':'Apple TV','apple tv+':'Apple TV+',
+  'nbc':'NBC','cbs':'CBS','abc':'ABC','amc':'AMC','fx':'FX','bbc':'BBC','pbs':'PBS',
+  'mtv':'MTV','usa':'USA','tnt':'TNT','tbs':'TBS','syfy':'Syfy','espn':'ESPN',
+  'nfl':'NFL','nba':'NBA','mlb':'MLB','nhl':'NHL','dc':'DC','mcu':'MCU','uk':'UK',
+  'litrpg':'LitRPG',
+};
+function buildTagVariants(rawTerm) {
+  const lower     = rawTerm.toLowerCase();
+  const titleCase = rawTerm.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+  const normalized = FILTER_TERM_OVERRIDES[lower]
+    || rawTerm.split(' ').map(w => FILTER_TERM_OVERRIDES[w.toLowerCase()] || (w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
+  return [...new Set([rawTerm, lower, titleCase, normalized])];
+}
+
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
@@ -286,21 +308,20 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (genreFilter)    andClauses.push(genreFilter);
     let tagVariants = [];
     if (req.query.tag) {
-      const rawTag   = req.query.tag.trim();
-      const lower    = rawTag.toLowerCase();
-      const titleCase = rawTag.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-      // Also normalize through TAG_OVERRIDES so "hbo" matches "HBO", "apple tv" matches "Apple TV" etc.
-      const TAG_OVERRIDES = {
-        'hbo':'HBO','hbo max':'HBO Max','apple tv':'Apple TV','apple tv+':'Apple TV+',
-        'nbc':'NBC','cbs':'CBS','abc':'ABC','amc':'AMC','fx':'FX','bbc':'BBC','pbs':'PBS',
-        'mtv':'MTV','usa':'USA','tnt':'TNT','tbs':'TBS','syfy':'Syfy','espn':'ESPN',
-        'nfl':'NFL','nba':'NBA','mlb':'MLB','nhl':'NHL','dc':'DC','mcu':'MCU','uk':'UK',
-      };
-      const normalized = TAG_OVERRIDES[lower]
-        || rawTag.split(' ').map(w => TAG_OVERRIDES[w.toLowerCase()] || (w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
-      // Build a deduplicated set of variants to check
-      tagVariants = [...new Set([rawTag, lower, titleCase, normalized])];
+      tagVariants = buildTagVariants(req.query.tag.trim());
       andClauses.push({ tags: { hasSome: tagVariants } });
+    }
+    // `filter` — browse.html's single quick-filter box, matching EITHER tags
+    // OR genres (a user typing "LitRPG" shouldn't need to know which array
+    // it lives in). Kept separate from `genre`/`tag` above, which stay
+    // AND-combined for search.html's dedicated per-field advanced search.
+    let filterVariants = [];
+    if (req.query.filter) {
+      filterVariants = buildTagVariants(req.query.filter.trim());
+      andClauses.push({ OR: [
+        { tags:   { hasSome: filterVariants } },
+        { genres: { hasSome: filterVariants } },
+      ]});
     }
     // NOTE: seriesName-only, no author scoping — same collision class as
     // clusterBookSeries above. Confirmed this param isn't exercised by any
@@ -349,10 +370,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
         { seriesName: { not: null } },
         { seriesNumber: { not: null } },
       ];
-      if (genreFilter)    seriesWhereClauses.push(genreFilter);
-      if (textFilter)     seriesWhereClauses.push(textFilter);
-      if (personFilter)   seriesWhereClauses.push(personFilter);
-      if (req.query.tag)  seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
+      if (genreFilter)     seriesWhereClauses.push(genreFilter);
+      if (textFilter)      seriesWhereClauses.push(textFilter);
+      if (personFilter)    seriesWhereClauses.push(personFilter);
+      if (req.query.tag)    seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
+      if (req.query.filter) seriesWhereClauses.push({ OR: [
+        { tags:   { hasSome: filterVariants } },
+        { genres: { hasSome: filterVariants } },
+      ]});
 
       allSeriesEntries = await prisma.mediaItem.findMany({
         where: { AND: seriesWhereClauses },
