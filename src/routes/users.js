@@ -457,8 +457,15 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       if (!genresByType[type]) genresByType[type] = {};
       for (const g of (review.mediaItem.genres || [])) {
         if (ignoredSet.has(g.toLowerCase())) continue;
-        if (!genresByType[type][g]) genresByType[type][g] = { name: g, ratings: [] };
+        // items:[] was missing here — unlike the overall `genres` accumulator
+        // above, this per-type breakdown never recorded which reviews backed
+        // each genre, so "Favorite X Genre" cards had nothing to show when
+        // clicked. Confirmed live: Book and Game genre cards opened to an
+        // empty project list (every type has this bug, but it's most visible
+        // on types with no director/actor cards to mask it).
+        if (!genresByType[type][g]) genresByType[type][g] = { name: g, ratings: [], items: [] };
         genresByType[type][g].ratings.push(review.rating);
+        genresByType[type][g].items.push(itemSummary(review.mediaItem, review.rating));
       }
     }
     const favoriteGenreByType = {};
