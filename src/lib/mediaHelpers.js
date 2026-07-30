@@ -115,7 +115,7 @@ function normalizeGameGenres(genres) {
 const BOOK_GENRE_CANON = [
   'Fiction', 'Nonfiction', 'Literary Fiction', 'Classic Literature', 'Historical Fiction',
   'Fantasy', 'Epic Fantasy', 'Dark Fantasy', 'Urban Fantasy', 'Progression Fantasy', 'LitRPG', 'Romantasy',
-  'Science Fiction', 'Space Opera', 'Dystopian', 'Cyberpunk', 'Paranormal',
+  'Science Fiction', 'Space Opera', 'Dystopian', 'Cyberpunk', 'Paranormal', 'Superhero',
   'Mystery', 'Thriller', 'Crime', 'True Crime', 'Espionage', 'Horror',
   'Legal', 'Police', 'Medical', 'Courtroom', 'Schools',
   'Romance',

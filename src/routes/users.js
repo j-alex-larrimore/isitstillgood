@@ -96,7 +96,10 @@ router.get('/:username/reviews', optionalAuth, [
           },
           _count: { select: { reactions: true, comments: true } },
         },
-        orderBy: [{ dateConsumed: 'desc' }, { updatedAt: 'desc' }],
+        // Postgres defaults DESC ordering to NULLS FIRST, which put undated
+      // reviews at the top of the list instead of the bottom — explicit
+      // nulls:'last' fixes that.
+      orderBy: [{ dateConsumed: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }],
         skip: (page - 1) * take,
         take,
       }),
@@ -208,7 +211,10 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
         },
         _count: { select: { reactions: true, comments: true } },
       },
-      orderBy: [{ dateConsumed: 'desc' }, { updatedAt: 'desc' }],
+      // Postgres defaults DESC ordering to NULLS FIRST, which put undated
+      // reviews at the top of the list instead of the bottom — explicit
+      // nulls:'last' fixes that.
+      orderBy: [{ dateConsumed: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }],
       take: 20,
     });
 
@@ -459,8 +465,15 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     const mostReviewedGenreByType = {};
     for (const [type, gMap] of Object.entries(genresByType)) {
       const minCount = threshold(countByType[type] || 0);
-      const byRating = rankEntries(gMap, minCount, 3);
-      const byCount  = rankByCount(gMap, minCount, 3);
+      // topN: Infinity, not a small fixed cap — the frontend re-filters this
+      // same data for every "min. appearances" threshold the user picks
+      // without a new API call. A small cap here meant raising the threshold
+      // could zero out a whole category even when a lower-rated-but-more-
+      // reviewed genre existed just outside the cut — it was never sent to
+      // the client to be considered. Confirmed live: "Favorite Actor"
+      // vanishing when raising the threshold from 2 to 3.
+      const byRating = rankEntries(gMap, minCount, Infinity);
+      const byCount  = rankByCount(gMap, minCount, Infinity);
       if (byRating.length) favoriteGenreByType[type]     = byRating;
       if (byCount.length)  mostReviewedGenreByType[type] = byCount;
     }
@@ -483,19 +496,21 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         .slice(0, topN);
     }
 
-    // Return all entries with minCount=1 — the frontend filters by the
-    // user-selected threshold dynamically without extra API calls
+    // Return all entries with minCount=1 and no topN cap — the frontend
+    // filters by the user-selected threshold dynamically without extra API
+    // calls, so every candidate needs to actually be here to be considered
+    // (see the topN:Infinity comment above the per-type genre ranking).
     res.json({
       totalReviews:          reviews.length,
       ignoredGenres:         target.ignoredGenres || [],
-      favoriteDirectors:     rankEntries(directors, 1, 20),
-      favoriteActors:        rankEntries(actors,    1, 20),
-      favoriteAuthors:       rankEntries(authors,   1, 20),
-      mostReviewedDirectors: rankByCount(directors, 1, 20),
-      mostReviewedActors:    rankByCount(actors,    1, 20),
-      mostReviewedAuthors:   rankByCount(authors,   1, 20),
-      favoriteGenres:        rankEntries(genres,    1, 20),
-      mostReviewedGenres:    rankByCount(genres,    1, 20),
+      favoriteDirectors:     rankEntries(directors, 1, Infinity),
+      favoriteActors:        rankEntries(actors,    1, Infinity),
+      favoriteAuthors:       rankEntries(authors,   1, Infinity),
+      mostReviewedDirectors: rankByCount(directors, 1, Infinity),
+      mostReviewedActors:    rankByCount(actors,    1, Infinity),
+      mostReviewedAuthors:   rankByCount(authors,   1, Infinity),
+      favoriteGenres:        rankEntries(genres,    1, Infinity),
+      mostReviewedGenres:    rankByCount(genres,    1, Infinity),
       favoriteGenreByType,
       mostReviewedGenreByType,
       countByType,

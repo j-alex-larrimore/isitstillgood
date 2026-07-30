@@ -56,12 +56,23 @@ async function getOpenLibraryLanguages(title, author) {
   return match?.language || null;
 }
 
+// Raw network-level failures (ECONNRESET, DNS blips, etc.) throw rather than
+// returning a response — unlike a non-200 HTTP status, which was already
+// handled below. Left uncaught, one of these previously killed the whole
+// script instead of just skipping that one book, losing all remaining
+// progress for the run (confirmed live: an ECONNRESET on "Rising Sun" took
+// down an otherwise-healthy run partway through). Treated the same as a 503
+// so the self-resuming design can actually do its job book-by-book.
 async function getVolumeDetail(id) {
   const key = process.env.GOOGLE_BOOKS_API_KEY;
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes/${id}?key=${key}`);
-  if (!res.ok) return { status: res.status, info: null };
-  const item = await res.json();
-  return { status: 200, info: item.volumeInfo || {} };
+  try {
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes/${id}?key=${key}`);
+    if (!res.ok) return { status: res.status, info: null };
+    const item = await res.json();
+    return { status: 200, info: item.volumeInfo || {} };
+  } catch (e) {
+    return { status: 503, info: null };
+  }
 }
 
 async function searchGoogleBooksRaw(title, author) {
@@ -69,10 +80,14 @@ async function searchGoogleBooksRaw(title, author) {
   let q = `intitle:${title}`;
   if (author) q += `+inauthor:${author}`;
   const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=15&key=${key}`;
-  const res = await fetch(url);
-  if (!res.ok) return { status: res.status, items: [] };
-  const json = await res.json();
-  return { status: 200, items: json.items || [] };
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return { status: res.status, items: [] };
+    const json = await res.json();
+    return { status: 200, items: json.items || [] };
+  } catch (e) {
+    return { status: 503, items: [] };
+  }
 }
 
 // Among English-language candidates matching this title, pick the one most
@@ -93,12 +108,31 @@ async function pickBestEnglishEdition(candidates) {
   return { quotaHit: false, picked: scored[0].info };
 }
 
+// Google Books volume IDs ending in "CAAJ" are catalog/metadata-only records
+// (no real digitized preview) — the API still returns an imageLinks.thumbnail
+// URL for them, but it 404s. Treat these exactly like a missing cover.
+function hasDeadGoogleId(imageUrl) {
+  if (!imageUrl) return false;
+  const match = imageUrl.match(/[?&]id=([^&]+)/);
+  return !!match && match[1].endsWith('CAAJ');
+}
+
+// Open Library's own "-1" cover id is its explicit sentinel for "no image
+// exists" — resolves to a broken/placeholder image regardless of language,
+// so it must always count as missing rather than going through the
+// language-risk triage (a single-language English work with a -1 cover
+// would otherwise be wrongly classified as "not at risk").
+function isDeadOpenLibraryId(imageUrl) {
+  return !!imageUrl && /\/id\/-1-/.test(imageUrl);
+}
+
 async function main() {
   const books = await prisma.mediaItem.findMany({
     where: {
       mediaType: 'BOOK',
       OR: [
         { imageUrl: { contains: 'covers.openlibrary.org' } },
+        { imageUrl: { contains: 'CAAJ&' } },
         { imageUrl: null },
         { description: null },
         { description: '' },
@@ -114,8 +148,8 @@ async function main() {
 
   for (const book of books) {
     const authorName = book.authors[0]?.name || null;
-    const hasOLCover = book.imageUrl?.includes('covers.openlibrary.org');
-    const hasNoCover = !book.imageUrl;
+    const hasOLCover = book.imageUrl?.includes('covers.openlibrary.org') && !isDeadOpenLibraryId(book.imageUrl);
+    const hasNoCover = !book.imageUrl || hasDeadGoogleId(book.imageUrl) || isDeadOpenLibraryId(book.imageUrl);
     const needsDesc = !book.description;
 
     let coverIsRisk = hasNoCover; // nothing to check language on — always worth a lookup

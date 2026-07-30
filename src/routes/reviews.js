@@ -78,7 +78,7 @@ router.post('/', requireAuth, [
   if (!ok(req, res)) return;
   const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit } = req.body;
   try {
-    const media = await prisma.mediaItem.findUnique({ where: { id: mediaItemId } });
+    const media = await prisma.mediaItem.findUnique({ where: { id: mediaItemId }, include: { authors: { select: { id: true } } } });
     if (!media) return res.status(404).json({ error: 'Media item not found' });
 
     const verdict = ratingToVerdict(parseInt(rating));
@@ -91,9 +91,35 @@ router.post('/', requireAuth, [
 
     // Use findFirst with explicit where clause — findUnique with a composite key
     // fails when seasonNumber is null because Prisma can't match null in a compound key
-    const existing = await prisma.review.findFirst({
-      where: { userId: req.user.id, mediaItemId, seasonNumber: season },
-    });
+    //
+    // season === 0 is a book-series-level review — its mediaItemId is
+    // whatever book currently acts as the series representative (the
+    // lowest-numbered book), which can SHIFT later if an earlier-numbered
+    // prequel/novella gets added. If the existing-review lookup matched only
+    // the exact mediaItemId the client just submitted, an edit made after
+    // such a shift would silently create a duplicate review instead of
+    // updating the original (whose mediaItemId now points at a book that's
+    // no longer the representative) — confirmed live as the root cause of
+    // real reviews on the Powder Mage Trilogy, Gods of Blood and Powder, and
+    // Glass Immortals appearing to vanish. Searching the whole author-overlap
+    // cluster for series-level reviews, rather than one exact id, means an
+    // edit always finds and updates the user's real existing review — and
+    // refreshing its mediaItemId below keeps it self-healing on every save.
+    let existing;
+    if (season === 0 && media.mediaType === 'BOOK' && media.seriesName) {
+      const authorIds = media.authors.map(a => a.id);
+      const clusterIds = (await prisma.mediaItem.findMany({
+        where: { mediaType: 'BOOK', seriesName: media.seriesName, authors: { some: { id: { in: authorIds } } } },
+        select: { id: true },
+      })).map(b => b.id);
+      existing = await prisma.review.findFirst({
+        where: { userId: req.user.id, mediaItemId: { in: clusterIds }, seasonNumber: 0 },
+      });
+    } else {
+      existing = await prisma.review.findFirst({
+        where: { userId: req.user.id, mediaItemId, seasonNumber: season },
+      });
+    }
 
     let review;
     if (existing) {
@@ -103,6 +129,11 @@ router.post('/', requireAuth, [
       review = await prisma.review.update({
         where: { id: existing.id },
         data: {
+          // Refresh mediaItemId to whatever was just submitted — for a
+          // series-level review this keeps it pinned to the CURRENT
+          // representative on every save, so it can't drift back out of
+          // sync even if the representative shifted since the last edit.
+          mediaItemId,
           rating: newRating,
           dateConsumed: consumed,
           reviewText, spoilerText, visibility: vis, verdict,

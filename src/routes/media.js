@@ -33,6 +33,24 @@ function clusterBookSeries(books) {
   return [...clustersByName.values()].flat();
 }
 
+// Picks which book in a series cluster acts as its representative (the one
+// whose cover/page the series card shows). Prefers seriesNumber === 1 — the
+// actual flagship first novel — over any lower-numbered prequel/novella
+// (0, 0.5, etc.), since those exist specifically to NOT be a reader's first
+// impression of the series. Falls back to the lowest available number only
+// when no book is numbered exactly 1 (e.g. a series that starts at 0 with no
+// separate "book 1"). Confirmed live: without this, series with a numbered
+// prequel — Throne of Glass's "The Assassin's Blade" (0.5), the Powder Mage
+// Trilogy's "Siege of Tilpur" (0) — showed the obscure prequel's cover as
+// the series' public face instead of the actual first novel.
+function pickSeriesRepresentative(books) {
+  const bookOne = books.find(b => b.seriesNumber === 1);
+  if (bookOne) return bookOne;
+  return books.reduce((rep, book) =>
+    (book.seriesNumber ?? Infinity) < (rep.seriesNumber ?? Infinity) ? book : rep
+  );
+}
+
 // Shared by the `tag` param (tags array only, AND-combined with other active
 // filters — used by search.html's dedicated tag field) and the `filter` param
 // (tags OR genres, used by browse.html's single quick-filter box — a user
@@ -234,36 +252,20 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       const directIds = reviewed.map(r => r.mediaItemId);
 
-      // For TV shows, reviews are written on seasons (children).
-      // Only exclude the parent show if ALL of its seasons have been reviewed.
+      // For TV shows, reviews are written on seasons (children) — a parent
+      // show is excluded from "Unreviewed only" as soon as ANY season has
+      // been reviewed, not only once every season is done. Previously this
+      // required ALL seasons reviewed, so a show the user had already
+      // started reviewing kept reappearing under "Unreviewed only" for
+      // every season still left — confirmed live as not matching what
+      // "Unreviewed only" should mean.
       const reviewedSeasons = await prisma.mediaItem.findMany({
         where: { id: { in: directIds }, parentId: { not: null } },
         select: { parentId: true },
       });
+      const reviewedParentIds = [...new Set(reviewedSeasons.map(s => s.parentId))];
 
-      // Group reviewed seasons by parent
-      const reviewedByParent = {};
-      for (const { parentId } of reviewedSeasons) {
-        reviewedByParent[parentId] = (reviewedByParent[parentId] || 0) + 1;
-      }
-
-      // Count total seasons per parent show
-      const parentIds = Object.keys(reviewedByParent);
-      const fullyReviewedParentIds = [];
-      if (parentIds.length) {
-        const seasonCounts = await prisma.mediaItem.groupBy({
-          by: ['parentId'],
-          where: { parentId: { in: parentIds } },
-          _count: { id: true },
-        });
-        for (const { parentId, _count } of seasonCounts) {
-          if (reviewedByParent[parentId] >= _count.id) {
-            fullyReviewedParentIds.push(parentId);
-          }
-        }
-      }
-
-      reviewedIds = [...new Set([...directIds, ...fullyReviewedParentIds])];
+      reviewedIds = [...new Set([...directIds, ...reviewedParentIds])];
     }
 
     // Build where clause using AND array to avoid OR key collisions when
@@ -396,11 +398,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       for (const cluster of clusters) {
         seriesCountMap.set(cluster.books[0].seriesName, (seriesCountMap.get(cluster.books[0].seriesName) || 0) + cluster.books.length);
       }
-      seriesRepresentatives = clusters.map(cluster =>
-        cluster.books.reduce((rep, book) =>
-          (book.seriesNumber ?? Infinity) < (rep.seriesNumber ?? Infinity) ? book : rep
-        )
-      );
+      seriesRepresentatives = clusters.map(cluster => pickSeriesRepresentative(cluster.books));
     }
 
     // For rating/lowest sort: fetch ALL items so we can sort them together
@@ -921,21 +919,33 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     // it automatically becomes the series page.
     let isBookSeries = false;
     let seriesRepSlug = null;
+    // Every book sharing this series's seriesName+author cluster — used below
+    // so series-level review lookups match ANY book that has ever been the
+    // representative, not just item.id. A series-level review is written
+    // against whatever book was the representative at the time, and adding a
+    // new earlier-numbered book later shifts the representative without
+    // moving existing reviews — matching strictly on item.id made such
+    // reviews silently vanish. Confirmed live: this happened to real reviews
+    // on the Powder Mage Trilogy, Gods of Blood and Powder, and Glass
+    // Immortals the moment prequel novellas were added.
+    let seriesClusterIds = null;
     if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
       // Same seriesName isn't sufficient on its own — two unrelated authors
       // can share an identical series name (see clusterBookSeries in the GET
       // / handler above), so this must also require sharing an author with
       // THIS book, or an unrelated same-named series would get pulled in.
       const authorIds = (item.authors || []).map(a => a.id);
-      const lowestInSeries = await prisma.mediaItem.findFirst({
+      const clusterBooks = await prisma.mediaItem.findMany({
         where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true, authors: { some: { id: { in: authorIds } } } },
         orderBy: { seriesNumber: 'asc' },
-        select: { id: true, slug: true },
+        select: { id: true, slug: true, seriesNumber: true },
       });
+      const lowestInSeries = pickSeriesRepresentative(clusterBooks);
       // ?book=1 means "show this as an individual book" even if it's the series representative
       const forceIndividual = req.query.book === '1';
       isBookSeries  = !forceIndividual && lowestInSeries?.id === item.id;
       seriesRepSlug = lowestInSeries?.slug || null;
+      if (isBookSeries) seriesClusterIds = clusterBooks.map(b => b.id);
     }
     const isSeriesParent = isTvParent || isBookSeries;
 
@@ -948,7 +958,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     // For TV parent shows and book series, aggregate stats across all entries
     // Series-level reviews: for book series use seasonNumber:0, for TV use seasonNumber:null
     const seriesLevelWhere = isBookSeries
-      ? { mediaItemId: item.id, seasonNumber: 0, visibility: 'PUBLIC' }
+      ? { mediaItemId: { in: seriesClusterIds }, seasonNumber: 0, visibility: 'PUBLIC' }
       : { mediaItemId: item.id, seasonNumber: null, visibility: 'PUBLIC' };
     let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
     let seriesBooks = [];
@@ -1042,7 +1052,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       // For TV parent shows, series-level reviews use seasonNumber: null
       // For individual books and all other items, seasonNumber: null
       const seriesReviewWhere = isBookSeries
-        ? { userId: req.user.id, mediaItemId: item.id, seasonNumber: 0 }
+        ? { userId: req.user.id, mediaItemId: { in: seriesClusterIds }, seasonNumber: 0 }
         : { userId: req.user.id, mediaItemId: item.id, seasonNumber: null };
       userReview = await prisma.review.findFirst({ where: seriesReviewWhere });
     }
@@ -1106,8 +1116,15 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       seriesBooksData: item.seriesBooksData || null,
       seriesRepSlug,
       communityStats: {
-        avgRating:    stats._avg.rating,
-        reviewCount:  stats._count.rating,
+        // A genuine series-level review (seriesLevelStats — someone reviewed
+        // the series/show as a whole) outranks the average across individual
+        // books/seasons (stats), mirroring the same priority the browse-list
+        // card uses (effectiveRating: directRatingMap before
+        // bookSeriesRatingMap). Previously seriesLevelStats was computed but
+        // never actually used here, so a series-level review's rating never
+        // showed up in the page's own displayed average at all.
+        avgRating:    (seriesLevelStats?._count.rating > 0) ? seriesLevelStats._avg.rating : stats._avg.rating,
+        reviewCount:  (seriesLevelStats?._count.rating > 0) ? seriesLevelStats._count.rating : stats._count.rating,
         verdicts:     Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
         avgCompletion,
       },
@@ -1135,18 +1152,37 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
     // the isBookSeries check in GET /:slug. Confirmed live: the Cradle series
     // page was showing book 1's ("Unsouled") own review as if it were a
     // series review, because this endpoint applied no season filter at all.
+    //
+    // seriesReviewMediaItemIds: which "representative" book actually holds the
+    // lowest seriesNumber shifts over time — e.g. adding a prequel novella
+    // numbered 0 to a series whose flagship book was previously #1 makes the
+    // novella the new representative. A series-level review, though, is
+    // always written against WHATEVER was the representative at review time,
+    // so an existing review's mediaItemId can point at a book that is no
+    // longer the representative. Matching strictly on `item.id` made such
+    // reviews silently disappear the moment a new earlier-numbered book was
+    // added — confirmed live: this happened to real reviews on the Powder
+    // Mage Trilogy, Gods of Blood and Powder, and Glass Immortals the moment
+    // prequel novellas were added, and to three more series in earlier
+    // sessions before anyone noticed. Matching against every book in the
+    // cluster (not just the current representative's own id) makes the
+    // lookup independent of which specific book currently holds the lowest
+    // number, so this class of bug can't recur.
+    let seriesReviewMediaItemIds = null;
     if (item.mediaType === 'BOOK' && item.seriesName && item.seriesNumber != null) {
       const forceIndividual = req.query.book === '1';
       // Author overlap required, not just seriesName — see clusterBookSeries
       // in GET / above (two unrelated authors can share an identical name).
       const authorIds = (item.authors || []).map(a => a.id);
-      const lowestInSeries = await prisma.mediaItem.findFirst({
+      const clusterBooks = await prisma.mediaItem.findMany({
         where: { mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null }, verified: true, authors: { some: { id: { in: authorIds } } } },
         orderBy: { seriesNumber: 'asc' },
-        select: { id: true },
+        select: { id: true, seriesNumber: true },
       });
+      const lowestInSeries = pickSeriesRepresentative(clusterBooks);
       const isBookSeries = !forceIndividual && lowestInSeries?.id === item.id;
       seasonFilter = { seasonNumber: isBookSeries ? 0 : null };
+      if (isBookSeries) seriesReviewMediaItemIds = clusterBooks.map(b => b.id);
     }
 
     // Friends-only filter — restrict to reviews by friends of the logged-in user
@@ -1177,7 +1213,12 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
       ? { in: ['PUBLIC', 'FRIENDS_ONLY'] }
       : 'PUBLIC';
 
-    const where = { mediaItemId: item.id, visibility: visibilityFilter, ...seasonFilter, ...userFilter };
+    const where = {
+      mediaItemId: seriesReviewMediaItemIds ? { in: seriesReviewMediaItemIds } : item.id,
+      visibility: visibilityFilter,
+      ...seasonFilter,
+      ...userFilter,
+    };
     const [reviews, total] = await Promise.all([
       prisma.review.findMany({
         where,
