@@ -347,9 +347,13 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
             directors: { select: { id: true, name: true, slug: true } },
             cast:      { select: { id: true, name: true, slug: true } },
             authors:   { select: { id: true, name: true, slug: true } },
-            // For TV seasons, also include parent show's cast and genres
+            // For TV seasons, the parent show carries the real creative-team
+            // data (main cast, creators) — a season row only has guest cast/
+            // deltas — plus the identifying fields needed to treat the whole
+            // series as one item when consolidating ratings below.
             parent: {
               select: {
+                id: true, title: true, slug: true, imageUrl: true, releaseYear: true,
                 cast:      { select: { id: true, name: true, slug: true } },
                 directors: { select: { id: true, name: true, slug: true } },
                 genres:    true,
@@ -360,21 +364,49 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       },
     });
 
-    // Merge parent show cast/genres into TV season reviews so main cast counts
+    // Consolidate TV reviews to one rating per show, not one per season —
+    // treat the whole series as a single data point: the explicit series-
+    // level review if the user wrote one (a review directly on the parent
+    // row, seasonNumber:null), otherwise the average of whatever seasons
+    // they did review. Previously every season review counted separately
+    // using its own rating, so an 8-season show reviewed season-by-season
+    // contributed 8 ratings toward a director/actor's average instead of 1,
+    // and used only that season's guest cast — main cast/creators live on
+    // the parent row and were mostly invisible to favorites as a result.
+    const tvGroups = new Map(); // effective show id -> { seriesRating, seasonRatings, showItem }
+    const processedEntries = [];
     for (const review of reviews) {
       const item = review.mediaItem;
-      if (item.mediaType === 'TV_SHOW' && item.parentId && item.parent) {
-        // Merge parent cast — add any not already in season cast
-        const seasonCastIds = new Set(item.cast.map(p => p.id));
-        for (const p of (item.parent.cast || [])) {
-          if (!seasonCastIds.has(p.id)) item.cast.push(p);
-        }
-        // Merge parent genres
-        const seasonGenres = new Set(item.genres);
-        for (const g of (item.parent.genres || [])) {
-          if (!seasonGenres.has(g)) item.genres.push(g);
-        }
+      if (item.mediaType !== 'TV_SHOW') {
+        processedEntries.push({ rating: review.rating, item });
+        continue;
       }
+      if (item.parentId) {
+        // Season-level review — group under the parent; use the parent's
+        // own cast/directors/genres, the show's real creative-team data.
+        if (!tvGroups.has(item.parentId)) {
+          tvGroups.set(item.parentId, {
+            seriesRating: null,
+            seasonRatings: [],
+            showItem: item.parent
+              ? { ...item.parent, mediaType: 'TV_SHOW' }
+              : { ...item, mediaType: 'TV_SHOW' }, // parent wasn't fetched (shouldn't normally happen) — fall back to the season's own data rather than dropping it
+          });
+        }
+        tvGroups.get(item.parentId).seasonRatings.push(review.rating);
+      } else {
+        // No parentId — this review is directly on the parent show's own
+        // row, i.e. an explicit "rate the whole series" review. Takes
+        // priority over any season averages for the same show.
+        if (!tvGroups.has(item.id)) tvGroups.set(item.id, { seriesRating: null, seasonRatings: [], showItem: item });
+        tvGroups.get(item.id).seriesRating = review.rating;
+      }
+    }
+    for (const { seriesRating, seasonRatings, showItem } of tvGroups.values()) {
+      const rating = seriesRating != null
+        ? seriesRating
+        : seasonRatings.reduce((a, b) => a + b, 0) / seasonRatings.length;
+      processedEntries.push({ rating, item: showItem });
     }
 
     // ── Helper: build a ranked list from person/genre occurrences ─────────────
@@ -391,6 +423,24 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           items:     entry.items || [],
         }))
         .sort((a, b) => b.avgRating - a.avgRating || b.count - a.count)
+        .slice(0, topN);
+    }
+
+    // Same shape as rankEntries, but worst avgRating first — powers the
+    // "Least Favorite" cards. Tie-break still favors more appearances (more
+    // reviewed data behind a low rating reads as more genuinely disliked
+    // than one bad review of something barely watched).
+    function rankEntriesAscending(map, minCount = 1, topN = 5) {
+      return Object.values(map)
+        .filter(entry => entry.ratings.length >= minCount)
+        .map(entry => ({
+          name:      entry.name,
+          slug:      entry.slug || null,
+          count:     entry.ratings.length,
+          avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
+          items:     entry.items || [],
+        }))
+        .sort((a, b) => a.avgRating - b.avgRating || b.count - a.count)
         .slice(0, topN);
     }
 
@@ -411,9 +461,9 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       releaseYear: item.releaseYear, rating,
     });
 
-    for (const review of reviews) {
-      const item   = review.mediaItem;
-      const rating = review.rating;
+    for (const entry of processedEntries) {
+      const item   = entry.item;
+      const rating = entry.rating;
       const type   = item.mediaType;
 
       countByType[type] = (countByType[type] || 0) + 1;
@@ -452,10 +502,10 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
 
     // ── Build per-media-type genre breakdowns with dynamic thresholds ──────────
     const genresByType = {};
-    for (const review of reviews) {
-      const type = review.mediaItem.mediaType;
+    for (const entry of processedEntries) {
+      const type = entry.item.mediaType;
       if (!genresByType[type]) genresByType[type] = {};
-      for (const g of (review.mediaItem.genres || [])) {
+      for (const g of (entry.item.genres || [])) {
         if (ignoredSet.has(g.toLowerCase())) continue;
         // items:[] was missing here — unlike the overall `genres` accumulator
         // above, this per-type breakdown never recorded which reviews backed
@@ -464,8 +514,8 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         // empty project list (every type has this bug, but it's most visible
         // on types with no director/actor cards to mask it).
         if (!genresByType[type][g]) genresByType[type][g] = { name: g, ratings: [], items: [] };
-        genresByType[type][g].ratings.push(review.rating);
-        genresByType[type][g].items.push(itemSummary(review.mediaItem, review.rating));
+        genresByType[type][g].ratings.push(entry.rating);
+        genresByType[type][g].items.push(itemSummary(entry.item, entry.rating));
       }
     }
     const favoriteGenreByType = {};
@@ -513,6 +563,10 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       favoriteDirectors:     rankEntries(directors, 1, Infinity),
       favoriteActors:        rankEntries(actors,    1, Infinity),
       favoriteAuthors:       rankEntries(authors,   1, Infinity),
+      leastFavoriteDirectors: rankEntriesAscending(directors, 1, Infinity),
+      leastFavoriteActors:    rankEntriesAscending(actors,    1, Infinity),
+      leastFavoriteAuthors:   rankEntriesAscending(authors,   1, Infinity),
+      leastFavoriteGenres:    rankEntriesAscending(genres,    1, Infinity),
       mostReviewedDirectors: rankByCount(directors, 1, Infinity),
       mostReviewedActors:    rankByCount(actors,    1, Infinity),
       mostReviewedAuthors:   rankByCount(authors,   1, Infinity),
