@@ -415,9 +415,42 @@ router.get('/', optionalAuth, async (req, res, next) => {
     const textActive = !!(q && q.trim().length > 0);
     const fullFetchMode = ratingSort || textActive;
 
-    const [items, total] = await Promise.all([
-      prisma.mediaItem.findMany({
-        where,
+    // Plain rating-sort browsing with no text search and no book-series
+    // collapsing (i.e. Browse's default view for Movies/TV/Games, and Books
+    // when a series filter narrows things down) is the case that broke at
+    // catalog scale: fetching every matching row with full nested includes
+    // (directors/cast/authors/parent, each up to 100) just to sort by rating
+    // and discard all but ~24 of them took 51+ seconds against 17k+ movies.
+    // Confirmed live: browsing Movies with an empty search box "stalled" for
+    // exactly this reason. Fix: get just the ids + ratings cheaply (no
+    // joins), sort/paginate THAT, then do the expensive full fetch only for
+    // the one page of ids actually needed. textActive/collapseBookSeries
+    // still use the old full-fetch path since relevance ranking and series
+    // clustering both genuinely need the whole matching set in hand.
+    const canOptimizeRatingSort = ratingSort && !textActive && !collapseBookSeries;
+
+    let items, total;
+    if (canOptimizeRatingSort) {
+      const idRows = await prisma.mediaItem.findMany({ where, select: { id: true } });
+      const idList = idRows.map(r => r.id);
+      total = idList.length;
+      const idRatings = await prisma.review.groupBy({
+        by: ['mediaItemId'],
+        where: { mediaItemId: { in: idList }, visibility: 'PUBLIC', ...friendFilter },
+        _avg: { rating: true },
+      });
+      const idRatingMap = Object.fromEntries(idRatings.map(r => [r.mediaItemId, r._avg.rating]));
+      idList.sort((a, b) => {
+        const ra = idRatingMap[a] ?? null, rb = idRatingMap[b] ?? null;
+        if (ra === null && rb === null) return 0;
+        if (ra === null) return 1; // unrated always last, regardless of direction
+        if (rb === null) return -1;
+        return sort === 'lowest' ? ra - rb : rb - ra;
+      });
+      const pageNum = parseInt(page) - 1;
+      const pageIds = idList.slice(pageNum * take, (pageNum + 1) * take);
+      const pageItemsUnordered = await prisma.mediaItem.findMany({
+        where: { id: { in: pageIds } },
         include: {
           _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
           directors: { select: { id: true, name: true, slug: true }, take: 100 },
@@ -425,13 +458,29 @@ router.get('/', optionalAuth, async (req, res, next) => {
           cast:      { select: { id: true, name: true, slug: true }, take: 100 },
           parent:    { select: { id: true, title: true, slug: true } },
         },
-        orderBy,
-        // For rating sort (or any text search), fetch all — pagination handled in JS after sort
-        skip: fullFetchMode ? 0 : (parseInt(page) - 1) * take,
-        take: fullFetchMode ? undefined : take,
-      }),
-      prisma.mediaItem.count({ where }),
-    ]);
+      });
+      // Prisma doesn't preserve `id: { in: [...] }` order — restore the rating-sorted order.
+      const byId = Object.fromEntries(pageItemsUnordered.map(i => [i.id, i]));
+      items = pageIds.map(id => byId[id]).filter(Boolean);
+    } else {
+      [items, total] = await Promise.all([
+        prisma.mediaItem.findMany({
+          where,
+          include: {
+            _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+            directors: { select: { id: true, name: true, slug: true }, take: 100 },
+            authors:   { select: { id: true, name: true, slug: true }, take: 100 },
+            cast:      { select: { id: true, name: true, slug: true }, take: 100 },
+            parent:    { select: { id: true, title: true, slug: true } },
+          },
+          orderBy,
+          // For rating sort (or any text search), fetch all — pagination handled in JS after sort
+          skip: fullFetchMode ? 0 : (parseInt(page) - 1) * take,
+          take: fullFetchMode ? undefined : take,
+        }),
+        prisma.mediaItem.count({ where }),
+      ]);
+    }
     const bookRatingSort = ratingSort && collapseBookSeries;
 
     // Merge standalone/unnumbered books with series representatives
@@ -798,12 +847,16 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
-    } else if (sort === 'rating' || sort === 'lowest') {
+    } else if ((sort === 'rating' || sort === 'lowest') && !canOptimizeRatingSort) {
       sortedItems = [...finalItems].sort(compareSecondary);
       // Re-apply pagination after sorting
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
     }
+    // When canOptimizeRatingSort was used, finalItems (== items) already came
+    // back pre-sorted and pre-paginated to exactly this page — re-slicing it
+    // here with the current pageNum would double-paginate and return the
+    // wrong (often empty) results for any page past the first.
 
     res.json({
       items: sortedItems.map(i => {
@@ -849,10 +902,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
       }),
-      // For rating sort, total reflects the full sorted set (including series reps for books)
-      total: fullFetchMode ? finalItems.length : total,
+      // For rating sort, total reflects the full sorted set (including series reps for books).
+      // canOptimizeRatingSort already computed the true total itself (finalItems there is only
+      // ever the current page), so it must NOT be overridden by finalItems.length like the
+      // legacy full-fetch path below still correctly does for text search / book-series collapsing.
+      total: canOptimizeRatingSort ? total : fullFetchMode ? finalItems.length : total,
       page: parseInt(page),
-      pages: fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
+      pages: canOptimizeRatingSort ? Math.ceil(total / take) : fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
       friendsOnly: friendsOnly && friendIds.length > 0,
     });
   } catch (err) { next(err); }
