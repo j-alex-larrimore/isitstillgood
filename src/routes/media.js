@@ -411,7 +411,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       popular: [{ reviews: { _count: 'desc' } }],
       recent:  [{ createdAt: 'desc' }],
       title:   [{ title: 'asc' }],
-      year:    [{ releaseYear: 'asc' }],
+      // Explicit nulls:'last' on both — DESC defaults to nulls-first in SQL,
+      // which would otherwise surface every year-less item before 2026's.
+      year:    [{ releaseYear: { sort: 'asc',  nulls: 'last' } }],
+      yearDesc:[{ releaseYear: { sort: 'desc', nulls: 'last' } }],
     }[sort] || [{ createdAt: 'desc' }];
 
     // For book browse without series filter: fetch ONE representative per series
@@ -885,7 +888,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       switch (sort) {
         case 'rating': case 'lowest': return effectiveRating(i);
         case 'popular': return i._count?.reviews ?? 0;
-        case 'year':    return i.releaseYear ?? null;
+        case 'year': case 'yearDesc': return i.releaseYear ?? null;
         case 'title':   return (i.title || '').toLowerCase();
         case 'recent':  default: return new Date(i.createdAt).getTime();
       }
