@@ -136,9 +136,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // The logged-in user's own ratings, so results can show their rating
-    // alongside a selected friend's for comparison (Browse's friend dropdown).
-    if (req.user && reviewedByUserId && req.user.id !== reviewedByUserId) {
+    // The logged-in user's own ratings — used to show their rating alongside a
+    // selected friend's for comparison (Browse's friend dropdown), and/or to
+    // compute the "your average" summary Browse shows atop an actual search's
+    // results (searchAvgRating below). Not surfaced per-card outside the
+    // friend-comparison case — see browse.html.
+    if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && q && q.trim()))) {
       const myReviews = await prisma.review.findMany({
         where: { userId: req.user.id },
         select: { mediaItemId: true, rating: true },
@@ -919,6 +922,21 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // here with the current pageNum would double-paginate and return the
     // wrong (often empty) results for any page past the first.
 
+    // "Your average" (or a selected friend's average) across every item
+    // actually matching this search — not just the current page — shown at
+    // the top of Browse's results for an actual search. finalItems is the
+    // full matching set at this point (pagination happens after, into
+    // sortedItems), which is what makes this a true search-wide average
+    // rather than just an average of whatever 24 items happen to be on screen.
+    let searchAvgRating = null;
+    if (textActive) {
+      const ratingsMap = req.reviewedByRatings || req.myRatings;
+      if (ratingsMap) {
+        const matched = finalItems.map(i => ratingsMap[i.id]).filter(r => r != null);
+        if (matched.length) searchAvgRating = matched.reduce((a, b) => a + b, 0) / matched.length;
+      }
+    }
+
     res.json({
       items: sortedItems.map(i => {
         // For series representative cards, use aggregated series ratings
@@ -972,6 +990,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       page: parseInt(page),
       pages: canOptimizeRatingSort ? Math.ceil(total / take) : fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
       friendsOnly: friendsOnly && friendIds.length > 0,
+      searchAvgRating,
+      searchAvgIsFriend: !!req.reviewedByRatings,
     });
   } catch (err) { next(err); }
 });
