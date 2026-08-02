@@ -136,12 +136,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // The logged-in user's own ratings, enriching results with myRating —
-    // either to compare against a selected friend's rating (reviewedByUserId
-    // set, from Browse's friend dropdown), or, for an actual text search (q
-    // set, as opposed to plain browsing/filtering), to surface your own
-    // rating on a matching title without needing to pick yourself as a friend.
-    if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && q && q.trim()))) {
+    // The logged-in user's own ratings, so results can show their rating
+    // alongside a selected friend's for comparison (Browse's friend dropdown).
+    if (req.user && reviewedByUserId && req.user.id !== reviewedByUserId) {
       const myReviews = await prisma.review.findMany({
         where: { userId: req.user.id },
         select: { mediaItemId: true, rating: true },
