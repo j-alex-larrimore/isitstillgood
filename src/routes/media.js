@@ -95,12 +95,21 @@ router.get('/', optionalAuth, async (req, res, next) => {
   const consumedWithin   = req.query.consumedWithin || null;
   // reviewedBy: a username — filter to only items reviewed by that specific user
   const reviewedBy = req.query.reviewedBy?.trim();
-  const excludeReviewed = req.query.excludeReviewed === 'true' && req.user;
+  // reviewStatus: 'unreviewed', 'reviewed', or 'all' — powers Browse's review-status
+  // dropdown. Scoped to whichever person is relevant: the reviewedBy target if
+  // Browse's "select a friend" dropdown picked one, otherwise the logged-in user
+  // themself. Distinguished from "param absent" (null) so that reviewedBy alone
+  // (search.html's older "Reviewed by" field, which has no separate status concept)
+  // keeps its original meaning of "only their reviewed items" — see andClauses below.
+  const reviewStatus = ['unreviewed', 'reviewed', 'all'].includes(req.query.reviewStatus)
+    ? req.query.reviewStatus
+    : null;
   const take = 24;
 
   try {
     // reviewedBy filter — look up the user and get their reviewed item IDs
     let reviewedByIds = undefined;
+    let reviewedByUserId = null;
     if (reviewedBy) {
       const reviewedByUser = await prisma.user.findFirst({
         where: {
@@ -112,6 +121,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         select: { id: true },
       });
       if (reviewedByUser) {
+        reviewedByUserId = reviewedByUser.id;
         // Get all media IDs this user has reviewed publicly
         const theirReviews = await prisma.review.findMany({
           where: { userId: reviewedByUser.id, visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } },
@@ -124,6 +134,19 @@ router.get('/', optionalAuth, async (req, res, next) => {
         // User not found — return empty results rather than ignoring the filter
         return res.json({ items: [], total: 0, page: parseInt(page), pages: 0, reviewedByNotFound: true });
       }
+    }
+
+    // The logged-in user's own ratings, enriching results with myRating —
+    // either to compare against a selected friend's rating (reviewedByUserId
+    // set, from Browse's friend dropdown), or, for an actual text search (q
+    // set, as opposed to plain browsing/filtering), to surface your own
+    // rating on a matching title without needing to pick yourself as a friend.
+    if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && q && q.trim()))) {
+      const myReviews = await prisma.review.findMany({
+        where: { userId: req.user.id },
+        select: { mediaItemId: true, rating: true },
+      });
+      req.myRatings = Object.fromEntries(myReviews.map(r => [r.mediaItemId, r.rating]));
     }
 
     // Person search — look up matching person IDs
@@ -258,11 +281,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ? { dateConsumed: { gte: consumedCutoff } }
       : {};
 
-    // Excluded already-reviewed items
+    // Reviewed-item ids for whichever person reviewStatus is scoped to — the
+    // reviewedBy target when Browse's "select a friend" dropdown picked one,
+    // otherwise the logged-in user themself. Used by both directions of the
+    // reviewStatus filter (exclude for 'unreviewed', include for 'reviewed').
+    const statusTargetUserId = reviewedByUserId || req.user?.id || null;
     let reviewedIds = [];
-    if (excludeReviewed) {
+    if ((reviewStatus === 'unreviewed' || reviewStatus === 'reviewed') && statusTargetUserId) {
       const reviewed = await prisma.review.findMany({
-        where: { userId: req.user.id },
+        where: { userId: statusTargetUserId },
         select: { mediaItemId: true },
       });
       const directIds = reviewed.map(r => r.mediaItemId);
@@ -290,15 +317,30 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // reviewed via GET /api/admin/media/pending instead, not this route.
     const andClauses = [{ verified: true }];
 
-    if (type)                             andClauses.push({ mediaType: type });
+    // 'SCREEN' is Browse's merged Movies & TV tab — not a real MediaType, just a
+    // sentinel meaning "MOVIE or TV_SHOW, but not BOOK/VIDEO_GAME". includesTV
+    // below lets the TV-specific structural filters (parent-only, person-search
+    // season inclusion) apply equally in the combined view — they're harmless
+    // no-ops against movie rows since parentId is always null on those anyway.
+    const includesTV = type === 'TV_SHOW' || type === 'SCREEN';
+    if (type === 'SCREEN')                andClauses.push({ mediaType: { in: ['MOVIE', 'TV_SHOW'] } });
+    else if (type)                         andClauses.push({ mediaType: type });
     // TV filtering: normally show only parent shows (parentId: null).
     // BUT when searching by person/text (which can match an actor), also allow
     // seasons — a guest actor in one season should surface that specific season.
     // We dedupe below: if the parent show already matches, we drop its seasons.
-    const tvPersonSearch = (personFilter || (textFilter && q)) && type === 'TV_SHOW';
-    if (type === 'TV_SHOW' && !req.query.individual && !tvPersonSearch) {
+    const tvPersonSearch = (personFilter || (textFilter && q)) && includesTV;
+    // individual-seasons toggle is TV_SHOW-only (not exposed in the combined
+    // SCREEN view — see browse.html), so it's deliberately excluded from this
+    // condition for type==='SCREEN' — otherwise a stray ?individual=true would
+    // skip the parent-only restriction and flood the combined view with every
+    // season of every show, unfiltered.
+    if (includesTV && !(type === 'TV_SHOW' && req.query.individual) && !tvPersonSearch) {
       andClauses.push({ parentId: null });
     }
+    // Individual-seasons toggle is TV_SHOW-only (not exposed in the combined
+    // SCREEN view — see browse.html) since {parentId:{not:null}} would also
+    // wrongly exclude every movie row from a combined Movies+TV result set.
     if (type === 'TV_SHOW' && req.query.individual)  andClauses.push({ parentId: { not: null } });
     if (type === 'BOOK' && !req.query.series && !req.query.individual) {
       // When text search is active, series books will be handled individually
@@ -349,8 +391,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (req.query.series)   andClauses.push({ seriesName: req.query.series });
     if (textFilter)         andClauses.push(textFilter);
     if (personFilter)       andClauses.push(personFilter);
-    if (excludeReviewed && reviewedIds.length) andClauses.push({ id: { notIn: reviewedIds } });
-    if (reviewedByIds !== undefined) andClauses.push({ id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } });
+    if (reviewStatus === 'unreviewed' && reviewedIds.length) andClauses.push({ id: { notIn: reviewedIds } });
+    if (reviewStatus === 'reviewed') andClauses.push({ id: { in: reviewedIds.length ? reviewedIds : ['__none__'] } });
+    // reviewedBy with no reviewStatus at all (search.html's older "Reviewed by" field,
+    // which has no status concept of its own) keeps its original meaning: restrict to
+    // only their reviewed items. When reviewStatus IS present (Browse's friend dropdown
+    // always sends one explicitly — see browse.html), it already did the equivalent
+    // restriction above scoped via statusTargetUserId, or 'all' deliberately means no
+    // restriction — so reviewedBy becomes pure rating-comparison enrichment instead.
+    if (reviewedByIds !== undefined && reviewStatus === null) andClauses.push({ id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } });
     if (!type) andClauses.push({ NOT: { AND: [{ mediaType: 'TV_SHOW' }, { parentId: null }] } });
 
     const where = andClauses.length > 0 ? { AND: andClauses } : {};
@@ -915,6 +964,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
             ? (bookCompletionMap?.[i.id] || null)
             : undefined,
         reviewedByRating: req.reviewedByRatings?.[i.id] || null,
+        myRating: req.myRatings?.[i.id] || null,
         }; // close the return object for isSeriesCard
       }),
       // For rating sort, total reflects the full sorted set (including series reps for books).
