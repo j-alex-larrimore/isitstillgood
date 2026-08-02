@@ -512,6 +512,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       const idRatingMap = Object.fromEntries(idRatings.map(r => [r.mediaItemId, r._avg.rating]));
       idList.sort((a, b) => {
+        // Items the logged-in user has already reviewed float to the top of a
+        // filtered search (see hasActiveFilter/req.myRatings above) — ahead of
+        // rating order, not just as a tiebreak within it.
+        if (req.myRatings) {
+          const aReviewed = req.myRatings[a] != null, bReviewed = req.myRatings[b] != null;
+          if (aReviewed !== bReviewed) return aReviewed ? -1 : 1;
+        }
         const ra = idRatingMap[a] ?? null, rb = idRatingMap[b] ?? null;
         if (ra === null && rb === null) return 0;
         if (ra === null) return 1; // unrated always last, regardless of direction
@@ -907,19 +914,34 @@ router.get('/', optionalAuth, async (req, res, next) => {
       return sort === 'lowest' || sort === 'year' ? aKey - bKey : bKey - aKey;
     }
 
+    // Items the logged-in user has already reviewed float to the top of a
+    // filtered search (see hasActiveFilter/req.myRatings above) — ahead of
+    // even relevance/rating order, not just as a tiebreak within it.
+    function reviewedBoost(a, b) {
+      if (!req.myRatings) return 0;
+      const aReviewed = req.myRatings[a.id] != null, bReviewed = req.myRatings[b.id] != null;
+      if (aReviewed === bReviewed) return 0;
+      return aReviewed ? -1 : 1;
+    }
+
     // Sort ALL matching items together (series + standalones) then paginate in JS —
     // required whenever avgRating drives the order (computed post-fetch) or a text
     // query is active (relevance can't be expressed as a DB-level orderBy).
     let sortedItems = finalItems;
     if (textActive) {
       sortedItems = [...finalItems].sort((a, b) => {
+        const boost = reviewedBoost(a, b);
+        if (boost !== 0) return boost;
         const relDiff = relevance(b) - relevance(a);
         return relDiff !== 0 ? relDiff : compareSecondary(a, b);
       });
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
     } else if ((sort === 'rating' || sort === 'lowest') && !canOptimizeRatingSort) {
-      sortedItems = [...finalItems].sort(compareSecondary);
+      sortedItems = [...finalItems].sort((a, b) => {
+        const boost = reviewedBoost(a, b);
+        return boost !== 0 ? boost : compareSecondary(a, b);
+      });
       // Re-apply pagination after sorting
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
