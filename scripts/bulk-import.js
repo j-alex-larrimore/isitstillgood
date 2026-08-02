@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -364,6 +364,7 @@ async function main() {
         data: {
           mediaType:       row.mediaType,
           title:           data.title,
+          normalizedTitle: normalizeTitleForSearch(data.title),
           slug,
           releaseYear,
           verified:        false, // queues for admin review before showing up publicly

@@ -30,6 +30,11 @@ model MediaItem {
   id              String     @id @default(cuid())
   mediaType       MediaType
   title           String
+  // Lowercased, punctuation-stripped copy of title, kept in sync at write
+  // time (see normalizeTitleForSearch in src/lib/mediaHelpers.js) so search
+  // can match "la confidential" against "L.A. Confidential" without a
+  // per-query, unindexed string scan across the whole table.
+  normalizedTitle String?
   slug            String     @unique
   releaseYear     Int?
   description     String?    @db.Text
@@ -88,6 +93,7 @@ model MediaItem {
 
   @@index([mediaType])
   @@index([title])
+  @@index([normalizedTitle])
   @@index([releaseYear])
   @@index([verified])
 }

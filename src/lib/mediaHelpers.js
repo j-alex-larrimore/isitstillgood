@@ -312,6 +312,20 @@ function settingGenresFor(keywords, vocab = SETTING_GENRE_VOCAB) {
   return matched;
 }
 
+// Lowercased, punctuation-stripped title for punctuation-insensitive search —
+// e.g. "L.A. Confidential" and "la confidential" both normalize to the same
+// "la confidential", so searching either one matches the title regardless of
+// how it's actually punctuated. Kept as its own stored/indexed column
+// (MediaItem.normalizedTitle) rather than computed at query time, since an
+// unindexed per-row string transform across the whole catalog doesn't scale.
+function normalizeTitleForSearch(title) {
+  return (title || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, '') // strip punctuation, keep letters/digits/spaces (unicode-aware)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ─── Slugs ─────────────────────────────────────────────────────────────────
 function slugify(title, year) {
   const base = title.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
@@ -491,6 +505,7 @@ module.exports = {
   settingGenresFor,
   SETTING_GENRE_VOCAB,
   SPECIFIC_WAR_VOCAB,
+  normalizeTitleForSearch,
   slugify,
   uniqueSlug,
   connectPersons,

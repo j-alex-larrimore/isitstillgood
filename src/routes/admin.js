@@ -7,7 +7,7 @@ const { requireAdmin } = require('../middleware/admin');
 const { fetchExternalRatings } = require('../services/externalRatings');
 const {
   normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres,
-  slugify, uniqueSlug, connectPersons, checkSeriesCollision,
+  slugify, uniqueSlug, connectPersons, checkSeriesCollision, normalizeTitleForSearch,
 } = require('../lib/mediaHelpers');
 
 // Genres are normalized server-side, by mediaType, no matter what the
@@ -177,6 +177,7 @@ router.post('/media', requireAdmin, [
       data: {
         mediaType,
         title: finalTitle,
+        normalizedTitle: normalizeTitleForSearch(finalTitle),
         slug,
         releaseYear: releaseYear ? parseInt(releaseYear) : null,
         description:     description || null,
@@ -227,6 +228,10 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     const data = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => allowed.includes(k))
     );
+    // Keep normalizedTitle in sync whenever title is part of this edit —
+    // otherwise a renamed item would keep matching punctuation-insensitive
+    // search under its old title instead of the new one.
+    if (data.title !== undefined) data.normalizedTitle = normalizeTitleForSearch(data.title);
 
     // Relation fields — cast, directors, authors are many-to-many through Person.
     // They need the { set: [...] } Prisma relation syntax, not direct assignment.
@@ -774,6 +779,7 @@ router.post('/bulk-import', requireAdmin, async (req, res, next) => {
         data: {
           mediaType:   'MOVIE',
           title:       finalTitle,
+          normalizedTitle: normalizeTitleForSearch(finalTitle),
           slug,
           releaseYear: m.releaseYear,
           verified:    false, // queues for admin review before showing up publicly

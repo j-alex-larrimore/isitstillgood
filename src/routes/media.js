@@ -4,6 +4,7 @@ const { query } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
+const { normalizeTitleForSearch } = require('../lib/mediaHelpers');
 
 // Clusters a list of `{ seriesName, seriesNumber, authors }`-shaped books
 // into distinct series — an exact `seriesName` match is necessary but not
@@ -177,10 +178,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
         { AND: qWords.map(w => ({ seriesName: { contains: w, mode: 'insensitive' } })) },
       ] : [];
 
+      // Punctuation-insensitive title match — "la confidential" should also
+      // find "L.A. Confidential". A plain `contains` against the raw title
+      // can't do this (the query has no periods but the stored title does),
+      // so this compares against the indexed, punctuation-stripped
+      // normalizedTitle column instead, using the same stripping on the
+      // query itself. Skipped when the normalized query is empty (e.g. a
+      // query that's pure punctuation) since an empty `contains` matches everything.
+      const normalizedQuery = normalizeTitleForSearch(qTrimmed);
+      const normalizedTitleMatch = normalizedQuery
+        ? [{ normalizedTitle: { contains: normalizedQuery, mode: 'insensitive' } }]
+        : [];
+
       textFilter = qScope === 'title' ? {
         OR: [
           { title:      { contains: qTrimmed, mode: 'insensitive' } },
           { seriesName: { contains: qTrimmed, mode: 'insensitive' } },
+          ...normalizedTitleMatch,
           ...wordFallbacks,
         ],
       } : {
@@ -188,6 +202,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
           { title:       { contains: qTrimmed, mode: 'insensitive' } },
           { description: { contains: qTrimmed, mode: 'insensitive' } },
           { seriesName:  { contains: qTrimmed, mode: 'insensitive' } },
+          ...normalizedTitleMatch,
           // Also search via person names in the same query
           { directors: { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
           { cast:      { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
