@@ -166,11 +166,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
     }
 
     // The logged-in user's own ratings — used to show their rating alongside a
-    // selected friend's for comparison (Browse's friend dropdown), and/or to
-    // compute the "your average" summary Browse shows atop a filtered search's
-    // results (searchAvgRating below). Not surfaced per-card outside the
-    // friend-comparison case — see browse.html.
-    if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && hasActiveFilter))) {
+    // selected friend's for comparison (Browse's friend dropdown), and to
+    // compute the "your average" summary Browse shows atop results, whether
+    // that's an average across a filtered search or, with nothing filtered,
+    // their overall average for the current media type (searchAvgRating
+    // below). Cheap regardless — bounded by the user's own review count, not
+    // catalog size. Not surfaced per-card outside the friend-comparison case.
+    if (req.user && (!reviewedByUserId || req.user.id !== reviewedByUserId)) {
       req.myRatings = await buildUserRatingsMap(req.user.id);
     }
 
@@ -979,13 +981,30 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // the FULL matching set (vs. just the current page) varies by which fetch
     // path was taken above (canOptimizeRatingSort vs. full-fetch vs. plain
     // paginated) — a plain id lookup is correct and cheap regardless of path.
+    // With nothing filtered, "your average" instead means your overall average
+    // for the current media type — Movies, TV, Movies & TV combined, Books, or
+    // Video Games, each tracked separately (no type at all, i.e. the untyped
+    // Browse-All page, has no single type to average, so this stays null there).
+    // Restricted to parentId:null rows so a TV show's rolled-up parent entry
+    // (see buildUserRatingsMap) is counted once, never double-counted against
+    // its own raw season entries also present in the same ratings map.
     let searchAvgRating = null;
-    if (hasActiveFilter) {
-      const ratingsMap = req.reviewedByRatings || req.myRatings;
-      if (ratingsMap && Object.keys(ratingsMap).length) {
+    const ratingsMap = req.reviewedByRatings || req.myRatings;
+    if (ratingsMap && Object.keys(ratingsMap).length) {
+      if (hasActiveFilter) {
         const matchingIdRows = await prisma.mediaItem.findMany({ where, select: { id: true } });
         const matched = matchingIdRows.map(r => ratingsMap[r.id]).filter(r => r != null);
         if (matched.length) searchAvgRating = matched.reduce((a, b) => a + b, 0) / matched.length;
+      } else {
+        const typeScope = type === 'SCREEN' ? ['MOVIE', 'TV_SHOW'] : type ? [type] : null;
+        if (typeScope) {
+          const scopedIdRows = await prisma.mediaItem.findMany({
+            where: { id: { in: Object.keys(ratingsMap) }, mediaType: { in: typeScope }, parentId: null },
+            select: { id: true },
+          });
+          const matched = scopedIdRows.map(r => ratingsMap[r.id]).filter(r => r != null);
+          if (matched.length) searchAvgRating = matched.reduce((a, b) => a + b, 0) / matched.length;
+        }
       }
     }
 
