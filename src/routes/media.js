@@ -74,6 +74,34 @@ function buildTagVariants(rawTerm) {
   return [...new Set([rawTerm, lower, titleCase, normalized])];
 }
 
+// Builds a mediaItemId -> rating map for a user's own reviews, rolling TV
+// seasons up to their parent show — reviews are written per season, but
+// browse only ever displays the parent row, so a flat mediaItemId->rating
+// map would never match a show the user rated only by season (confirmed
+// live: a user's rated-but-season-only shows sorted as "unreviewed", and
+// were excluded from their average). Matches the same "series rating if one
+// exists, else average of seasons" convention used by taste-profile in
+// src/routes/users.js.
+async function buildUserRatingsMap(userId, whereExtra = {}) {
+  const reviews = await prisma.review.findMany({
+    where: { userId, ...whereExtra },
+    select: { mediaItemId: true, rating: true },
+  });
+  const map = Object.fromEntries(reviews.map(r => [r.mediaItemId, r.rating]));
+  const seasons = await prisma.mediaItem.findMany({
+    where: { id: { in: reviews.map(r => r.mediaItemId) }, parentId: { not: null } },
+    select: { id: true, parentId: true },
+  });
+  if (!seasons.length) return map;
+  const byParent = {};
+  for (const s of seasons) (byParent[s.parentId] ||= []).push(map[s.id]);
+  for (const [parentId, ratings] of Object.entries(byParent)) {
+    if (map[parentId] != null) continue; // an explicit series-level review wins
+    map[parentId] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+  }
+  return map;
+}
+
 // ─── GET /api/media ───────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res, next) => {
   const { q, type, genre, year, person, page = 1, sort = 'recent' } = req.query;
@@ -126,14 +154,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       if (reviewedByUser) {
         reviewedByUserId = reviewedByUser.id;
-        // Get all media IDs this user has reviewed publicly
-        const theirReviews = await prisma.review.findMany({
-          where: { userId: reviewedByUser.id, visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } },
-          select: { mediaItemId: true, rating: true },
-        });
-        reviewedByIds = theirReviews.map(r => r.mediaItemId);
-        // Store ratings for enriching results later
-        req.reviewedByRatings = Object.fromEntries(theirReviews.map(r => [r.mediaItemId, r.rating]));
+        req.reviewedByRatings = await buildUserRatingsMap(reviewedByUser.id, { visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } });
+        // reviewedByIds still drives the legacy "only their reviewed items"
+        // filter below (search.html) — direct ids only, since andClauses
+        // separately rolls seasons up to parentId for the reviewStatus path.
+        reviewedByIds = Object.keys(req.reviewedByRatings);
       } else {
         // User not found — return empty results rather than ignoring the filter
         return res.json({ items: [], total: 0, page: parseInt(page), pages: 0, reviewedByNotFound: true });
@@ -146,11 +171,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // results (searchAvgRating below). Not surfaced per-card outside the
     // friend-comparison case — see browse.html.
     if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && hasActiveFilter))) {
-      const myReviews = await prisma.review.findMany({
-        where: { userId: req.user.id },
-        select: { mediaItemId: true, rating: true },
-      });
-      req.myRatings = Object.fromEntries(myReviews.map(r => [r.mediaItemId, r.rating]));
+      req.myRatings = await buildUserRatingsMap(req.user.id);
     }
 
     // Person search — look up matching person IDs
