@@ -104,6 +104,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
   const reviewStatus = ['unreviewed', 'reviewed', 'all'].includes(req.query.reviewStatus)
     ? req.query.reviewStatus
     : null;
+  // Whether Browse's controls actually narrow the catalog — a text search (q)
+  // or its genre/tag quick-filter (filter) — as opposed to plain unfiltered
+  // browsing. Powers the "your average" summary (searchAvgRating below).
+  const hasActiveFilter = !!(q && q.trim()) || !!(req.query.filter && req.query.filter.trim());
   const take = 24;
 
   try {
@@ -138,10 +142,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     // The logged-in user's own ratings — used to show their rating alongside a
     // selected friend's for comparison (Browse's friend dropdown), and/or to
-    // compute the "your average" summary Browse shows atop an actual search's
+    // compute the "your average" summary Browse shows atop a filtered search's
     // results (searchAvgRating below). Not surfaced per-card outside the
     // friend-comparison case — see browse.html.
-    if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && q && q.trim()))) {
+    if (req.user && ((reviewedByUserId && req.user.id !== reviewedByUserId) || (!reviewedByUserId && hasActiveFilter))) {
       const myReviews = await prisma.review.findMany({
         where: { userId: req.user.id },
         select: { mediaItemId: true, rating: true },
@@ -926,16 +930,18 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // wrong (often empty) results for any page past the first.
 
     // "Your average" (or a selected friend's average) across every item
-    // actually matching this search — not just the current page — shown at
-    // the top of Browse's results for an actual search. finalItems is the
-    // full matching set at this point (pagination happens after, into
-    // sortedItems), which is what makes this a true search-wide average
-    // rather than just an average of whatever 24 items happen to be on screen.
+    // actually matching this filtered search — not just the current page —
+    // shown atop Browse's results. Uses a dedicated id-only query against the
+    // same `where` rather than finalItems/items, since which of those holds
+    // the FULL matching set (vs. just the current page) varies by which fetch
+    // path was taken above (canOptimizeRatingSort vs. full-fetch vs. plain
+    // paginated) — a plain id lookup is correct and cheap regardless of path.
     let searchAvgRating = null;
-    if (textActive) {
+    if (hasActiveFilter) {
       const ratingsMap = req.reviewedByRatings || req.myRatings;
-      if (ratingsMap) {
-        const matched = finalItems.map(i => ratingsMap[i.id]).filter(r => r != null);
+      if (ratingsMap && Object.keys(ratingsMap).length) {
+        const matchingIdRows = await prisma.mediaItem.findMany({ where, select: { id: true } });
+        const matched = matchingIdRows.map(r => ratingsMap[r.id]).filter(r => r != null);
         if (matched.length) searchAvgRating = matched.reduce((a, b) => a + b, 0) / matched.length;
       }
     }
