@@ -1169,7 +1169,14 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     const seriesLevelWhere = isBookSeries
       ? { mediaItemId: { in: seriesClusterIds }, seasonNumber: 0, visibility: 'PUBLIC' }
       : { mediaItemId: item.id, seasonNumber: null, visibility: 'PUBLIC' };
-    let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC' };
+    // Excludes seasonNumber:0 (series-level review sentinel) even in the
+    // plain/individual default case below — a book that's normally the series
+    // representative can carry a genuine series-level review on this very
+    // row, and without this exclusion, viewing it individually (?book=1)
+    // blended that series review into the book's own avgRating/reviewCount
+    // (confirmed live: Unsouled showed 8.0/2 reviews — its own 7 averaged
+    // with Cradle's series-level 9 — instead of just its own 7/1).
+    let statsWhere = { mediaItemId: item.id, visibility: 'PUBLIC', OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }] };
     let seriesBooks = [];
 
     if (isTvParent && item.seasonEntries?.length) {
