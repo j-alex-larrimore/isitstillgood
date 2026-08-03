@@ -205,6 +205,21 @@ router.get('/', optionalAuth, async (req, res, next) => {
       personFilter = termFilters.length === 1 ? termFilters[0] : { AND: termFilters };
     }
 
+    // Exact-person filter — Browse's actor/director/author autocomplete sends
+    // a specific Person id (picked from /api/media/persons/search) instead of
+    // a name string, sidestepping the substring-match ambiguity `person`
+    // above has (e.g. "Tom Holland" also matching "Tom Hollander").
+    let personIdFilter = undefined;
+    if (req.query.personId) {
+      personIdFilter = {
+        OR: [
+          { directors: { some: { id: req.query.personId } } },
+          { cast:      { some: { id: req.query.personId } } },
+          { authors:   { some: { id: req.query.personId } } },
+        ],
+      };
+    }
+
     // Genre search — check both genres array and title/description
     let genreFilter = undefined;
     if (genre && genre.trim().length > 0) {
@@ -409,6 +424,19 @@ router.get('/', optionalAuth, async (req, res, next) => {
         { genres: { hasSome: filterVariants } },
       ]});
     }
+    // `excludeFilter` — Browse's "Not" box, the negated counterpart of
+    // `filter` above (e.g. Superhero movies that are NOT DC or Marvel).
+    // Comma-separated so multiple terms can each be excluded (OR semantics —
+    // excluding EITHER DC or Marvel, not requiring both to be present).
+    let excludeFilterVariants = [];
+    if (req.query.excludeFilter) {
+      const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
+      excludeFilterVariants = excludeTerms.flatMap(t => buildTagVariants(t));
+      andClauses.push({ NOT: { OR: [
+        { tags:   { hasSome: excludeFilterVariants } },
+        { genres: { hasSome: excludeFilterVariants } },
+      ]}});
+    }
     // NOTE: seriesName-only, no author scoping — same collision class as
     // clusterBookSeries above. Confirmed this param isn't exercised by any
     // live frontend navigation today (browse.html/search.html never link
@@ -418,6 +446,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (req.query.series)   andClauses.push({ seriesName: req.query.series });
     if (textFilter)         andClauses.push(textFilter);
     if (personFilter)       andClauses.push(personFilter);
+    if (personIdFilter)     andClauses.push(personIdFilter);
     if (reviewStatus === 'unreviewed' && reviewedIds.length) andClauses.push({ id: { notIn: reviewedIds } });
     if (reviewStatus === 'reviewed') andClauses.push({ id: { in: reviewedIds.length ? reviewedIds : ['__none__'] } });
     // reviewedBy with no reviewStatus at all (search.html's older "Reviewed by" field,
@@ -469,11 +498,16 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (genreFilter)     seriesWhereClauses.push(genreFilter);
       if (textFilter)      seriesWhereClauses.push(textFilter);
       if (personFilter)    seriesWhereClauses.push(personFilter);
+      if (personIdFilter)  seriesWhereClauses.push(personIdFilter);
       if (req.query.tag)    seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
       if (req.query.filter) seriesWhereClauses.push({ OR: [
         { tags:   { hasSome: filterVariants } },
         { genres: { hasSome: filterVariants } },
       ]});
+      if (req.query.excludeFilter) seriesWhereClauses.push({ NOT: { OR: [
+        { tags:   { hasSome: excludeFilterVariants } },
+        { genres: { hasSome: excludeFilterVariants } },
+      ]}});
 
       allSeriesEntries = await prisma.mediaItem.findMany({
         where: { AND: seriesWhereClauses },
@@ -1064,6 +1098,34 @@ router.get('/', optionalAuth, async (req, res, next) => {
       searchAvgRating,
       searchAvgIsFriend: !!req.reviewedByRatings,
     });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/media/persons/search ─────────────────────────────────────────
+// Autocomplete for Browse's actor/director/author filter — lets a user pick
+// an EXACT Person by id instead of typing a name that substring-matches
+// unrelated people (e.g. "Tom Holland" also matching "Tom Hollander" via a
+// plain `contains` query — the two are only distinguishable by seeing both
+// full names spelled out and choosing one, not by a smarter text match).
+router.get('/persons/search', async (req, res, next) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (q.length < 2) return res.json([]);
+    const persons = await prisma.person.findMany({
+      where: { name: { contains: q, mode: 'insensitive' } },
+      select: {
+        id: true, name: true, slug: true,
+        _count: { select: { directed: true, appeared: true, authored: true } },
+      },
+      orderBy: { name: 'asc' },
+      take: 10,
+    });
+    res.json(persons.map(p => ({
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
+    })));
   } catch (err) { next(err); }
 });
 
