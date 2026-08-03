@@ -1341,6 +1341,15 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         // showed up in the page's own displayed average at all.
         avgRating:    (seriesLevelStats?._count.rating > 0) ? seriesLevelStats._avg.rating : stats._avg.rating,
         reviewCount:  (seriesLevelStats?._count.rating > 0) ? seriesLevelStats._count.rating : stats._count.rating,
+        // The genuine series-level review's own avg/count, exposed separately
+        // from the fields above — item.html's series-children section shows
+        // "Series/Show Rating" (this) alongside "Avg Book/Season Rating"
+        // (computed client-side from seriesBooksData/seasonEntries) side by
+        // side, rather than the single blended value above. Previously these
+        // fields didn't exist on the response at all, so that section always
+        // fell back to only ever displaying the average-across-books value.
+        seriesAvgRating:   (seriesLevelStats?._count.rating > 0) ? seriesLevelStats._avg.rating : null,
+        seriesReviewCount: seriesLevelStats?._count.rating || 0,
         verdicts:     Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
         avgCompletion,
       },
