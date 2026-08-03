@@ -132,10 +132,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
   const reviewStatus = ['unreviewed', 'reviewed', 'all'].includes(req.query.reviewStatus)
     ? req.query.reviewStatus
     : null;
-  // Whether Browse's controls actually narrow the catalog — a text search (q)
-  // or its genre/tag quick-filter (filter) — as opposed to plain unfiltered
-  // browsing. Powers the "your average" summary (searchAvgRating below).
-  const hasActiveFilter = !!(q && q.trim()) || !!(req.query.filter && req.query.filter.trim());
+  // Whether Browse's controls actually narrow the catalog — the main search
+  // box (q, which now also covers genre/tag matching) or the "Not" exclude
+  // box — as opposed to plain unfiltered browsing. Powers the "your average"
+  // summary (searchAvgRating below).
+  const hasActiveFilter = !!(q && q.trim()) || !!(req.query.excludeFilter && req.query.excludeFilter.trim());
   const take = 24;
 
   try {
@@ -206,18 +207,38 @@ router.get('/', optionalAuth, async (req, res, next) => {
     }
 
     // Exact-person filter — Browse's actor/director/author autocomplete sends
-    // a specific Person id (picked from /api/media/persons/search) instead of
-    // a name string, sidestepping the substring-match ambiguity `person`
-    // above has (e.g. "Tom Holland" also matching "Tom Hollander").
+    // one or more specific Person ids (picked from /api/media/persons/search)
+    // instead of name strings, sidestepping the substring-match ambiguity
+    // `person` above has (e.g. "Tom Holland" also matching "Tom Hollander").
+    // Comma-separated for multiple people, AND-combined — the item must
+    // feature every one of them (in any of the three role relations).
     let personIdFilter = undefined;
     if (req.query.personId) {
-      personIdFilter = {
+      const personIds = req.query.personId.split(',').map(s => s.trim()).filter(Boolean);
+      const personIdClauses = personIds.map(id => ({
         OR: [
-          { directors: { some: { id: req.query.personId } } },
-          { cast:      { some: { id: req.query.personId } } },
-          { authors:   { some: { id: req.query.personId } } },
+          { directors: { some: { id } } },
+          { cast:      { some: { id } } },
+          { authors:   { some: { id } } },
         ],
-      };
+      }));
+      personIdFilter = personIdClauses.length === 1 ? personIdClauses[0] : { AND: personIdClauses };
+    }
+
+    // Exact-person EXCLUDE filter — the negated counterpart of personId
+    // above, for Browse's "Not" field (e.g. exclude a specific actor's
+    // titles). Comma-separated, OR-combined for exclusion — matching ANY of
+    // the excluded people is enough to drop an item.
+    let excludePersonIdFilter = undefined;
+    if (req.query.excludePersonId) {
+      const excludeIds = req.query.excludePersonId.split(',').map(s => s.trim()).filter(Boolean);
+      excludePersonIdFilter = { NOT: { OR: excludeIds.map(id => ({
+        OR: [
+          { directors: { some: { id } } },
+          { cast:      { some: { id } } },
+          { authors:   { some: { id } } },
+        ],
+      })) } };
     }
 
     // Genre search — check both genres array and title/description
@@ -226,55 +247,87 @@ router.get('/', optionalAuth, async (req, res, next) => {
       genreFilter = { genres: { has: genre.trim() } };
     }
 
-    // Text search across title, description, series name — or, when
-    // qScope is 'title', just title/seriesName (see comment above).
-    let textFilter = undefined;
-    if (q && q.trim().length > 0) {
-      const qTrimmed = q.trim();
-      // Multi-word queries also match titles/series names where every word
+    // Text search across title, series name, genre/tag, and person names — or,
+    // when qScope is 'title', just title/seriesName (see comment above).
+    // Deliberately excludes description — a spam-stuffed description (e.g. a
+    // self-published book listing dozens of unrelated famous titles/authors
+    // "fans of X will enjoy this") could surface in a search for any of those
+    // names, and Browse has no per-field way to opt back into description
+    // matching the way search.html's title-only toggle did. Genre/tag
+    // matching lives here (not a separate filter param) so Browse's single
+    // search box covers what used to need its own genre/tag quick-filter box.
+    function termClause(term) {
+      // Multi-word terms also match titles/series names where every word
       // appears somewhere, not just as one contiguous phrase — confirmed
       // live: searching "Mario Baseball" found nothing because the only
       // real match, "Mario Superstar Baseball", doesn't contain "mario
       // baseball" as a substring. relevance() below still ranks a
       // contiguous phrase match higher than this word-scatter fallback.
-      const qWords = qTrimmed.split(/\s+/).filter(Boolean);
-      const wordFallbacks = qWords.length > 1 ? [
-        { AND: qWords.map(w => ({ title:      { contains: w, mode: 'insensitive' } })) },
-        { AND: qWords.map(w => ({ seriesName: { contains: w, mode: 'insensitive' } })) },
+      const words = term.split(/\s+/).filter(Boolean);
+      const wordFallbacks = words.length > 1 ? [
+        { AND: words.map(w => ({ title:      { contains: w, mode: 'insensitive' } })) },
+        { AND: words.map(w => ({ seriesName: { contains: w, mode: 'insensitive' } })) },
       ] : [];
 
       // Punctuation-insensitive title match — "la confidential" should also
       // find "L.A. Confidential". A plain `contains` against the raw title
-      // can't do this (the query has no periods but the stored title does),
+      // can't do this (the term has no periods but the stored title does),
       // so this compares against the indexed, punctuation-stripped
       // normalizedTitle column instead, using the same stripping on the
-      // query itself. Skipped when the normalized query is empty (e.g. a
-      // query that's pure punctuation) since an empty `contains` matches everything.
-      const normalizedQuery = normalizeTitleForSearch(qTrimmed);
-      const normalizedTitleMatch = normalizedQuery
-        ? [{ normalizedTitle: { contains: normalizedQuery, mode: 'insensitive' } }]
+      // term itself. Skipped when the normalized term is empty (e.g. a
+      // term that's pure punctuation) since an empty `contains` matches everything.
+      const normalizedTerm = normalizeTitleForSearch(term);
+      const normalizedTitleMatch = normalizedTerm
+        ? [{ normalizedTitle: { contains: normalizedTerm, mode: 'insensitive' } }]
         : [];
 
-      textFilter = qScope === 'title' ? {
+      // Genre/tag match — reuses buildTagVariants' case/spelling normalization
+      // (e.g. "mcu" also matching the stored "MCU" tag). A no-op for terms
+      // that aren't genre/tag names (nothing has hasSome a random title as a
+      // literal tag), so it's safe to always include alongside the text match.
+      const tagGenreMatch = [
+        { tags:   { hasSome: buildTagVariants(term) } },
+        { genres: { hasSome: buildTagVariants(term) } },
+      ];
+
+      return qScope === 'title' ? {
         OR: [
-          { title:      { contains: qTrimmed, mode: 'insensitive' } },
-          { seriesName: { contains: qTrimmed, mode: 'insensitive' } },
+          { title:      { contains: term, mode: 'insensitive' } },
+          { seriesName: { contains: term, mode: 'insensitive' } },
           ...normalizedTitleMatch,
           ...wordFallbacks,
+          ...tagGenreMatch,
         ],
       } : {
         OR: [
-          { title:       { contains: qTrimmed, mode: 'insensitive' } },
-          { description: { contains: qTrimmed, mode: 'insensitive' } },
-          { seriesName:  { contains: qTrimmed, mode: 'insensitive' } },
+          { title:       { contains: term, mode: 'insensitive' } },
+          { seriesName:  { contains: term, mode: 'insensitive' } },
           ...normalizedTitleMatch,
-          // Also search via person names in the same query
-          { directors: { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
-          { cast:      { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
-          { authors:   { some: { name: { contains: qTrimmed, mode: 'insensitive' } } } },
+          // Also search via person names in the same term
+          { directors: { some: { name: { contains: term, mode: 'insensitive' } } } },
+          { cast:      { some: { name: { contains: term, mode: 'insensitive' } } } },
+          { authors:   { some: { name: { contains: term, mode: 'insensitive' } } } },
           ...wordFallbacks,
+          ...tagGenreMatch,
         ],
       };
+    }
+
+    let textFilter = undefined;
+    if (q && q.trim().length > 0) {
+      const qTrimmed = q.trim();
+      // Comma-separated terms are AND-combined (e.g. "Batman, DC" — title/
+      // person/genre/tag match on "Batman" AND on "DC"), letting one box do
+      // what used to need a separate title-search box plus a genre/tag box.
+      // Also tries the whole trimmed string as a single phrase regardless —
+      // 901 real titles contain a literal comma (e.g. "Monsters, Inc."), and
+      // this keeps searching one of those verbatim from silently degrading
+      // into an narrower/wrong AND-of-fragments match.
+      const commaTerms = qTrimmed.split(',').map(t => t.trim()).filter(Boolean);
+      const wholeMatch = termClause(qTrimmed);
+      textFilter = commaTerms.length > 1
+        ? { OR: [wholeMatch, { AND: commaTerms.map(termClause) }] }
+        : wholeMatch;
     }
 
     // Resolve friend IDs for friendsOnly mode, minus any excluded friends
@@ -412,31 +465,25 @@ router.get('/', optionalAuth, async (req, res, next) => {
       tagVariants = buildTagVariants(req.query.tag.trim());
       andClauses.push({ tags: { hasSome: tagVariants } });
     }
-    // `filter` — browse.html's single quick-filter box, matching EITHER tags
-    // OR genres (a user typing "LitRPG" shouldn't need to know which array
-    // it lives in). Kept separate from `genre`/`tag` above, which stay
-    // AND-combined for search.html's dedicated per-field advanced search.
-    let filterVariants = [];
-    if (req.query.filter) {
-      filterVariants = buildTagVariants(req.query.filter.trim());
-      andClauses.push({ OR: [
-        { tags:   { hasSome: filterVariants } },
-        { genres: { hasSome: filterVariants } },
-      ]});
-    }
-    // `excludeFilter` — Browse's "Not" box, the negated counterpart of
-    // `filter` above (e.g. Superhero movies that are NOT DC or Marvel).
-    // Comma-separated so multiple terms can each be excluded (OR semantics —
-    // excluding EITHER DC or Marvel, not requiring both to be present).
+    // `excludeFilter` — Browse's "Not" box, the negated counterpart of the
+    // main search box above: title/seriesName/genre/tag, minus (same as the
+    // include side) description and person names, which the Not field's own
+    // autocomplete never offers as text suggestions anyway — those go through
+    // excludePersonIdFilter below instead. Comma-separated so multiple terms
+    // can each be excluded (OR semantics — excluding EITHER DC or Marvel, not
+    // requiring both to be present on the same item).
     let excludeFilterVariants = [];
     if (req.query.excludeFilter) {
       const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
       excludeFilterVariants = excludeTerms.flatMap(t => buildTagVariants(t));
       andClauses.push({ NOT: { OR: [
-        { tags:   { hasSome: excludeFilterVariants } },
-        { genres: { hasSome: excludeFilterVariants } },
+        { tags:       { hasSome: excludeFilterVariants } },
+        { genres:     { hasSome: excludeFilterVariants } },
+        ...excludeTerms.map(t => ({ title:      { contains: t, mode: 'insensitive' } })),
+        ...excludeTerms.map(t => ({ seriesName: { contains: t, mode: 'insensitive' } })),
       ]}});
     }
+    if (excludePersonIdFilter) andClauses.push(excludePersonIdFilter);
     // NOTE: seriesName-only, no author scoping — same collision class as
     // clusterBookSeries above. Confirmed this param isn't exercised by any
     // live frontend navigation today (browse.html/search.html never link
@@ -499,15 +546,17 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (textFilter)      seriesWhereClauses.push(textFilter);
       if (personFilter)    seriesWhereClauses.push(personFilter);
       if (personIdFilter)  seriesWhereClauses.push(personIdFilter);
+      if (excludePersonIdFilter) seriesWhereClauses.push(excludePersonIdFilter);
       if (req.query.tag)    seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
-      if (req.query.filter) seriesWhereClauses.push({ OR: [
-        { tags:   { hasSome: filterVariants } },
-        { genres: { hasSome: filterVariants } },
-      ]});
-      if (req.query.excludeFilter) seriesWhereClauses.push({ NOT: { OR: [
-        { tags:   { hasSome: excludeFilterVariants } },
-        { genres: { hasSome: excludeFilterVariants } },
-      ]}});
+      if (req.query.excludeFilter) {
+        const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
+        seriesWhereClauses.push({ NOT: { OR: [
+          { tags:       { hasSome: excludeFilterVariants } },
+          { genres:     { hasSome: excludeFilterVariants } },
+          ...excludeTerms.map(t => ({ title:      { contains: t, mode: 'insensitive' } })),
+          ...excludeTerms.map(t => ({ seriesName: { contains: t, mode: 'insensitive' } })),
+        ]}});
+      }
 
       allSeriesEntries = await prisma.mediaItem.findMany({
         where: { AND: seriesWhereClauses },
@@ -1126,6 +1175,53 @@ router.get('/persons/search', async (req, res, next) => {
       slug: p.slug,
       workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
     })));
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/media/search-suggestions ─────────────────────────────────────
+// Unified autocomplete for Browse's search and "Not" boxes — combines
+// matching titles, genres, tags, and people into one list so each kind of
+// term the boxes search (title, genre, tag, actor/director/author) can be
+// picked as an exact suggestion rather than typed as free text. Each
+// suggestion carries a `kind` so the frontend knows how to file it: title/
+// genre/tag become an exact text term (still matched via `contains`/hasSome
+// server-side, but against a known-real value instead of a guess), while
+// person carries an id for the same exact-id filtering persons/search set up.
+router.get('/search-suggestions', async (req, res, next) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (q.length < 2) return res.json([]);
+    const type = req.query.type;
+    const typeWhere = type === 'SCREEN' ? { mediaType: { in: ['MOVIE', 'TV_SHOW'] } }
+      : type ? { mediaType: type } : {};
+    const like = `%${q}%`;
+
+    const [titles, genreRows, tagRows, persons] = await Promise.all([
+      prisma.mediaItem.findMany({
+        where: { verified: true, title: { contains: q, mode: 'insensitive' }, ...typeWhere },
+        select: { title: true, releaseYear: true },
+        orderBy: { title: 'asc' },
+        take: 5,
+      }),
+      prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ORDER BY g LIMIT 5`,
+      prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ORDER BY t LIMIT 5`,
+      prisma.person.findMany({
+        where: { name: { contains: q, mode: 'insensitive' } },
+        select: { id: true, name: true, _count: { select: { directed: true, appeared: true, authored: true } } },
+        orderBy: { name: 'asc' },
+        take: 5,
+      }),
+    ]);
+
+    res.json([
+      ...titles.map(t => ({ kind: 'title', label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''), value: t.title })),
+      ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
+      ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
+      ...persons.map(p => ({
+        kind: 'person', label: p.name, value: p.id,
+        workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
+      })),
+    ]);
   } catch (err) { next(err); }
 });
 
