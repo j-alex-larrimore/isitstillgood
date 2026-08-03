@@ -1196,7 +1196,7 @@ router.get('/search-suggestions', async (req, res, next) => {
       : type ? { mediaType: type } : {};
     const like = `%${q}%`;
 
-    const [titles, genreRows, tagRows, persons] = await Promise.all([
+    const [titles, genreRows, tagRows, personCandidates] = await Promise.all([
       prisma.mediaItem.findMany({
         where: { verified: true, title: { contains: q, mode: 'insensitive' }, ...typeWhere },
         select: { title: true, releaseYear: true },
@@ -1205,13 +1205,29 @@ router.get('/search-suggestions', async (req, res, next) => {
       }),
       prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ORDER BY g LIMIT 5`,
       prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ORDER BY t LIMIT 5`,
+      // A wider net than the final 5 shown — re-ranked by review count below,
+      // so a common-name match with the most-reviewed work (e.g. "damon"
+      // matching Matt Damon over a more obscure namesake) surfaces first
+      // instead of alphabetically.
       prisma.person.findMany({
         where: { name: { contains: q, mode: 'insensitive' } },
         select: { id: true, name: true, _count: { select: { directed: true, appeared: true, authored: true } } },
-        orderBy: { name: 'asc' },
-        take: 5,
+        take: 20,
       }),
     ]);
+
+    const persons = (await Promise.all(personCandidates.map(async p => {
+      const reviewCount = await prisma.review.count({
+        where: { mediaItem: { OR: [
+          { directors: { some: { id: p.id } } },
+          { cast:      { some: { id: p.id } } },
+          { authors:   { some: { id: p.id } } },
+        ] } },
+      });
+      return { ...p, reviewCount };
+    })))
+      .sort((a, b) => b.reviewCount - a.reviewCount)
+      .slice(0, 5);
 
     // Ordered tag, genre, person (actor/director/author), title — title last,
     // since a title suggestion is really just confirming what you already
