@@ -133,11 +133,16 @@ router.get('/', optionalAuth, async (req, res, next) => {
   const reviewStatus = ['unreviewed', 'reviewed', 'all'].includes(req.query.reviewStatus)
     ? req.query.reviewStatus
     : null;
-  // Whether Browse's controls actually narrow the catalog — the main search
-  // box (q, which now also covers genre/tag matching) or the "Not" exclude
-  // box — as opposed to plain unfiltered browsing. Powers the "your average"
-  // summary (searchAvgRating below).
-  const hasActiveFilter = !!(q && q.trim()) || !!(req.query.excludeFilter && req.query.excludeFilter.trim());
+  // Whether Browse's controls actually narrow the catalog — any chip in the
+  // main search box or the "Not" box, whether it's a text term (q/
+  // excludeFilter) or an exact person/title id — as opposed to plain
+  // unfiltered browsing. Powers the "your average" summary (searchAvgRating
+  // below). A person- or title-only selection (no text term at all) still
+  // counts: e.g. picking just "Matt Damon" with nothing else typed.
+  const hasActiveFilter = !!(q && q.trim())
+    || !!(req.query.excludeFilter && req.query.excludeFilter.trim())
+    || !!req.query.personId || !!req.query.excludePersonId
+    || !!req.query.titleId  || !!req.query.excludeTitleId;
   const take = 24;
 
   try {
@@ -240,6 +245,25 @@ router.get('/', optionalAuth, async (req, res, next) => {
           { authors:   { some: { id } } },
         ],
       })) } };
+    }
+
+    // Exact-title filter — a title suggestion from search-suggestions carries
+    // the item's own id rather than its title text, so selecting one filters
+    // to exactly that item. A text term would instead match via `contains`,
+    // which doesn't disambiguate — confirmed live: picking "The Little
+    // Mermaid (1989)" from suggestions still left other same-titled movies
+    // (a remake, sequels) in results when matched as plain text. OR-combined
+    // since picking two specific titles means "either of these", not "an
+    // item that is somehow both".
+    let titleIdFilter = undefined;
+    if (req.query.titleId) {
+      const titleIds = req.query.titleId.split(',').map(s => s.trim()).filter(Boolean);
+      titleIdFilter = { id: { in: titleIds } };
+    }
+    let excludeTitleIdFilter = undefined;
+    if (req.query.excludeTitleId) {
+      const excludeTitleIds = req.query.excludeTitleId.split(',').map(s => s.trim()).filter(Boolean);
+      excludeTitleIdFilter = { id: { notIn: excludeTitleIds } };
     }
 
     // Genre search — check both genres array and title/description
@@ -485,6 +509,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ]}});
     }
     if (excludePersonIdFilter) andClauses.push(excludePersonIdFilter);
+    if (excludeTitleIdFilter)  andClauses.push(excludeTitleIdFilter);
     // NOTE: seriesName-only, no author scoping — same collision class as
     // clusterBookSeries above. Confirmed this param isn't exercised by any
     // live frontend navigation today (browse.html/search.html never link
@@ -495,6 +520,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (textFilter)         andClauses.push(textFilter);
     if (personFilter)       andClauses.push(personFilter);
     if (personIdFilter)     andClauses.push(personIdFilter);
+    if (titleIdFilter)      andClauses.push(titleIdFilter);
     if (reviewStatus === 'unreviewed' && reviewedIds.length) andClauses.push({ id: { notIn: reviewedIds } });
     if (reviewStatus === 'reviewed') andClauses.push({ id: { in: reviewedIds.length ? reviewedIds : ['__none__'] } });
     // reviewedBy with no reviewStatus at all (search.html's older "Reviewed by" field,
@@ -548,6 +574,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (personFilter)    seriesWhereClauses.push(personFilter);
       if (personIdFilter)  seriesWhereClauses.push(personIdFilter);
       if (excludePersonIdFilter) seriesWhereClauses.push(excludePersonIdFilter);
+      if (titleIdFilter)        seriesWhereClauses.push(titleIdFilter);
+      if (excludeTitleIdFilter) seriesWhereClauses.push(excludeTitleIdFilter);
       if (req.query.tag)    seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
       if (req.query.excludeFilter) {
         const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
@@ -1156,12 +1184,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
 // matching titles, genres, tags, and people into one list so each kind of
 // term the boxes search (title, genre, tag, actor/director/author) can be
 // picked as an exact suggestion rather than typed as free text. Each
-// suggestion carries a `kind` so the frontend knows how to file it: title/
-// genre/tag become an exact text term (still matched via `contains`/hasSome
-// server-side, but against a known-real value instead of a guess), while
-// person carries an id, matched exactly via personId/excludePersonId — the
-// only way to tell "Tom Holland" and "Tom Hollander" apart, since a plain
-// name-text match would substring-match both.
+// suggestion carries a `kind` so the frontend knows how to file it: genre/tag
+// become an exact text term (still matched via hasSome server-side, but
+// against a known-real value instead of a guess); title and person both
+// carry an id instead, matched exactly via titleId/personId (and their
+// exclude counterparts) rather than a `contains` text match — the only way
+// to tell "Tom Holland" from "Tom Hollander", or one same-titled movie from
+// another, apart.
 router.get('/search-suggestions', async (req, res, next) => {
   try {
     const q = (req.query.q || '').trim();
@@ -1171,10 +1200,10 @@ router.get('/search-suggestions', async (req, res, next) => {
       : type ? { mediaType: type } : {};
     const like = `%${q}%`;
 
-    const [titles, genreRows, tagRows, personCandidates] = await Promise.all([
+    const [titleCandidates, genreRows, tagRows, personCandidates] = await Promise.all([
       prisma.mediaItem.findMany({
         where: { verified: true, title: { contains: q, mode: 'insensitive' }, ...typeWhere },
-        select: { title: true, releaseYear: true },
+        select: { id: true, title: true, releaseYear: true, _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } } },
         orderBy: { title: 'asc' },
         take: 5,
       }),
@@ -1199,23 +1228,42 @@ router.get('/search-suggestions', async (req, res, next) => {
           { authors:   { some: { id: p.id } } },
         ] } },
       });
-      return { ...p, reviewCount };
+      return {
+        kind: 'person', label: p.name, value: p.id, reviewCount,
+        workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
+      };
     })))
       .sort((a, b) => b.reviewCount - a.reviewCount)
       .slice(0, 5);
 
-    // Ordered tag, genre, person (actor/director/author), title — title last,
-    // since a title suggestion is really just confirming what you already
-    // typed, while the others surface options you might not have known to
-    // type (exact tag/genre spelling, or which of several same-named people).
+    // Titles carry the item's own id, not its title text — so selecting one
+    // filters to exactly that item (via titleId, matched by andClauses as an
+    // `id: {in:[...]}` lookup) rather than a `contains` text match. Confirmed
+    // live: picking "The Little Mermaid (1989)" from suggestions still left
+    // the 2023 remake and other same-titled entries in results when matched
+    // as plain text instead.
+    const titles = titleCandidates.map(t => ({
+      kind: 'title',
+      label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''),
+      value: t.id,
+      reviewCount: t._count.reviews,
+    }));
+
+    // Titles and people are mixed together and ranked by review count — a
+    // heavily-reviewed movie should outrank an obscure same-named person and
+    // vice versa, rather than always showing all people before all titles.
+    // Array.sort is stable, so ties keep this concatenation's order (person
+    // before title) instead of reshuffling arbitrarily.
+    const mixed = [...persons, ...titles].sort((a, b) => b.reviewCount - a.reviewCount);
+
+    // Ordered tag, genre, then the review-count-ranked title/person mix —
+    // tag/genre first since they surface an exact spelling a user might not
+    // have known to type, ahead of confirming a title/person they likely
+    // already typed correctly.
     res.json([
       ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
       ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
-      ...persons.map(p => ({
-        kind: 'person', label: p.name, value: p.id,
-        workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
-      })),
-      ...titles.map(t => ({ kind: 'title', label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''), value: t.title })),
+      ...mixed,
     ]);
   } catch (err) { next(err); }
 });
