@@ -53,10 +53,11 @@ function pickSeriesRepresentative(books) {
 }
 
 // Shared by the `tag` param (tags array only, AND-combined with other active
-// filters — used by search.html's dedicated tag field) and the `filter` param
-// (tags OR genres, used by browse.html's single quick-filter box — a user
-// typing "LitRPG" there shouldn't need to know whether that's stored as a
-// tag or a genre). Case-insensitive matching against a free-text input
+// filters — used by search.html's dedicated tag field), the genre/tag
+// matching folded into the main search box's termClause below (tags OR
+// genres — a user typing "LitRPG" shouldn't need to know whether that's
+// stored as a tag or a genre), and `excludeFilter` (the negated version, for
+// Browse's "Not" box). Case-insensitive matching against a free-text input
 // requires generating the likely stored forms ourselves, since Prisma's
 // array `has`/`hasSome` is exact-string, not case-insensitive.
 const FILTER_TERM_OVERRIDES = {
@@ -206,10 +207,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       personFilter = termFilters.length === 1 ? termFilters[0] : { AND: termFilters };
     }
 
-    // Exact-person filter — Browse's actor/director/author autocomplete sends
-    // one or more specific Person ids (picked from /api/media/persons/search)
-    // instead of name strings, sidestepping the substring-match ambiguity
-    // `person` above has (e.g. "Tom Holland" also matching "Tom Hollander").
+    // Exact-person filter — Browse's smart search sends one or more specific
+    // Person ids (picked from /api/media/search-suggestions) instead of name
+    // strings, sidestepping the substring-match ambiguity `person` above has
+    // (e.g. "Tom Holland" also matching "Tom Hollander").
     // Comma-separated for multiple people, AND-combined — the item must
     // feature every one of them (in any of the three role relations).
     let personIdFilter = undefined;
@@ -1150,34 +1151,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/media/persons/search ─────────────────────────────────────────
-// Autocomplete for Browse's actor/director/author filter — lets a user pick
-// an EXACT Person by id instead of typing a name that substring-matches
-// unrelated people (e.g. "Tom Holland" also matching "Tom Hollander" via a
-// plain `contains` query — the two are only distinguishable by seeing both
-// full names spelled out and choosing one, not by a smarter text match).
-router.get('/persons/search', async (req, res, next) => {
-  try {
-    const q = (req.query.q || '').trim();
-    if (q.length < 2) return res.json([]);
-    const persons = await prisma.person.findMany({
-      where: { name: { contains: q, mode: 'insensitive' } },
-      select: {
-        id: true, name: true, slug: true,
-        _count: { select: { directed: true, appeared: true, authored: true } },
-      },
-      orderBy: { name: 'asc' },
-      take: 10,
-    });
-    res.json(persons.map(p => ({
-      id: p.id,
-      name: p.name,
-      slug: p.slug,
-      workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
-    })));
-  } catch (err) { next(err); }
-});
-
 // ─── GET /api/media/search-suggestions ─────────────────────────────────────
 // Unified autocomplete for Browse's search and "Not" boxes — combines
 // matching titles, genres, tags, and people into one list so each kind of
@@ -1186,7 +1159,9 @@ router.get('/persons/search', async (req, res, next) => {
 // suggestion carries a `kind` so the frontend knows how to file it: title/
 // genre/tag become an exact text term (still matched via `contains`/hasSome
 // server-side, but against a known-real value instead of a guess), while
-// person carries an id for the same exact-id filtering persons/search set up.
+// person carries an id, matched exactly via personId/excludePersonId — the
+// only way to tell "Tom Holland" and "Tom Hollander" apart, since a plain
+// name-text match would substring-match both.
 router.get('/search-suggestions', async (req, res, next) => {
   try {
     const q = (req.query.q || '').trim();
