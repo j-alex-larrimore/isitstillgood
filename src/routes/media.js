@@ -1201,18 +1201,35 @@ router.get('/search-suggestions', async (req, res, next) => {
     const like = `%${q}%`;
 
     const [titleCandidates, genreRows, tagRows, personCandidates] = await Promise.all([
+      // Sorted by review count AT THE DATABASE LEVEL (Prisma's relation-count
+      // orderBy), not fetched alphabetically and re-ranked after — with 311
+      // titles matching "little", the alphabetical-then-re-rank approach
+      // fetched only "3 Men and a Little Lady", "4 Little Girls", "A Little
+      // Bit of Heaven"... before "The Little Mermaid" (which actually has a
+      // review) was ever fetched from the DB at all, so no amount of
+      // re-ranking within that small fetched slice could have surfaced it.
+      // Secondary/tertiary tiebreaks (avg rating, then TMDB rating) are
+      // computed in JS below from the reviews/tmdbRating fetched here,
+      // mirroring the same "most reviews, then avg score, then TMDB rating"
+      // fallback chain the main /api/media search already uses.
       prisma.mediaItem.findMany({
         where: { verified: true, title: { contains: q, mode: 'insensitive' }, ...typeWhere },
-        select: { id: true, title: true, releaseYear: true, _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } } },
-        orderBy: { title: 'asc' },
-        take: 5,
+        select: {
+          id: true, title: true, releaseYear: true, tmdbRating: true,
+          reviews: { where: { visibility: 'PUBLIC' }, select: { rating: true } },
+        },
+        orderBy: [
+          { reviews: { _count: 'desc' } },
+          { tmdbRating: 'desc' },
+        ],
+        take: 30,
       }),
       prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ORDER BY g LIMIT 5`,
       prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ORDER BY t LIMIT 5`,
-      // A wider net than the final 5 shown — re-ranked by review count below,
-      // so a common-name match with the most-reviewed work (e.g. "damon"
-      // matching Matt Damon over a more obscure namesake) surfaces first
-      // instead of alphabetically.
+      // A wider net than what's actually shown — re-ranked by review count
+      // below, so a common-name match with the most-reviewed work (e.g.
+      // "damon" matching Matt Damon over a more obscure namesake) surfaces
+      // first instead of alphabetically.
       prisma.person.findMany({
         where: { name: { contains: q, mode: 'insensitive' } },
         select: { id: true, name: true, _count: { select: { directed: true, appeared: true, authored: true } } },
@@ -1220,7 +1237,7 @@ router.get('/search-suggestions', async (req, res, next) => {
       }),
     ]);
 
-    const persons = (await Promise.all(personCandidates.map(async p => {
+    const persons = await Promise.all(personCandidates.map(async p => {
       const reviewCount = await prisma.review.count({
         where: { mediaItem: { OR: [
           { directors: { some: { id: p.id } } },
@@ -1232,9 +1249,7 @@ router.get('/search-suggestions', async (req, res, next) => {
         kind: 'person', label: p.name, value: p.id, reviewCount,
         workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
       };
-    })))
-      .sort((a, b) => b.reviewCount - a.reviewCount)
-      .slice(0, 5);
+    }));
 
     // Titles carry the item's own id, not its title text — so selecting one
     // filters to exactly that item (via titleId, matched by andClauses as an
@@ -1246,15 +1261,32 @@ router.get('/search-suggestions', async (req, res, next) => {
       kind: 'title',
       label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''),
       value: t.id,
-      reviewCount: t._count.reviews,
+      reviewCount: t.reviews.length,
+      avgRating: t.reviews.length ? t.reviews.reduce((sum, r) => sum + r.rating, 0) / t.reviews.length : null,
+      tmdbRating: t.tmdbRating,
     }));
 
-    // Titles and people are mixed together and ranked by review count — a
-    // heavily-reviewed movie should outrank an obscure same-named person and
-    // vice versa, rather than always showing all people before all titles.
-    // Array.sort is stable, so ties keep this concatenation's order (person
-    // before title) instead of reshuffling arbitrarily.
-    const mixed = [...persons, ...titles].sort((a, b) => b.reviewCount - a.reviewCount);
+    // Titles and people are mixed together and ranked the same way the main
+    // /api/media search already ranks results: most reviews, then average
+    // review score, then TMDB rating — falling back to a stable tiebreak
+    // (this concatenation's order, person before title) once all three are
+    // exhausted, rather than reshuffling arbitrarily. avgRating/tmdbRating
+    // only exist on titles (a person isn't itself rated), so they default to
+    // -1 for people — always below any title's real 1-10 rating, never
+    // affecting person-vs-person comparisons since both sides default equally.
+    function compareSuggestions(a, b) {
+      if (b.reviewCount !== a.reviewCount) return b.reviewCount - a.reviewCount;
+      const aAvg = a.avgRating ?? -1, bAvg = b.avgRating ?? -1;
+      if (bAvg !== aAvg) return bAvg - aAvg;
+      const aTmdb = a.tmdbRating ?? -1, bTmdb = b.tmdbRating ?? -1;
+      if (bTmdb !== aTmdb) return bTmdb - aTmdb;
+      return 0;
+    }
+    // Sliced to the top 10 only after sorting the full widened pool —
+    // slicing each category to 5 beforehand (like the widened fetches above
+    // already avoid) would have reintroduced the exact same "never actually
+    // considered" bug one level up.
+    const mixed = [...persons, ...titles].sort(compareSuggestions).slice(0, 10);
 
     // Ordered tag, genre, then the review-count-ranked title/person mix —
     // tag/genre first since they surface an exact spelling a user might not
