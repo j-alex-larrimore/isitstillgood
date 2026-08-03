@@ -133,16 +133,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
   const reviewStatus = ['unreviewed', 'reviewed', 'all'].includes(req.query.reviewStatus)
     ? req.query.reviewStatus
     : null;
-  // Whether Browse's controls actually narrow the catalog — any chip in the
-  // main search box or the "Not" box, whether it's a text term (q/
-  // excludeFilter) or an exact person/title id — as opposed to plain
-  // unfiltered browsing. Powers the "your average" summary (searchAvgRating
-  // below). A person- or title-only selection (no text term at all) still
-  // counts: e.g. picking just "Matt Damon" with nothing else typed.
+  // Whether Browse's controls actually narrow the catalog — the search box
+  // (q), the Filter box's genre/tag/person chips, or the "Not" box — as
+  // opposed to plain unfiltered browsing. Powers the "your average" summary
+  // (searchAvgRating below). A person-only Filter selection (no text term at
+  // all) still counts: e.g. picking just "Matt Damon" with nothing typed.
   const hasActiveFilter = !!(q && q.trim())
     || !!(req.query.excludeFilter && req.query.excludeFilter.trim())
-    || !!req.query.personId || !!req.query.excludePersonId
-    || !!req.query.titleId  || !!req.query.excludeTitleId;
+    || !!req.query.personId || !!req.query.excludePersonId;
   const take = 24;
 
   try {
@@ -245,25 +243,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
           { authors:   { some: { id } } },
         ],
       })) } };
-    }
-
-    // Exact-title filter — a title suggestion from search-suggestions carries
-    // the item's own id rather than its title text, so selecting one filters
-    // to exactly that item. A text term would instead match via `contains`,
-    // which doesn't disambiguate — confirmed live: picking "The Little
-    // Mermaid (1989)" from suggestions still left other same-titled movies
-    // (a remake, sequels) in results when matched as plain text. OR-combined
-    // since picking two specific titles means "either of these", not "an
-    // item that is somehow both".
-    let titleIdFilter = undefined;
-    if (req.query.titleId) {
-      const titleIds = req.query.titleId.split(',').map(s => s.trim()).filter(Boolean);
-      titleIdFilter = { id: { in: titleIds } };
-    }
-    let excludeTitleIdFilter = undefined;
-    if (req.query.excludeTitleId) {
-      const excludeTitleIds = req.query.excludeTitleId.split(',').map(s => s.trim()).filter(Boolean);
-      excludeTitleIdFilter = { id: { notIn: excludeTitleIds } };
     }
 
     // Genre search — check both genres array and title/description
@@ -509,7 +488,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
       ]}});
     }
     if (excludePersonIdFilter) andClauses.push(excludePersonIdFilter);
-    if (excludeTitleIdFilter)  andClauses.push(excludeTitleIdFilter);
     // NOTE: seriesName-only, no author scoping — same collision class as
     // clusterBookSeries above. Confirmed this param isn't exercised by any
     // live frontend navigation today (browse.html/search.html never link
@@ -520,7 +498,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (textFilter)         andClauses.push(textFilter);
     if (personFilter)       andClauses.push(personFilter);
     if (personIdFilter)     andClauses.push(personIdFilter);
-    if (titleIdFilter)      andClauses.push(titleIdFilter);
     if (reviewStatus === 'unreviewed' && reviewedIds.length) andClauses.push({ id: { notIn: reviewedIds } });
     if (reviewStatus === 'reviewed') andClauses.push({ id: { in: reviewedIds.length ? reviewedIds : ['__none__'] } });
     // reviewedBy with no reviewStatus at all (search.html's older "Reviewed by" field,
@@ -574,8 +551,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (personFilter)    seriesWhereClauses.push(personFilter);
       if (personIdFilter)  seriesWhereClauses.push(personIdFilter);
       if (excludePersonIdFilter) seriesWhereClauses.push(excludePersonIdFilter);
-      if (titleIdFilter)        seriesWhereClauses.push(titleIdFilter);
-      if (excludeTitleIdFilter) seriesWhereClauses.push(excludeTitleIdFilter);
       if (req.query.tag)    seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
       if (req.query.excludeFilter) {
         const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
@@ -1186,44 +1161,20 @@ router.get('/', optionalAuth, async (req, res, next) => {
 // picked as an exact suggestion rather than typed as free text. Each
 // suggestion carries a `kind` so the frontend knows how to file it: genre/tag
 // become an exact text term (still matched via hasSome server-side, but
-// against a known-real value instead of a guess); title and person both
-// carry an id instead, matched exactly via titleId/personId (and their
-// exclude counterparts) rather than a `contains` text match — the only way
-// to tell "Tom Holland" from "Tom Hollander", or one same-titled movie from
-// another, apart.
+// against a known-real value instead of a guess); person carries an id
+// instead, matched exactly via personId/excludePersonId — the only way to
+// tell "Tom Holland" from "Tom Hollander" apart. Deliberately excludes
+// titles — Browse's plain search box already covers title/person text
+// search live as you type, so a title suggestion here would just be
+// re-offering what's already typed rather than adding precision the way a
+// genre/tag spelling or a specific person's id does.
 router.get('/search-suggestions', async (req, res, next) => {
   try {
     const q = (req.query.q || '').trim();
     if (q.length < 2) return res.json([]);
-    const type = req.query.type;
-    const typeWhere = type === 'SCREEN' ? { mediaType: { in: ['MOVIE', 'TV_SHOW'] } }
-      : type ? { mediaType: type } : {};
     const like = `%${q}%`;
 
-    const [titleCandidates, genreRows, tagRows, personCandidates] = await Promise.all([
-      // Sorted by review count AT THE DATABASE LEVEL (Prisma's relation-count
-      // orderBy), not fetched alphabetically and re-ranked after — with 311
-      // titles matching "little", the alphabetical-then-re-rank approach
-      // fetched only "3 Men and a Little Lady", "4 Little Girls", "A Little
-      // Bit of Heaven"... before "The Little Mermaid" (which actually has a
-      // review) was ever fetched from the DB at all, so no amount of
-      // re-ranking within that small fetched slice could have surfaced it.
-      // Secondary/tertiary tiebreaks (avg rating, then TMDB rating) are
-      // computed in JS below from the reviews/tmdbRating fetched here,
-      // mirroring the same "most reviews, then avg score, then TMDB rating"
-      // fallback chain the main /api/media search already uses.
-      prisma.mediaItem.findMany({
-        where: { verified: true, title: { contains: q, mode: 'insensitive' }, ...typeWhere },
-        select: {
-          id: true, title: true, releaseYear: true, tmdbRating: true,
-          reviews: { where: { visibility: 'PUBLIC' }, select: { rating: true } },
-        },
-        orderBy: [
-          { reviews: { _count: 'desc' } },
-          { tmdbRating: 'desc' },
-        ],
-        take: 30,
-      }),
+    const [genreRows, tagRows, personCandidates] = await Promise.all([
       prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ORDER BY g LIMIT 5`,
       prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ORDER BY t LIMIT 5`,
       // A wider net than what's actually shown — re-ranked by review count
@@ -1237,7 +1188,7 @@ router.get('/search-suggestions', async (req, res, next) => {
       }),
     ]);
 
-    const persons = await Promise.all(personCandidates.map(async p => {
+    const persons = (await Promise.all(personCandidates.map(async p => {
       const reviewCount = await prisma.review.count({
         where: { mediaItem: { OR: [
           { directors: { some: { id: p.id } } },
@@ -1249,53 +1200,17 @@ router.get('/search-suggestions', async (req, res, next) => {
         kind: 'person', label: p.name, value: p.id, reviewCount,
         workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
       };
-    }));
+    })))
+      .sort((a, b) => b.reviewCount - a.reviewCount)
+      .slice(0, 5);
 
-    // Titles carry the item's own id, not its title text — so selecting one
-    // filters to exactly that item (via titleId, matched by andClauses as an
-    // `id: {in:[...]}` lookup) rather than a `contains` text match. Confirmed
-    // live: picking "The Little Mermaid (1989)" from suggestions still left
-    // the 2023 remake and other same-titled entries in results when matched
-    // as plain text instead.
-    const titles = titleCandidates.map(t => ({
-      kind: 'title',
-      label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''),
-      value: t.id,
-      reviewCount: t.reviews.length,
-      avgRating: t.reviews.length ? t.reviews.reduce((sum, r) => sum + r.rating, 0) / t.reviews.length : null,
-      tmdbRating: t.tmdbRating,
-    }));
-
-    // Titles and people are mixed together and ranked the same way the main
-    // /api/media search already ranks results: most reviews, then average
-    // review score, then TMDB rating — falling back to a stable tiebreak
-    // (this concatenation's order, person before title) once all three are
-    // exhausted, rather than reshuffling arbitrarily. avgRating/tmdbRating
-    // only exist on titles (a person isn't itself rated), so they default to
-    // -1 for people — always below any title's real 1-10 rating, never
-    // affecting person-vs-person comparisons since both sides default equally.
-    function compareSuggestions(a, b) {
-      if (b.reviewCount !== a.reviewCount) return b.reviewCount - a.reviewCount;
-      const aAvg = a.avgRating ?? -1, bAvg = b.avgRating ?? -1;
-      if (bAvg !== aAvg) return bAvg - aAvg;
-      const aTmdb = a.tmdbRating ?? -1, bTmdb = b.tmdbRating ?? -1;
-      if (bTmdb !== aTmdb) return bTmdb - aTmdb;
-      return 0;
-    }
-    // Sliced to the top 10 only after sorting the full widened pool —
-    // slicing each category to 5 beforehand (like the widened fetches above
-    // already avoid) would have reintroduced the exact same "never actually
-    // considered" bug one level up.
-    const mixed = [...persons, ...titles].sort(compareSuggestions).slice(0, 10);
-
-    // Ordered tag, genre, then the review-count-ranked title/person mix —
-    // tag/genre first since they surface an exact spelling a user might not
-    // have known to type, ahead of confirming a title/person they likely
-    // already typed correctly.
+    // Ordered tag, genre, person (actor/director/author) — tag/genre first
+    // since they surface an exact spelling a user might not have known to
+    // type, ahead of confirming a specific person they likely already typed.
     res.json([
       ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
       ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
-      ...mixed,
+      ...persons,
     ]);
   } catch (err) { next(err); }
 });
