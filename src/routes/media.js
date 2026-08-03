@@ -1213,14 +1213,18 @@ router.get('/search-suggestions', async (req, res, next) => {
       }),
     ]);
 
+    // Ordered tag, genre, person (actor/director/author), title — title last,
+    // since a title suggestion is really just confirming what you already
+    // typed, while the others surface options you might not have known to
+    // type (exact tag/genre spelling, or which of several same-named people).
     res.json([
-      ...titles.map(t => ({ kind: 'title', label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''), value: t.title })),
-      ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
       ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
+      ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
       ...persons.map(p => ({
         kind: 'person', label: p.name, value: p.id,
         workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
       })),
+      ...titles.map(t => ({ kind: 'title', label: t.title + (t.releaseYear ? ` (${t.releaseYear})` : ''), value: t.title })),
     ]);
   } catch (err) { next(err); }
 });
