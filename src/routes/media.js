@@ -463,7 +463,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       tagVariants = buildTagVariants(req.query.tag.trim());
       andClauses.push({ tags: { hasSome: tagVariants } });
     }
-    // `filter` — Browse's Filter box, genre/tag/title chips (kind !== 'person';
+    // `filter` — Browse's Filter box, genre/tag chips (kind !== 'person';
     // person chips instead go through personIdFilter above). Comma-separated,
     // AND-combined per term — an item must match every filter selected (e.g.
     // genre "Action" AND tag "MCU"). Deliberately its own param rather than
@@ -472,21 +472,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // set q non-empty and forced textActive/fullFetchMode below, bypassing
     // the fast canOptimizeRatingSort path even for a plain "Highest Rated"
     // browse — the exact regression this param exists to avoid.
+    // Genre/tag only — no title/seriesName contains. The box is labeled
+    // "Filter: genre, tag, actor, director…", not a text search, and a
+    // title-contains match let picking the "Marvel" tag also pull in
+    // unrelated titles that merely contain the word (The Marvelous Mrs.
+    // Maisel, Underground Marvels) — confirmed live.
     if (req.query.filter) {
       const filterTerms = req.query.filter.split(',').map(t => t.trim()).filter(Boolean);
       andClauses.push(...filterTerms.map(t => ({
         OR: [
-          { tags:       { hasSome: buildTagVariants(t) } },
-          { genres:     { hasSome: buildTagVariants(t) } },
-          { title:      { contains: t, mode: 'insensitive' } },
-          { seriesName: { contains: t, mode: 'insensitive' } },
+          { tags:   { hasSome: buildTagVariants(t) } },
+          { genres: { hasSome: buildTagVariants(t) } },
         ],
       })));
     }
-    // `excludeFilter` — Browse's "Not" box, the negated counterpart of the
-    // main search box above: title/seriesName/genre/tag, minus (same as the
-    // include side) description and person names, which the Not field's own
-    // autocomplete never offers as text suggestions anyway — those go through
+    // `excludeFilter` — Browse's "Not" box, the negated counterpart of
+    // `filter` above: genre/tag only, same reasoning (not title/seriesName —
+    // see the comment on `filter`). Person names go through
     // excludePersonIdFilter below instead. Comma-separated so multiple terms
     // can each be excluded (OR semantics — excluding EITHER DC or Marvel, not
     // requiring both to be present on the same item).
@@ -495,21 +497,18 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
       excludeFilterVariants = excludeTerms.flatMap(t => buildTagVariants(t));
       // Each negated condition below is AND-combined (De Morgan's — excluding
-      // if ANY term matches means keeping only rows that match NONE) and,
-      // for the nullable columns (tags/genres/seriesName), explicitly OR'd
-      // with an is-null check. Confirmed live: `tags` is actually NULL (not
-      // just an empty array) on ~97% of TV_SHOW rows, and Postgres's
-      // three-valued logic means `NOT (NULL somearray && ARRAY[...])`
-      // evaluates to NULL, not TRUE — so a plain `NOT: { OR: [...] }` here
-      // silently dropped nearly every row regardless of what was being
-      // excluded (excludeFilter=Animation on Browse's TV tab returned zero
-      // results for shows that clearly aren't animated). title is a
-      // required column so needs no such guard.
+      // if ANY term matches means keeping only rows that match NONE) and
+      // explicitly OR'd with an is-null check, since tags/genres are
+      // nullable columns. Confirmed live: `tags` is actually NULL (not just
+      // an empty array) on ~97% of TV_SHOW rows, and Postgres's three-valued
+      // logic means `NOT (NULL somearray && ARRAY[...])` evaluates to NULL,
+      // not TRUE — so a plain `NOT: { OR: [...] }` here silently dropped
+      // nearly every row regardless of what was being excluded
+      // (excludeFilter=Animation on Browse's TV tab returned zero results
+      // for shows that clearly aren't animated).
       andClauses.push(
         { OR: [{ tags: { equals: null } }, { NOT: { tags: { hasSome: excludeFilterVariants } } }] },
         { OR: [{ genres: { equals: null } }, { NOT: { genres: { hasSome: excludeFilterVariants } } }] },
-        ...excludeTerms.map(t => ({ NOT: { title: { contains: t, mode: 'insensitive' } } })),
-        ...excludeTerms.map(t => ({ OR: [{ seriesName: null }, { NOT: { seriesName: { contains: t, mode: 'insensitive' } } }] })),
       );
     }
     if (excludePersonIdFilter) andClauses.push(excludePersonIdFilter);
@@ -581,23 +580,18 @@ router.get('/', optionalAuth, async (req, res, next) => {
         const filterTerms = req.query.filter.split(',').map(t => t.trim()).filter(Boolean);
         seriesWhereClauses.push(...filterTerms.map(t => ({
           OR: [
-            { tags:       { hasSome: buildTagVariants(t) } },
-            { genres:     { hasSome: buildTagVariants(t) } },
-            { title:      { contains: t, mode: 'insensitive' } },
-            { seriesName: { contains: t, mode: 'insensitive' } },
+            { tags:   { hasSome: buildTagVariants(t) } },
+            { genres: { hasSome: buildTagVariants(t) } },
           ],
         })));
       }
       if (req.query.excludeFilter) {
-        const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
         // Null-safe De Morgan's expansion — see the main excludeFilter block
         // above for why a plain NOT: { OR: [...] } silently drops rows with
-        // a null tags/genres/seriesName column instead of matching them.
+        // a null tags/genres column instead of matching them.
         seriesWhereClauses.push(
           { OR: [{ tags: { equals: null } }, { NOT: { tags: { hasSome: excludeFilterVariants } } }] },
           { OR: [{ genres: { equals: null } }, { NOT: { genres: { hasSome: excludeFilterVariants } } }] },
-          ...excludeTerms.map(t => ({ NOT: { title: { contains: t, mode: 'insensitive' } } })),
-          ...excludeTerms.map(t => ({ OR: [{ seriesName: null }, { NOT: { seriesName: { contains: t, mode: 'insensitive' } } }] })),
         );
       }
 
