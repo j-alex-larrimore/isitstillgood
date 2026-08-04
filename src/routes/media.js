@@ -1071,10 +1071,20 @@ router.get('/', optionalAuth, async (req, res, next) => {
     let sortedItems = finalItems;
     if (textActive) {
       sortedItems = [...finalItems].sort((a, b) => {
+        const relA = relevance(a), relB = relevance(b);
+        // A perfect title match (tier 5, set only for an exact, full title/
+        // series-name match — see relevance() above) wins outright, ahead of
+        // even reviewedBoost — otherwise searching the exact title of an
+        // unreviewed item got buried under items the user happened to have
+        // reviewed themselves that only matched via a supporting cast
+        // member's surname (e.g. searching "Little" for the movie "Little"
+        // lost to an already-reviewed unrelated movie whose cast included
+        // someone named "Little"). Multiple perfect matches (relA === relB)
+        // still fall through to reviewedBoost/compareSecondary below.
+        if ((relA >= 5 || relB >= 5) && relA !== relB) return relB - relA;
         const boost = reviewedBoost(a, b);
         if (boost !== 0) return boost;
-        const relDiff = relevance(b) - relevance(a);
-        return relDiff !== 0 ? relDiff : compareSecondary(a, b);
+        return relA !== relB ? relB - relA : compareSecondary(a, b);
       });
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
