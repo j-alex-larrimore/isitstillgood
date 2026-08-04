@@ -640,12 +640,18 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const idRows = await prisma.mediaItem.findMany({ where, select: { id: true } });
       const idList = idRows.map(r => r.id);
       total = idList.length;
-      const idRatings = await prisma.review.groupBy({
-        by: ['mediaItemId'],
-        where: { mediaItemId: { in: idList }, visibility: 'PUBLIC', ...friendFilter },
-        _avg: { rating: true },
-      });
-      const idRatingMap = Object.fromEntries(idRatings.map(r => [r.mediaItemId, r._avg.rating]));
+      // Raw SQL with `= ANY($1::text[])` instead of Prisma's `{ in: idList }`
+      // — an unfiltered whole-catalog browse (e.g. Browse All, Highest
+      // Rated, no search/filter) puts ~49k ids in idList, and Prisma's `in`
+      // sends one bind variable per id, blowing past Postgres's 32,767
+      // prepared-statement limit ("too many bind variables", confirmed live
+      // via GET /api/media?sort=rating with no other params). Passing the
+      // array itself as a single bind parameter has no such limit regardless
+      // of catalog size.
+      const idRatings = idList.length === 0 ? [] : (friendsOnly && friendIds.length
+        ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendIds}) GROUP BY "mediaItemId"`
+        : await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' GROUP BY "mediaItemId"`);
+      const idRatingMap = Object.fromEntries(idRatings.map(r => [r.mediaItemId, r.avg]));
       idList.sort((a, b) => {
         // Items the logged-in user has already reviewed float to the top of a
         // filtered search (see hasActiveFilter/req.myRatings above) — ahead of
