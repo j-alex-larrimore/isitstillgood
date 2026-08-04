@@ -139,6 +139,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
   // (searchAvgRating below). A person-only Filter selection (no text term at
   // all) still counts: e.g. picking just "Matt Damon" with nothing typed.
   const hasActiveFilter = !!(q && q.trim())
+    || !!(req.query.filter && req.query.filter.trim())
     || !!(req.query.excludeFilter && req.query.excludeFilter.trim())
     || !!req.query.personId || !!req.query.excludePersonId;
   const take = 24;
@@ -251,15 +252,19 @@ router.get('/', optionalAuth, async (req, res, next) => {
       genreFilter = { genres: { has: genre.trim() } };
     }
 
-    // Text search across title, series name, genre/tag, and person names — or,
-    // when qScope is 'title', just title/seriesName (see comment above).
-    // Deliberately excludes description — a spam-stuffed description (e.g. a
-    // self-published book listing dozens of unrelated famous titles/authors
-    // "fans of X will enjoy this") could surface in a search for any of those
-    // names, and Browse has no per-field way to opt back into description
-    // matching the way search.html's title-only toggle did. Genre/tag
-    // matching lives here (not a separate filter param) so Browse's single
-    // search box covers what used to need its own genre/tag quick-filter box.
+    // Text search across title and series name — or, when qScope is
+    // 'keyword' (search.html's older field only; Browse's plain search box
+    // always sends 'title'), also person names. Deliberately excludes
+    // description — a spam-stuffed description (e.g. a self-published book
+    // listing dozens of unrelated famous titles/authors "fans of X will
+    // enjoy this") could surface in a search for any of those names — and
+    // genre/tag, which lives in the separate `filter`/`excludeFilter` params
+    // instead (Browse's Filter/Not boxes): folding genre/tag into `q` here
+    // meant simply picking a genre from Filter, with no text typed at all,
+    // set q non-empty and forced the expensive full-catalog fetch path below
+    // (fullFetchMode) even for the plain default "Highest Rated" sort —
+    // reintroducing the exact 51-second regression fixed earlier in this
+    // file's history, just via a different trigger.
     function termClause(term) {
       // Multi-word terms also match titles/series names where every word
       // appears somewhere, not just as one contiguous phrase — confirmed
@@ -285,22 +290,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
         ? [{ normalizedTitle: { contains: normalizedTerm, mode: 'insensitive' } }]
         : [];
 
-      // Genre/tag match — reuses buildTagVariants' case/spelling normalization
-      // (e.g. "mcu" also matching the stored "MCU" tag). A no-op for terms
-      // that aren't genre/tag names (nothing has hasSome a random title as a
-      // literal tag), so it's safe to always include alongside the text match.
-      const tagGenreMatch = [
-        { tags:   { hasSome: buildTagVariants(term) } },
-        { genres: { hasSome: buildTagVariants(term) } },
-      ];
-
       return qScope === 'title' ? {
         OR: [
           { title:      { contains: term, mode: 'insensitive' } },
           { seriesName: { contains: term, mode: 'insensitive' } },
           ...normalizedTitleMatch,
           ...wordFallbacks,
-          ...tagGenreMatch,
         ],
       } : {
         OR: [
@@ -312,7 +307,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
           { cast:      { some: { name: { contains: term, mode: 'insensitive' } } } },
           { authors:   { some: { name: { contains: term, mode: 'insensitive' } } } },
           ...wordFallbacks,
-          ...tagGenreMatch,
         ],
       };
     }
@@ -469,6 +463,26 @@ router.get('/', optionalAuth, async (req, res, next) => {
       tagVariants = buildTagVariants(req.query.tag.trim());
       andClauses.push({ tags: { hasSome: tagVariants } });
     }
+    // `filter` — Browse's Filter box, genre/tag/title chips (kind !== 'person';
+    // person chips instead go through personIdFilter above). Comma-separated,
+    // AND-combined per term — an item must match every filter selected (e.g.
+    // genre "Action" AND tag "MCU"). Deliberately its own param rather than
+    // folded into q/textFilter: doing that previously meant just picking a
+    // genre from Filter, with nothing typed in the plain search box, still
+    // set q non-empty and forced textActive/fullFetchMode below, bypassing
+    // the fast canOptimizeRatingSort path even for a plain "Highest Rated"
+    // browse — the exact regression this param exists to avoid.
+    if (req.query.filter) {
+      const filterTerms = req.query.filter.split(',').map(t => t.trim()).filter(Boolean);
+      andClauses.push(...filterTerms.map(t => ({
+        OR: [
+          { tags:       { hasSome: buildTagVariants(t) } },
+          { genres:     { hasSome: buildTagVariants(t) } },
+          { title:      { contains: t, mode: 'insensitive' } },
+          { seriesName: { contains: t, mode: 'insensitive' } },
+        ],
+      })));
+    }
     // `excludeFilter` — Browse's "Not" box, the negated counterpart of the
     // main search box above: title/seriesName/genre/tag, minus (same as the
     // include side) description and person names, which the Not field's own
@@ -552,6 +566,17 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (personIdFilter)  seriesWhereClauses.push(personIdFilter);
       if (excludePersonIdFilter) seriesWhereClauses.push(excludePersonIdFilter);
       if (req.query.tag)    seriesWhereClauses.push({ tags: { hasSome: tagVariants } });
+      if (req.query.filter) {
+        const filterTerms = req.query.filter.split(',').map(t => t.trim()).filter(Boolean);
+        seriesWhereClauses.push(...filterTerms.map(t => ({
+          OR: [
+            { tags:       { hasSome: buildTagVariants(t) } },
+            { genres:     { hasSome: buildTagVariants(t) } },
+            { title:      { contains: t, mode: 'insensitive' } },
+            { seriesName: { contains: t, mode: 'insensitive' } },
+          ],
+        })));
+      }
       if (req.query.excludeFilter) {
         const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
         seriesWhereClauses.push({ NOT: { OR: [
