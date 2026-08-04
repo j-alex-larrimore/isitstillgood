@@ -494,12 +494,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
     if (req.query.excludeFilter) {
       const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
       excludeFilterVariants = excludeTerms.flatMap(t => buildTagVariants(t));
-      andClauses.push({ NOT: { OR: [
-        { tags:       { hasSome: excludeFilterVariants } },
-        { genres:     { hasSome: excludeFilterVariants } },
-        ...excludeTerms.map(t => ({ title:      { contains: t, mode: 'insensitive' } })),
-        ...excludeTerms.map(t => ({ seriesName: { contains: t, mode: 'insensitive' } })),
-      ]}});
+      // Each negated condition below is AND-combined (De Morgan's — excluding
+      // if ANY term matches means keeping only rows that match NONE) and,
+      // for the nullable columns (tags/genres/seriesName), explicitly OR'd
+      // with an is-null check. Confirmed live: `tags` is actually NULL (not
+      // just an empty array) on ~97% of TV_SHOW rows, and Postgres's
+      // three-valued logic means `NOT (NULL somearray && ARRAY[...])`
+      // evaluates to NULL, not TRUE — so a plain `NOT: { OR: [...] }` here
+      // silently dropped nearly every row regardless of what was being
+      // excluded (excludeFilter=Animation on Browse's TV tab returned zero
+      // results for shows that clearly aren't animated). title is a
+      // required column so needs no such guard.
+      andClauses.push(
+        { OR: [{ tags: { equals: null } }, { NOT: { tags: { hasSome: excludeFilterVariants } } }] },
+        { OR: [{ genres: { equals: null } }, { NOT: { genres: { hasSome: excludeFilterVariants } } }] },
+        ...excludeTerms.map(t => ({ NOT: { title: { contains: t, mode: 'insensitive' } } })),
+        ...excludeTerms.map(t => ({ OR: [{ seriesName: null }, { NOT: { seriesName: { contains: t, mode: 'insensitive' } } }] })),
+      );
     }
     if (excludePersonIdFilter) andClauses.push(excludePersonIdFilter);
     // NOTE: seriesName-only, no author scoping — same collision class as
@@ -579,12 +590,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
       }
       if (req.query.excludeFilter) {
         const excludeTerms = req.query.excludeFilter.split(',').map(t => t.trim()).filter(Boolean);
-        seriesWhereClauses.push({ NOT: { OR: [
-          { tags:       { hasSome: excludeFilterVariants } },
-          { genres:     { hasSome: excludeFilterVariants } },
-          ...excludeTerms.map(t => ({ title:      { contains: t, mode: 'insensitive' } })),
-          ...excludeTerms.map(t => ({ seriesName: { contains: t, mode: 'insensitive' } })),
-        ]}});
+        // Null-safe De Morgan's expansion — see the main excludeFilter block
+        // above for why a plain NOT: { OR: [...] } silently drops rows with
+        // a null tags/genres/seriesName column instead of matching them.
+        seriesWhereClauses.push(
+          { OR: [{ tags: { equals: null } }, { NOT: { tags: { hasSome: excludeFilterVariants } } }] },
+          { OR: [{ genres: { equals: null } }, { NOT: { genres: { hasSome: excludeFilterVariants } } }] },
+          ...excludeTerms.map(t => ({ NOT: { title: { contains: t, mode: 'insensitive' } } })),
+          ...excludeTerms.map(t => ({ OR: [{ seriesName: null }, { NOT: { seriesName: { contains: t, mode: 'insensitive' } } }] })),
+        );
       }
 
       allSeriesEntries = await prisma.mediaItem.findMany({
@@ -637,7 +651,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     let items, total;
     if (canOptimizeRatingSort) {
-      const idRows = await prisma.mediaItem.findMany({ where, select: { id: true } });
+      const idRows = await prisma.mediaItem.findMany({ where, select: { id: true, mediaType: true } });
       const idList = idRows.map(r => r.id);
       total = idList.length;
       // Raw SQL with `= ANY($1::text[])` instead of Prisma's `{ in: idList }`
@@ -652,6 +666,41 @@ router.get('/', optionalAuth, async (req, res, next) => {
         ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendIds}) GROUP BY "mediaItemId"`
         : await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' GROUP BY "mediaItemId"`);
       const idRatingMap = Object.fromEntries(idRatings.map(r => [r.mediaItemId, r.avg]));
+
+      // TV reviews are always written per-season (see the data-model note in
+      // CLAUDE.md), never against the parent show's own id — so the direct
+      // lookup above finds virtually nothing for TV_SHOW rows, and "Highest
+      // Rated" degenerated into arbitrary DB order for them (confirmed live:
+      // browsing TV with a Marvel filter showed 4.0/7.0/8.0/9.0/5.0 in that
+      // exact non-sorted order). Roll child-season ratings up to the parent
+      // here, mirroring the same aggregation the display path below already
+      // does for the current page's cards — this just needs to happen before
+      // sorting too, not only after.
+      const tvParentIds = idRows.filter(r => r.mediaType === 'TV_SHOW').map(r => r.id);
+      if (tvParentIds.length) {
+        const seasons = await prisma.mediaItem.findMany({
+          where: { parentId: { in: tvParentIds } },
+          select: { id: true, parentId: true },
+        });
+        const seasonIds = seasons.map(s => s.id);
+        const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
+        if (seasonIds.length) {
+          const seasonRatings = friendsOnly && friendIds.length
+            ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg, COUNT(rating)::int AS cnt FROM "Review" WHERE "mediaItemId" = ANY(${seasonIds}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendIds}) GROUP BY "mediaItemId"`
+            : await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg, COUNT(rating)::int AS cnt FROM "Review" WHERE "mediaItemId" = ANY(${seasonIds}) AND visibility = 'PUBLIC' GROUP BY "mediaItemId"`;
+          const parentAccum = {};
+          for (const r of seasonRatings) {
+            const parentId = seasonToParent[r.mediaItemId];
+            if (!parentId) continue;
+            (parentAccum[parentId] ||= { sum: 0, count: 0 });
+            parentAccum[parentId].sum   += r.avg * r.cnt;
+            parentAccum[parentId].count += r.cnt;
+          }
+          for (const [parentId, acc] of Object.entries(parentAccum)) {
+            if (acc.count > 0) idRatingMap[parentId] = acc.sum / acc.count;
+          }
+        }
+      }
       idList.sort((a, b) => {
         // Items the logged-in user has already reviewed float to the top of a
         // filtered search (see hasActiveFilter/req.myRatings above) — ahead of
