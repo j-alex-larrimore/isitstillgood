@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportTags, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -340,11 +340,19 @@ async function main() {
         }
       }
 
-      const tags = normalizeTags([...globalTags, ...row.tags]);
       // Row-level genres override whatever the lookup returned — lets a
       // caller pin exact genre strings instead of relying on Google Books/
       // TMDB/IGDB's own (often noisy) category text.
       const genres = row.genres.length ? row.genres : (data.genres || []);
+      // Auto-detect Sports + specific-sport tags for movies/TV — TMDB's own
+      // "Sports" genre misses plenty of real sports stories (Varsity Blues,
+      // King Richard, The Legend of Bagger Vance, The Greatest Game Ever
+      // Played all carry none), so this scans title+description by keyword
+      // instead. See detectSportTags in mediaHelpers.js.
+      const sportTags = (row.mediaType === 'MOVIE' || row.mediaType === 'TV_SHOW')
+        ? detectSportTags(genres, data.title, data.description)
+        : [];
+      const tags = normalizeTags([...globalTags, ...row.tags, ...sportTags]);
       // For books specifically, trust the caller's year over the matched
       // edition's metadata — Google Books/Open Library editions are often
       // reprints, and the row's year is usually the true original publication

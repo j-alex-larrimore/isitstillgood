@@ -45,6 +45,47 @@ function normalizeGenres(genres) {
   return [...new Set(result)];
 }
 
+// ─── Sports tag inference (movies/TV) ──────────────────────────────────────
+// TMDB's own "Sports" genre is inconsistently applied — Varsity Blues, King
+// Richard, The Legend of Bagger Vance, and The Greatest Game Ever Played all
+// carry no genre signal at all, just plain Drama/Comedy. Detected instead by
+// scanning title+description for a specific sport by name, which both
+// confirms the item genuinely is a sports story AND identifies which sport —
+// a bare "Sports" genre never says which one. Word-boundary matched so e.g.
+// "golf" doesn't fire on an unrelated word containing it.
+const SPORT_KEYWORDS = {
+  Football:       [/\bfootballs?\b/i, /\bquarterbacks?\b/i, /\bnfl\b/i, /\bsuper bowl\b/i],
+  Basketball:     [/\bbasketballs?\b/i, /\bnba\b/i, /\bslam dunks?\b/i],
+  Baseball:       [/\bbaseballs?\b/i, /\bmajor league(?:s)? baseball\b/i, /\bworld series\b/i, /\blittle league\b/i],
+  Soccer:         [/\bsoccer\b/i, /\bfifa\b/i, /\bworld cup\b/i],
+  Tennis:         [/\btennis\b/i, /\bwimbledon\b/i, /\bgrand slam\b/i],
+  Golf:           [/\bgolfers?\b/i, /\bgolfing\b/i, /\bgolf (?:tournament|course|swing|championship)\b/i, /\bpga\b/i],
+  Boxing:         [/\bboxing\b/i, /\bboxers?\b/i, /\bheavyweight (?:champion|title|bout)\b/i],
+  Wrestling:      [/\bwrestlings?\b/i, /\bwrestlers?\b/i],
+  Hockey:         [/\bhockey\b/i, /\bnhl\b/i, /\bstanley cup\b/i],
+  Swimming:       [/\bswimmers?\b/i, /\bswimming\b/i],
+  Running:        [/\bmarathons?\b/i, /\btrack and field\b/i, /\bmiddle[- ]distance runners?\b/i],
+  Cycling:        [/\bcyclists?\b/i, /\btour de france\b/i],
+  Surfing:        [/\bsurfers?\b/i, /\bsurfing\b/i],
+  Gymnastics:     [/\bgymnasts?\b/i, /\bgymnastics\b/i],
+  'Ski Jumping':  [/\bski jump(?:ing|er)?\b/i],
+  'Martial Arts': [/\bkarate\b/i, /\bkickbox(?:ing|ers?)\b/i, /\bmartial arts\b/i],
+  Racing:         [/\bnascar\b/i, /\bformula (?:one|1)\b/i, /\bstock car racing\b/i],
+};
+
+function detectSportTags(genres, title, description) {
+  const text = `${title || ''} ${description || ''}`;
+  const detected = new Set();
+  if ((genres || []).includes('Sports')) detected.add('Sports');
+  for (const [sport, patterns] of Object.entries(SPORT_KEYWORDS)) {
+    if (patterns.some(p => p.test(text))) {
+      detected.add('Sports');
+      detected.add(sport);
+    }
+  }
+  return [...detected];
+}
+
 // ─── Video game genre normalization ───────────────────────────────────────
 // Unlike Open Library's freeform subject headings, IGDB's genre field is
 // already a small controlled vocabulary (confirmed live: 34 distinct raw
@@ -497,6 +538,7 @@ async function checkSeriesCollision(seriesName, authorNames) {
 module.exports = {
   normalizeTags,
   normalizeGenres,
+  detectSportTags,
   normalizeGameGenres,
   VIDEO_GAME_GENRE_CANON,
   normalizeBookGenres,
