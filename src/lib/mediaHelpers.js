@@ -13,7 +13,7 @@ const TAG_OVERRIDES = {
   'cnn': 'CNN', 'espn': 'ESPN', 'nfl': 'NFL', 'nba': 'NBA',
   'mlb': 'MLB', 'nhl': 'NHL', 'dc': 'DC', 'mcu': 'MCU', 'dceu': 'DCEU',
   'lgbtq': 'LGBTQ', 'lgbtq+': 'LGBTQ+', 'wwii': 'WWII', 'wwi': 'WWI',
-  'uk': 'UK', 'us': 'US',
+  'uk': 'UK', 'us': 'US', 'snl': 'SNL',
 };
 
 function normalizeTags(tags) {
