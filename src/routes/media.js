@@ -645,9 +645,21 @@ router.get('/', optionalAuth, async (req, res, next) => {
 
     let items, total;
     if (canOptimizeRatingSort) {
-      const idRows = await prisma.mediaItem.findMany({ where, select: { id: true, mediaType: true } });
+      const idRows = await prisma.mediaItem.findMany({ where, select: { id: true, mediaType: true, tmdbRating: true, openCriticScore: true } });
       const idList = idRows.map(r => r.id);
       total = idList.length;
+      // External rating per item, normalized to a 0-10 scale — used below as
+      // a tiebreak when two items have the same community rating on this
+      // site (most commonly: both have zero reviews here yet, which is most
+      // of the catalog). openCriticScore is IGDB's 0-100 game rating
+      // (repurposed field, see schema comment); tmdbRating is already 0-10.
+      // No book fallback yet — this app doesn't store an external per-book
+      // rating (Google Books' averageRating/Open Library's ratings.json are
+      // the closest analogs, but neither is fetched/persisted currently).
+      const externalRatingMap = Object.fromEntries(idRows.map(r => [
+        r.id,
+        r.mediaType === 'VIDEO_GAME' ? (r.openCriticScore != null ? r.openCriticScore / 10 : null) : r.tmdbRating,
+      ]));
       // Raw SQL with `= ANY($1::text[])` instead of Prisma's `{ in: idList }`
       // — an unfiltered whole-catalog browse (e.g. Browse All, Highest
       // Rated, no search/filter) puts ~49k ids in idList, and Prisma's `in`
@@ -704,10 +716,19 @@ router.get('/', optionalAuth, async (req, res, next) => {
           if (aReviewed !== bReviewed) return aReviewed ? -1 : 1;
         }
         const ra = idRatingMap[a] ?? null, rb = idRatingMap[b] ?? null;
-        if (ra === null && rb === null) return 0;
-        if (ra === null) return 1; // unrated always last, regardless of direction
-        if (rb === null) return -1;
-        return sort === 'lowest' ? ra - rb : rb - ra;
+        if (ra !== rb) {
+          if (ra === null) return 1; // unrated always last, regardless of direction
+          if (rb === null) return -1;
+          return sort === 'lowest' ? ra - rb : rb - ra;
+        }
+        // Equal community rating on this site (including the common case of
+        // both having zero reviews here) — fall back to the external rating
+        // instead of leaving the tie in arbitrary DB order.
+        const ea = externalRatingMap[a] ?? null, eb = externalRatingMap[b] ?? null;
+        if (ea === null && eb === null) return 0;
+        if (ea === null) return 1;
+        if (eb === null) return -1;
+        return sort === 'lowest' ? ea - eb : eb - ea;
       });
       const pageNum = parseInt(page) - 1;
       const pageIds = idList.slice(pageNum * take, (pageNum + 1) * take);
