@@ -89,6 +89,15 @@ router.post('/', requireAuth, [
     // otherwise leave as null — the field is optional
     const consumed = dateConsumed ? new Date(dateConsumed) : null;
 
+    if (consumed) {
+      if (consumed.getTime() > Date.now()) {
+        return res.status(422).json({ error: 'Date consumed cannot be in the future' });
+      }
+      if (media.releaseYear && consumed.getFullYear() < media.releaseYear) {
+        return res.status(422).json({ error: `Date consumed cannot be before this was released (${media.releaseYear})` });
+      }
+    }
+
     // Use findFirst with explicit where clause — findUnique with a composite key
     // fails when seasonNumber is null because Prisma can't match null in a compound key
     //
