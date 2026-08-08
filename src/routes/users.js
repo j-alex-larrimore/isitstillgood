@@ -343,7 +343,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           select: {
             id: true, title: true, slug: true,
             mediaType: true, releaseYear: true, imageUrl: true,
-            genres: true, parentId: true,
+            genres: true, tags: true, parentId: true,
             directors: { select: { id: true, name: true, slug: true } },
             cast:      { select: { id: true, name: true, slug: true } },
             authors:   { select: { id: true, name: true, slug: true } },
@@ -356,7 +356,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
                 id: true, title: true, slug: true, imageUrl: true, releaseYear: true,
                 cast:      { select: { id: true, name: true, slug: true } },
                 directors: { select: { id: true, name: true, slug: true } },
-                genres:    true,
+                genres:    true, tags: true,
               },
             },
           },
@@ -535,6 +535,34 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       if (byCount.length)  mostReviewedGenreByType[type] = byCount;
     }
 
+    // ── Per-type tag breakdowns — Games, Books, and a merged TV/Movies bucket
+    // (mirroring Browse's own MOVIE+TV_SHOW "Screen" grouping, since a tag
+    // like "Marvel" or "HBO" is just as relevant compared across both).
+    // Favorite/Least Favorite only — no "Most Reviewed" variant was asked for.
+    const TAG_BUCKET = { MOVIE: 'SCREEN', TV_SHOW: 'SCREEN', BOOK: 'BOOK', VIDEO_GAME: 'VIDEO_GAME' };
+    const tagsByBucket = {};
+    const countByBucket = {};
+    for (const entry of processedEntries) {
+      const bucket = TAG_BUCKET[entry.item.mediaType];
+      if (!bucket) continue;
+      countByBucket[bucket] = (countByBucket[bucket] || 0) + 1;
+      if (!tagsByBucket[bucket]) tagsByBucket[bucket] = {};
+      for (const t of (entry.item.tags || [])) {
+        if (!tagsByBucket[bucket][t]) tagsByBucket[bucket][t] = { name: t, ratings: [], items: [] };
+        tagsByBucket[bucket][t].ratings.push(entry.rating);
+        tagsByBucket[bucket][t].items.push(itemSummary(entry.item, entry.rating));
+      }
+    }
+    const favoriteTagByType = {};
+    const leastFavoriteTagByType = {};
+    for (const [bucket, tMap] of Object.entries(tagsByBucket)) {
+      const minCount = threshold(countByBucket[bucket] || 0);
+      const byRating = rankEntries(tMap, minCount, Infinity);
+      const byLeast  = rankEntriesAscending(tMap, minCount, Infinity);
+      if (byRating.length) favoriteTagByType[bucket]     = byRating;
+      if (byLeast.length)  leastFavoriteTagByType[bucket] = byLeast;
+    }
+
     // Overall person thresholds — use total review count / 10
     const totalThreshold = threshold(reviews.length);
 
@@ -574,6 +602,8 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       mostReviewedGenres:    rankByCount(genres,    1, Infinity),
       favoriteGenreByType,
       mostReviewedGenreByType,
+      favoriteTagByType,
+      leastFavoriteTagByType,
       countByType,
     });
   } catch (err) { next(err); }
