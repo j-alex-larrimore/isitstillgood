@@ -76,21 +76,6 @@ app.use(passport.session());
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
-// ── Crawler detection — serve pre-rendered HTML to search engine bots ─────────
-const CRAWLER_RE = /googlebot|bingbot|slurp|duckduckbot|baiduspider|yandexbot|facebot|twitterbot|rogerbot|linkedinbot|embedly|quora|showyoubot|outbrain|pinterest|developers\.google\.com\/\+\/web\/snippet/i;
-
-app.use((req, res, next) => {
-  const ua = req.headers['user-agent'] || '';
-  if (!CRAWLER_RE.test(ua)) return next();
-
-  // Redirect item page requests to the pre-rendered version
-  const slugMatch = req.path.match(/^\/item\.html$/) && req.query.slug;
-  if (slugMatch) {
-    return res.redirect(301, `/render/item/${slugMatch}`);
-  }
-  next();
-});
-
 app.use('/api/auth',    require('./routes/auth'));
 app.use('/api/users',   require('./routes/users'));
 app.use('/api/media',   require('./routes/media'));
