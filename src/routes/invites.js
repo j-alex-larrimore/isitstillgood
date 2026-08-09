@@ -19,18 +19,22 @@ function ok(req, res) {
 }
 
 // ─── POST /api/invites ────────────────────────────────────────────────────────
-// Send an invitation to an email address.
+// Send an invitation, either to a specific email address or as a generic
+// shareable link (no email — used by the "Share via..." button, which hands
+// the link to the OS share sheet for text/Instagram/Facebook/etc.).
 //
-// Two outcomes:
-//   A) Email belongs to an existing user  → send a friend request directly,
+// Three outcomes:
+//   A) No email provided                  → create (or reuse) a generic,
+//      unaddressed InviteToken and just return its link — no email sent.
+//   B) Email belongs to an existing user  → send a friend request directly,
 //      no email needed (but we still notify them via the notification system).
-//   B) Email is new                       → create an InviteToken, send the
+//   C) Email is new                       → create an InviteToken, send the
 //      invite email with a personalised join link.
 //
-// Body: { email, customMessage? }
+// Body: { email?, customMessage? }
 router.post('/', requireAuth, [
-  // Validate the email is a real email format
-  body('email').isEmail().normalizeEmail(),
+  // Email is optional — omitting it requests a generic shareable link instead
+  body('email').optional({ checkFalsy: true }).isEmail().normalizeEmail(),
   // Custom message is optional, max 500 chars to keep emails reasonable
   body('customMessage').optional().trim().isLength({ max: 500 }),
 ], async (req, res, next) => {
@@ -39,12 +43,28 @@ router.post('/', requireAuth, [
   const { email, customMessage } = req.body;
 
   // Prevent users from inviting themselves
-  if (email.toLowerCase() === req.user.email.toLowerCase()) {
+  if (email && email.toLowerCase() === req.user.email.toLowerCase()) {
     return res.status(400).json({ error: 'You cannot invite yourself' });
   }
 
   try {
-    // ── Path A: Check if this email belongs to an existing user ──────────────
+    // ── Path A: No email — generic link for sharing directly ─────────────────
+    if (!email) {
+      // Reuse an existing unclaimed, unexpired generic link rather than
+      // minting a new token every time the share button is clicked
+      let invite = await prisma.inviteToken.findFirst({
+        where: { inviterId: req.user.id, email: null, claimed: false, expiresAt: { gt: new Date() } },
+      });
+      if (!invite) {
+        invite = await prisma.inviteToken.create({
+          data: { inviterId: req.user.id, email: null, expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
+        });
+      }
+      const inviteLink = `${process.env.CLIENT_URL || 'https://www.isitstillgood.com'}/join.html?token=${invite.token}`;
+      return res.json({ outcome: 'link_generated', inviteLink });
+    }
+
+    // ── Path B: Check if this email belongs to an existing user ──────────────
     const existingUser = await prisma.user.findUnique({
       where: { email: email.toLowerCase() },
       select: { id: true, username: true, displayName: true },
@@ -101,7 +121,7 @@ router.post('/', requireAuth, [
       });
     }
 
-    // ── Path B: New email — create an invite token and send the email ────────
+    // ── Path C: New email — create an invite token and send the email ────────
 
     // Check if this email already has an unexpired, unclaimed invite from this user
     const existingInvite = await prisma.inviteToken.findFirst({

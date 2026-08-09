@@ -304,8 +304,10 @@ model InviteToken {
   inviterId   String
   inviter     User     @relation(fields: [inviterId], references: [id], onDelete: Cascade)
   
-  // The email address this invite was sent to
-  email       String
+  // The email address this invite was sent to — null for a generic link
+  // shared directly via text/Instagram/Facebook/etc. rather than emailed to
+  // a specific address (see the "Share via..." button on friends.html)
+  email       String?
   
   // Unique token embedded in the invite link — expires after 7 days
   token       String   @unique @default(cuid())
