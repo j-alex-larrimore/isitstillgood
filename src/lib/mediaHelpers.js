@@ -18,7 +18,7 @@ const TAG_OVERRIDES = {
 
 function normalizeTags(tags) {
   if (!Array.isArray(tags)) return tags;
-  return tags.map(t => {
+  const normalized = tags.map(t => {
     const trimmed = t.trim();
     const lower   = trimmed.toLowerCase();
     if (TAG_OVERRIDES[lower]) return TAG_OVERRIDES[lower];
@@ -28,6 +28,12 @@ function normalizeTags(tags) {
       return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
     }).join(' ');
   });
+  // Dedupe post-normalization — a caller-supplied tag and an auto-detected
+  // one (e.g. bulk-import.js's sport-genre detection alongside an explicit
+  // --tags flag) can independently normalize to the same string. Confirmed
+  // live: "Sports"/"Football" landing twice each on School Ties, Rudy, and
+  // All the Right Moves.
+  return [...new Set(normalized)];
 }
 
 function normalizeGenres(genres) {
@@ -45,7 +51,7 @@ function normalizeGenres(genres) {
   return [...new Set(result)];
 }
 
-// ─── Sports tag inference (movies/TV) ──────────────────────────────────────
+// ─── Sports genre inference (movies/TV) ────────────────────────────────────
 // TMDB's own "Sports" genre is inconsistently applied — Varsity Blues, King
 // Richard, The Legend of Bagger Vance, and The Greatest Game Ever Played all
 // carry no genre signal at all, just plain Drama/Comedy. Detected instead by
@@ -53,6 +59,8 @@ function normalizeGenres(genres) {
 // confirms the item genuinely is a sports story AND identifies which sport —
 // a bare "Sports" genre never says which one. Word-boundary matched so e.g.
 // "golf" doesn't fire on an unrelated word containing it.
+// Sports/Football/etc. are genres on this site (same tier as "Schools" below),
+// not freeform tags — merged into the genres array by callers, not tags.
 const SPORT_KEYWORDS = {
   Football:       [/\bfootballs?\b/i, /\bquarterbacks?\b/i, /\bnfl\b/i, /\bsuper bowl\b/i],
   Basketball:     [/\bbasketballs?\b/i, /\bnba\b/i, /\bslam dunks?\b/i],
@@ -73,7 +81,7 @@ const SPORT_KEYWORDS = {
   Racing:         [/\bnascar\b/i, /\bformula (?:one|1)\b/i, /\bstock car racing\b/i],
 };
 
-function detectSportTags(genres, title, description) {
+function detectSportGenres(genres, title, description) {
   const text = `${title || ''} ${description || ''}`;
   const detected = new Set();
   if ((genres || []).includes('Sports')) detected.add('Sports');
@@ -538,7 +546,7 @@ async function checkSeriesCollision(seriesName, authorNames) {
 module.exports = {
   normalizeTags,
   normalizeGenres,
-  detectSportTags,
+  detectSportGenres,
   normalizeGameGenres,
   VIDEO_GAME_GENRE_CANON,
   normalizeBookGenres,

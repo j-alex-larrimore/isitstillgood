@@ -28,9 +28,9 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportTags, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportGenres, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 const {
-  searchTmdb, getTmdbDetail,
+  searchTmdb, getTmdbDetail, getMovieKeywords, getTvKeywords,
   searchGoogleBooks, getGoogleBooksDetail,
   searchOpenLibrary, getOpenLibraryDetail,
   searchIgdb,
@@ -343,16 +343,33 @@ async function main() {
       // Row-level genres override whatever the lookup returned — lets a
       // caller pin exact genre strings instead of relying on Google Books/
       // TMDB/IGDB's own (often noisy) category text.
-      const genres = row.genres.length ? row.genres : (data.genres || []);
-      // Auto-detect Sports + specific-sport tags for movies/TV — TMDB's own
-      // "Sports" genre misses plenty of real sports stories (Varsity Blues,
-      // King Richard, The Legend of Bagger Vance, The Greatest Game Ever
-      // Played all carry none), so this scans title+description by keyword
-      // instead. See detectSportTags in mediaHelpers.js.
-      const sportTags = (row.mediaType === 'MOVIE' || row.mediaType === 'TV_SHOW')
-        ? detectSportTags(genres, data.title, data.description)
-        : [];
-      const tags = normalizeTags([...globalTags, ...row.tags, ...sportTags]);
+      let genres = row.genres.length ? row.genres : (data.genres || []);
+      // Auto-detect Sports + setting genres (Schools/Police/Legal/Courtroom/
+      // Medical) for movies/TV — these are genuine genres on this site, same
+      // as everywhere else they're used (books, TV's weekly sync), not
+      // freeform tags. TMDB's own genre list misses "Sports" entirely
+      // (Varsity Blues, King Richard, The Legend of Bagger Vance, The
+      // Greatest Game Ever Played all carry none) and doesn't expose setting
+      // as a genre at all — TMDB keyword data is the only per-title signal
+      // for the latter, fetched here the same way TV's weekly sync already
+      // does (see detectSportGenres/settingGenresFor in mediaHelpers.js).
+      if (row.mediaType === 'MOVIE' || row.mediaType === 'TV_SHOW') {
+        const sportGenres = detectSportGenres(genres, data.title, data.description);
+        let settingGenres = [];
+        if (data.tmdbId) {
+          try {
+            const keywords = row.mediaType === 'TV_SHOW'
+              ? await getTvKeywords(data.tmdbId)
+              : await getMovieKeywords(data.tmdbId);
+            settingGenres = settingGenresFor(keywords);
+          } catch (e) {
+            // Keyword lookup is best-effort — a TMDB hiccup here shouldn't fail the whole import
+            console.log(`  (keyword lookup failed for "${data.title}": ${e.message})`);
+          }
+        }
+        genres = normalizeGenres([...genres, ...sportGenres, ...settingGenres]);
+      }
+      const tags = normalizeTags([...globalTags, ...row.tags]);
       // For books specifically, trust the caller's year over the matched
       // edition's metadata — Google Books/Open Library editions are often
       // reprints, and the row's year is usually the true original publication
