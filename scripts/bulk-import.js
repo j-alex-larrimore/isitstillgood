@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportGenres, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportGenres, detectStreamingTags, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail, getMovieKeywords, getTvKeywords,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -199,6 +199,8 @@ async function lookupMovieOrTv(row) {
     cast:        detail.cast || [],
     seasons:     detail.seasons || null,
     tmdbRating:  detail.tmdbRating || null,
+    networks:            detail.networks || [],
+    productionCompanies: detail.productionCompanies || [],
   };
 }
 
@@ -369,7 +371,13 @@ async function main() {
         }
         genres = normalizeGenres([...genres, ...sportGenres, ...settingGenres]);
       }
-      const tags = normalizeTags([...globalTags, ...row.tags]);
+      // Auto-detect Apple TV/Netflix/Amazon as tags (a franchise-style
+      // freeform label, not a classification — see detectStreamingTags in
+      // mediaHelpers.js) from TMDB's own networks/production_companies data.
+      const streamingTags = (row.mediaType === 'MOVIE' || row.mediaType === 'TV_SHOW')
+        ? detectStreamingTags(data.networks, data.productionCompanies)
+        : [];
+      const tags = normalizeTags([...globalTags, ...row.tags, ...streamingTags]);
       // For books specifically, trust the caller's year over the matched
       // edition's metadata — Google Books/Open Library editions are often
       // reprints, and the row's year is usually the true original publication

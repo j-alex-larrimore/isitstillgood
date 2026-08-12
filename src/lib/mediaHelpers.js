@@ -94,6 +94,32 @@ function detectSportGenres(genres, title, description) {
   return [...detected];
 }
 
+// ─── Streaming-service tag inference (movies/TV) ───────────────────────────
+// Unlike Sports/Schools above, a title's originating streaming platform is a
+// franchise-style freeform label, not a classification — so it's a tag,
+// matching the existing convention (Apple TV/Netflix/Amazon already used as
+// tags on manually-added rows). Detected from TMDB's own `networks` (TV —
+// the show's originating broadcaster/platform) and `production_companies`
+// (movies — Netflix/Apple/Amazon list themselves as a production company on
+// their own originals), not watch-provider availability, which would also
+// catch titles merely licensed for streaming there rather than made for it.
+const STREAMING_TAG_SOURCES = {
+  'Apple TV': [/\bapple tv\+?\b/i, /\bapple studios\b/i, /\bapple original films\b/i],
+  Netflix:    [/\bnetflix\b/i],
+  Amazon:     [/\bamazon studios\b/i, /\bamazon mgm studios\b/i, /\bprime video\b/i, /\bamazon content services\b/i],
+};
+
+function detectStreamingTags(networks, productionCompanies) {
+  const names = [...(networks || []), ...(productionCompanies || [])];
+  const detected = new Set();
+  for (const name of names) {
+    for (const [tag, patterns] of Object.entries(STREAMING_TAG_SOURCES)) {
+      if (patterns.some(p => p.test(name))) detected.add(tag);
+    }
+  }
+  return [...detected];
+}
+
 // ─── Video game genre normalization ───────────────────────────────────────
 // Unlike Open Library's freeform subject headings, IGDB's genre field is
 // already a small controlled vocabulary (confirmed live: 34 distinct raw
@@ -547,6 +573,7 @@ module.exports = {
   normalizeTags,
   normalizeGenres,
   detectSportGenres,
+  detectStreamingTags,
   normalizeGameGenres,
   VIDEO_GAME_GENRE_CANON,
   normalizeBookGenres,

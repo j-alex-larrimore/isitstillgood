@@ -144,6 +144,8 @@ async function getTmdbDetail(id, type = 'movie', token = process.env.TMDB_READ_A
     seasons:     data.number_of_seasons || null,
     tmdbRating:  data.vote_average || null,
     runtime:     data.runtime || null, // movies only — used by sync-new-releases.js to filter out specials/shorts
+    networks:            (data.networks || []).map(n => n.name), // TV only — the show's originating platform, not just where it's licensed to stream
+    productionCompanies: (data.production_companies || []).map(c => c.name), // movies only
   };
 }
 

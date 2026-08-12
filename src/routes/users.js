@@ -539,13 +539,16 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // (mirroring Browse's own MOVIE+TV_SHOW "Screen" grouping, since a tag
     // like "Marvel" or "HBO" is just as relevant compared across both).
     // Favorite/Least Favorite only — no "Most Reviewed" variant was asked for.
+    // Tags use a flat minimum count (not the 10%-of-total dynamic threshold()
+    // used for genres) — tags are narrower categories than genres, so the
+    // percentage-based bar excluded tags with real sample sizes (e.g. MCU at
+    // 53 reviews out of 594 total didn't clear a 59-review bar).
+    const TAG_MIN_COUNT = 10;
     const TAG_BUCKET = { MOVIE: 'SCREEN', TV_SHOW: 'SCREEN', BOOK: 'BOOK', VIDEO_GAME: 'VIDEO_GAME' };
     const tagsByBucket = {};
-    const countByBucket = {};
     for (const entry of processedEntries) {
       const bucket = TAG_BUCKET[entry.item.mediaType];
       if (!bucket) continue;
-      countByBucket[bucket] = (countByBucket[bucket] || 0) + 1;
       if (!tagsByBucket[bucket]) tagsByBucket[bucket] = {};
       for (const t of (entry.item.tags || [])) {
         if (!tagsByBucket[bucket][t]) tagsByBucket[bucket][t] = { name: t, ratings: [], items: [] };
@@ -556,9 +559,8 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     const favoriteTagByType = {};
     const leastFavoriteTagByType = {};
     for (const [bucket, tMap] of Object.entries(tagsByBucket)) {
-      const minCount = threshold(countByBucket[bucket] || 0);
-      const byRating = rankEntries(tMap, minCount, Infinity);
-      const byLeast  = rankEntriesAscending(tMap, minCount, Infinity);
+      const byRating = rankEntries(tMap, TAG_MIN_COUNT, Infinity);
+      const byLeast  = rankEntriesAscending(tMap, TAG_MIN_COUNT, Infinity);
       if (byRating.length) favoriteTagByType[bucket]     = byRating;
       if (byLeast.length)  leastFavoriteTagByType[bucket] = byLeast;
     }
