@@ -1276,10 +1276,18 @@ router.get('/search-suggestions', async (req, res, next) => {
     };
     // Drop candidates with zero relevant-role works entirely, rather than
     // just deprioritizing them — an actor with no authored books shouldn't
-    // appear at all in a Books search, even ranked last.
-    const scopedCandidates = (type === 'BOOK' || type === 'MOVIE' || type === 'TV_SHOW')
-      ? personCandidates.filter(p => relevantRoleCount(p) > 0)
-      : personCandidates;
+    // appear at all in a Books search, even ranked last. Games get no person
+    // candidates at all — Person here only ever means director/cast/author,
+    // none of which this site models for VIDEO_GAME, so every match would be
+    // an actor/author irrelevant to games (confirmed live: browsing Games
+    // and typing a common name surfaced actors/writers with nothing to do
+    // with any game). The earlier BOOK/MOVIE/TV_SHOW-only check silently
+    // fell through to "show everyone" for games instead of "show no one".
+    const scopedCandidates = type === 'VIDEO_GAME'
+      ? []
+      : (type === 'BOOK' || type === 'MOVIE' || type === 'TV_SHOW')
+        ? personCandidates.filter(p => relevantRoleCount(p) > 0)
+        : personCandidates;
 
     const persons = (await Promise.all(scopedCandidates.map(async p => {
       const roleClause = type === 'BOOK'
