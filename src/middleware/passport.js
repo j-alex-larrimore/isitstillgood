@@ -69,7 +69,10 @@ passport.use(new GoogleStrategy(
         if (user.canceledAt) return done(null, false, { message: 'This account has been canceled' });
         user = await prisma.user.update({
           where: { email },
-          data: { googleId, googleEmail: email, avatarUrl: user.avatarUrl || avatar },
+          // Google itself just proved ownership of this address, so an
+          // existing-but-unverified local account gets verified here too —
+          // no reason to make them click a separate email link as well.
+          data: { googleId, googleEmail: email, avatarUrl: user.avatarUrl || avatar, isVerified: true },
         });
         return done(null, user);
       }

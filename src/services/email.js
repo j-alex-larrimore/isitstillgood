@@ -10,6 +10,12 @@
 // ─── Configuration ───────────────────────────────────────────────────────────
 const FROM_ADDRESS = 'noreply@isitstillgood.com';
 const SITE_URL = process.env.CLIENT_URL || 'https://isitstillgood.com';
+// Verification links must hit the API directly (GET /api/auth/verify-email
+// does the DB work itself, then redirects to SITE_URL) — not an env var
+// Railway has configured, so this mirrors the frontend's own hardcoded API
+// base (see the `const API` in browse.html/index.html) rather than adding
+// a new required var for a URL that's already fixed in practice.
+const API_URL = process.env.API_URL || 'https://api.isitstillgood.com/api';
 
 // ─── Send via Resend API ──────────────────────────────────────────────────────
 // We call the Resend REST API directly with fetch() rather than their SDK
@@ -174,4 +180,148 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-module.exports = { sendEmail, sendInviteEmail };
+// ─── Shared transactional-email shell ─────────────────────────────────────
+// Same visual language as the invite email above — pulled out here since the
+// verification/email-change notices below need the same header/footer/CTA
+// chrome three separate times.
+function buildEmailHtml({ title, bodyHtml, ctaLabel, ctaUrl, footerNote }) {
+  const ctaHtml = ctaUrl ? `
+              <table cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+                <tr>
+                  <td style="background:#C8832A;border-radius:8px;padding:0;">
+                    <a href="${ctaUrl}"
+                       style="display:inline-block;padding:14px 28px;color:#1C1710;font-family:Georgia,serif;font-weight:bold;font-size:16px;text-decoration:none;">
+                      ${escapeHtml(ctaLabel)} →
+                    </a>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:0 0 8px;font-size:12px;color:#7A6E5A;">
+                Or copy this link into your browser:
+              </p>
+              <p style="margin:0;font-size:11px;color:#C8832A;word-break:break-all;font-family:monospace;">
+                ${ctaUrl}
+              </p>` : '';
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(title)}</title>
+</head>
+<body style="margin:0;padding:0;background:#F5EFE0;font-family:Georgia,serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F5EFE0;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFCF5;border:1px solid #D9CEBC;border-radius:12px;overflow:hidden;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:#1C1710;padding:24px 32px;border-bottom:3px solid #C8832A;">
+              <p style="margin:0;font-family:Georgia,serif;font-size:22px;font-weight:bold;color:#F5EFE0;">
+                Is It <em style="color:#E8A84A;">(Still)</em> Good
+              </p>
+              <p style="margin:4px 0 0;font-family:monospace;font-size:11px;letter-spacing:0.1em;color:rgba(245,239,224,0.5);text-transform:uppercase;">
+                Is it worth your time?
+              </p>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:32px;">
+              ${bodyHtml}
+              ${ctaHtml}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:16px 32px;border-top:1px solid #D9CEBC;background:#FAF7F2;">
+              <p style="margin:0;font-size:11px;color:#7A6E5A;font-family:monospace;letter-spacing:0.05em;">
+                ${footerNote || 'IsItStillGood.com'}
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+// ─── Registration verification email ──────────────────────────────────────
+// Sent right after POST /api/auth/register, before the account can log in.
+// Clicking flips isVerified — see GET /api/auth/verify-email.
+async function sendVerificationEmail({ to, displayName, token }) {
+  const verifyUrl = `${API_URL}/auth/verify-email?token=${token}`;
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:18px;color:#1C1710;">
+      Welcome, <strong>${escapeHtml(displayName)}</strong> —
+    </p>
+    <p style="margin:0 0 24px;font-size:14px;color:#3D3526;line-height:1.6;">
+      Confirm your email address to activate your account and start rating what you've watched, read, and played.
+    </p>`;
+  const html = buildEmailHtml({
+    title: 'Confirm your email — Is It (Still) Good',
+    bodyHtml,
+    ctaLabel: 'Confirm Email',
+    ctaUrl: verifyUrl,
+    footerNote: "This link expires in 24 hours. If you didn't create this account, you can ignore this email.",
+  });
+  return sendEmail({ to, subject: 'Confirm your email to activate your account', html });
+}
+
+// ─── Email-change confirmation — sent to the NEW address ──────────────────
+// Clicking swaps User.email to the new address — see GET /api/auth/verify-email.
+async function sendEmailChangeConfirmation({ to, displayName, token }) {
+  const verifyUrl = `${API_URL}/auth/verify-email?token=${token}`;
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:18px;color:#1C1710;">
+      Hi <strong>${escapeHtml(displayName)}</strong> —
+    </p>
+    <p style="margin:0 0 24px;font-size:14px;color:#3D3526;line-height:1.6;">
+      Someone requested to change the email address on an Is It (Still) Good account to this one. Confirm below to make the switch.
+    </p>`;
+  const html = buildEmailHtml({
+    title: 'Confirm your new email — Is It (Still) Good',
+    bodyHtml,
+    ctaLabel: 'Confirm New Email',
+    ctaUrl: verifyUrl,
+    footerNote: "This link expires in 24 hours. If you didn't request this, ignore this email — your address on file stays unchanged.",
+  });
+  return sendEmail({ to, subject: 'Confirm your new email address', html });
+}
+
+// ─── Email-change heads-up — sent to the OLD address, no action needed ────
+// Pure notice, no token/link — lets the real owner notice and react if a
+// stolen session tried to move the account to an address they don't control.
+async function sendEmailChangeNotice({ to, displayName, newEmail }) {
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:18px;color:#1C1710;">
+      Hi <strong>${escapeHtml(displayName)}</strong> —
+    </p>
+    <p style="margin:0 0 16px;font-size:14px;color:#3D3526;line-height:1.6;">
+      A request was made to change the email address on your Is It (Still) Good account to
+      <strong>${escapeHtml(newEmail)}</strong>. Nothing has changed yet — the switch only takes
+      effect once that address confirms it.
+    </p>
+    <p style="margin:0;font-size:14px;color:#3D3526;line-height:1.6;">
+      If this wasn't you, change your password right away.
+    </p>`;
+  const html = buildEmailHtml({
+    title: 'Email change requested — Is It (Still) Good',
+    bodyHtml,
+    footerNote: "This is a notice only — no action is needed if you made this request.",
+  });
+  return sendEmail({ to, subject: 'Email change requested on your account', html });
+}
+
+module.exports = {
+  sendEmail, sendInviteEmail,
+  sendVerificationEmail, sendEmailChangeConfirmation, sendEmailChangeNotice,
+};

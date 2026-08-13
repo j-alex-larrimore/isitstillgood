@@ -3,6 +3,7 @@ const router = require('express').Router();
 const { body, param, query, validationResult } = require('express-validator');
 const prisma  = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { pickSeriesRepresentative } = require('../lib/mediaHelpers');
 
 function ok(req, res) {
   const e = validationResult(req);
@@ -259,11 +260,13 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
 
 // ─── PATCH /api/users/me/settings ─── Update profile visibility ───────────────
 // Allows the logged-in user to toggle profilePublic and update their bio.
+// Email is deliberately NOT handled here — changing it now requires clicking
+// a confirmation link (see POST /api/auth/change-email), since writing it
+// directly here had no verification and no password check at all.
 router.patch('/me/settings', requireAuth, [
   body('profilePublic').optional().isBoolean(),
   body('bio').optional().trim().isLength({ max: 500 }),
   body('displayName').optional().trim().isLength({ min: 1, max: 100 }),
-  body('email').optional().trim().isEmail().withMessage('Must be a valid email address'),
 ], async (req, res, next) => {
   const e = validationResult(req);
   if (!e.isEmpty()) return res.status(422).json({ errors: e.array() });
@@ -272,14 +275,6 @@ router.patch('/me/settings', requireAuth, [
     if (req.body.profilePublic !== undefined) data.profilePublic = req.body.profilePublic;
     if (req.body.bio !== undefined)           data.bio           = req.body.bio;
     if (req.body.displayName !== undefined)   data.displayName   = req.body.displayName;
-    if (req.body.email !== undefined) {
-      // Check email isn't already taken by another user
-      const existing = await prisma.user.findFirst({
-        where: { email: req.body.email, NOT: { id: req.user.id } },
-      });
-      if (existing) return res.status(409).json({ error: 'Email already in use by another account' });
-      data.email = req.body.email.toLowerCase();
-    }
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
@@ -338,12 +333,13 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] },
       },
       select: {
-        rating: true,
+        rating: true, seasonNumber: true,
         mediaItem: {
           select: {
             id: true, title: true, slug: true,
             mediaType: true, releaseYear: true, imageUrl: true,
             genres: true, tags: true, parentId: true,
+            seriesName: true, seriesNumber: true,
             directors: { select: { id: true, name: true, slug: true } },
             cast:      { select: { id: true, name: true, slug: true } },
             authors:   { select: { id: true, name: true, slug: true } },
@@ -373,12 +369,45 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // contributed 8 ratings toward a director/actor's average instead of 1,
     // and used only that season's guest cast — main cast/creators live on
     // the parent row and were mostly invisible to favorites as a result.
+    // A book series-level review (seasonNumber:0 sentinel, written against
+    // whatever book was the series representative at the time) goes stale
+    // the same way item.html's series page already accounts for: adding an
+    // earlier-numbered prequel/novella later shifts the representative to
+    // that new book without moving the existing review. Resolve to the
+    // CURRENT representative here too, so taste-profile covers/titles don't
+    // show the old representative (e.g. a novella) instead of book 1.
+    // Confirmed live: Glass Immortals showed "Montego" (0.5) instead of "In
+    // the Shadow of Lightning" (1) once book 1 was added after the review.
+    const seriesRepCache = new Map(); // seriesName|authorIds -> representative row or null
+    async function resolveSeriesRepresentative(item) {
+      const authorIds = (item.authors || []).map(a => a.id).sort();
+      const key = `${item.seriesName}|${authorIds.join(',')}`;
+      if (seriesRepCache.has(key)) return seriesRepCache.get(key);
+      const clusterBooks = await prisma.mediaItem.findMany({
+        where: {
+          mediaType: 'BOOK', seriesName: item.seriesName, seriesNumber: { not: null },
+          verified: true, authors: { some: { id: { in: authorIds } } },
+        },
+        select: { id: true, title: true, slug: true, imageUrl: true, releaseYear: true, seriesNumber: true },
+      });
+      const rep = clusterBooks.length ? pickSeriesRepresentative(clusterBooks) : null;
+      seriesRepCache.set(key, rep);
+      return rep;
+    }
+
     const tvGroups = new Map(); // effective show id -> { seriesRating, seasonRatings, showItem }
     const processedEntries = [];
     for (const review of reviews) {
       const item = review.mediaItem;
       if (item.mediaType !== 'TV_SHOW') {
-        processedEntries.push({ rating: review.rating, item });
+        let effectiveItem = item;
+        if (item.mediaType === 'BOOK' && item.seriesName && review.seasonNumber === 0) {
+          const rep = await resolveSeriesRepresentative(item);
+          if (rep && rep.id !== item.id) {
+            effectiveItem = { ...item, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear };
+          }
+        }
+        processedEntries.push({ rating: review.rating, item: effectiveItem });
         continue;
       }
       if (item.parentId) {

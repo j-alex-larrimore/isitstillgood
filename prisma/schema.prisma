@@ -151,10 +151,28 @@ model User {
   sentInvites     InviteToken[]    // invitations this user has sent
   sentMessages    Message[] @relation("MessageSender")
   receivedMessages Message[] @relation("MessageRecipient")
+  emailVerificationTokens EmailVerificationToken[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   @@index([email])
   @@index([username])
+}
+
+// ─── EMAIL VERIFICATION TOKENS ─────────────────────────────────────────────
+// Backs two flows: confirming a new registration's email (newEmail: null —
+// the token just flips isVerified on the account it belongs to) and
+// confirming an email-address change (newEmail set — clicking the link
+// swaps User.email to newEmail). One-time use — consumed/deleted on click.
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique @default(cuid())
+  newEmail  String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([token])
+  @@index([userId])
 }
 
 model RefreshToken {
