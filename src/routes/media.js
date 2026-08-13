@@ -1,56 +1,11 @@
 // src/routes/media.js
 const router = require('express').Router();
 const { query } = require('express-validator');
+const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
-const { normalizeTitleForSearch } = require('../lib/mediaHelpers');
-
-// Clusters a list of `{ seriesName, seriesNumber, authors }`-shaped books
-// into distinct series — an exact `seriesName` match is necessary but not
-// sufficient, since two unrelated authors can each have a series with the
-// identical name (confirmed live: Brandon Mull's and Toby Neighbors'
-// unrelated "Five Kingdoms" series). A cluster requires overlapping
-// authorship with its own books, unioned by shared-author rather than
-// exact-set equality, so a series that gains a co-author partway through
-// (the Wheel of Time: solely Robert Jordan for books 1-11, Jordan & Brandon
-// Sanderson for 12-14) still stays one cluster. Returns an array of
-// `{ authorIds: Set, books: [] }` groups per distinct seriesName.
-function clusterBookSeries(books) {
-  const clustersByName = new Map(); // seriesName -> array of clusters
-  for (const book of books) {
-    if (!book.seriesName) continue;
-    const bookAuthorIds = new Set((book.authors || []).map(a => a.id));
-    const clusters = clustersByName.get(book.seriesName) || [];
-    let cluster = clusters.find(c => [...c.authorIds].some(id => bookAuthorIds.has(id)));
-    if (!cluster) {
-      cluster = { authorIds: new Set(), books: [] };
-      clusters.push(cluster);
-      clustersByName.set(book.seriesName, clusters);
-    }
-    for (const id of bookAuthorIds) cluster.authorIds.add(id);
-    cluster.books.push(book);
-  }
-  return [...clustersByName.values()].flat();
-}
-
-// Picks which book in a series cluster acts as its representative (the one
-// whose cover/page the series card shows). Prefers seriesNumber === 1 — the
-// actual flagship first novel — over any lower-numbered prequel/novella
-// (0, 0.5, etc.), since those exist specifically to NOT be a reader's first
-// impression of the series. Falls back to the lowest available number only
-// when no book is numbered exactly 1 (e.g. a series that starts at 0 with no
-// separate "book 1"). Confirmed live: without this, series with a numbered
-// prequel — Throne of Glass's "The Assassin's Blade" (0.5), the Powder Mage
-// Trilogy's "Siege of Tilpur" (0) — showed the obscure prequel's cover as
-// the series' public face instead of the actual first novel.
-function pickSeriesRepresentative(books) {
-  const bookOne = books.find(b => b.seriesNumber === 1);
-  if (bookOne) return bookOne;
-  return books.reduce((rep, book) =>
-    (book.seriesNumber ?? Infinity) < (rep.seriesNumber ?? Infinity) ? book : rep
-  );
-}
+const { normalizeTitleForSearch, clusterBookSeries, pickSeriesRepresentative } = require('../lib/mediaHelpers');
 
 // Shared by the `tag` param (tags array only, AND-combined with other active
 // filters — used by search.html's dedicated tag field), the genre/tag
@@ -122,6 +77,23 @@ router.get('/', optionalAuth, async (req, res, next) => {
   // consumedWithin: only count reviews where dateConsumed >= N months ago
   // Format: "12m" = 12 months, "2y" = 2 years
   const consumedWithin   = req.query.consumedWithin || null;
+  // Computed once up top so both req.myRatings/req.reviewedByRatings below
+  // (the logged-in user's own ratings, used by Share a Card's recency
+  // filter among other things) and the aggregate/friend-rating queries
+  // further down share the same cutoff instead of each parsing it separately.
+  let consumedCutoff = null;
+  if (consumedWithin) {
+    const match = consumedWithin.match(/^(\d+)(m|y)$/);
+    if (match) {
+      const n    = parseInt(match[1]);
+      const unit = match[2];
+      const d    = new Date();
+      if (unit === 'm') d.setMonth(d.getMonth() - n);
+      else              d.setFullYear(d.getFullYear() - n);
+      consumedCutoff = d;
+    }
+  }
+  const consumedFilter = consumedCutoff ? { dateConsumed: { gte: consumedCutoff } } : {};
   // reviewedBy: a username — filter to only items reviewed by that specific user
   const reviewedBy = req.query.reviewedBy?.trim();
   // reviewStatus: 'unreviewed', 'reviewed', or 'all' — powers Browse's review-status
@@ -160,7 +132,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       });
       if (reviewedByUser) {
         reviewedByUserId = reviewedByUser.id;
-        req.reviewedByRatings = await buildUserRatingsMap(reviewedByUser.id, { visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] } });
+        req.reviewedByRatings = await buildUserRatingsMap(reviewedByUser.id, { visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] }, ...consumedFilter });
         // reviewedByIds still drives the legacy "only their reviewed items"
         // filter below (search.html) — direct ids only, since andClauses
         // separately rolls seasons up to parentId for the reviewStatus path.
@@ -179,7 +151,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // below). Cheap regardless — bounded by the user's own review count, not
     // catalog size. Not surfaced per-card outside the friend-comparison case.
     if (req.user && (!reviewedByUserId || req.user.id !== reviewedByUserId)) {
-      req.myRatings = await buildUserRatingsMap(req.user.id);
+      req.myRatings = await buildUserRatingsMap(req.user.id, consumedFilter);
     }
 
     // Person search — look up matching person IDs
@@ -355,23 +327,6 @@ router.get('/', optionalAuth, async (req, res, next) => {
     }
     const friendFilter = friendsOnly && friendIds.length
       ? { userId: { in: friendIds } }
-      : {};
-
-    // Build dateConsumed cutoff for consumedWithin filter
-    let consumedCutoff = null;
-    if (consumedWithin) {
-      const match = consumedWithin.match(/^(\d+)(m|y)$/);
-      if (match) {
-        const n    = parseInt(match[1]);
-        const unit = match[2];
-        const d    = new Date();
-        if (unit === 'm') d.setMonth(d.getMonth() - n);
-        else              d.setFullYear(d.getFullYear() - n);
-        consumedCutoff = d;
-      }
-    }
-    const consumedFilter = consumedCutoff
-      ? { dateConsumed: { gte: consumedCutoff } }
       : {};
 
     // Reviewed-item ids for whichever person reviewStatus is scoped to — the
@@ -1287,9 +1242,22 @@ router.get('/search-suggestions', async (req, res, next) => {
     // merged Screen view and games, where role-scoping doesn't apply.
     const type = req.query.type;
 
+    // Same scoping for genre/tag suggestions — these were previously
+    // unfiltered by media type too, so typing in the Games tab could surface
+    // "LitRPG" (a book-only genre) or Books could surface "Strategy"/"RPG"
+    // (game-only genres), none of which exist on that type's own catalog.
+    // SCREEN covers the merged Movies+TV view; a plain type value covers
+    // BOOK/MOVIE/TV_SHOW/VIDEO_GAME; no type at all (the unfiltered "Browse
+    // All" view spanning every media type) leaves this unfiltered too, since
+    // there's no single type to scope to.
+    const mediaTypesForFilter = type === 'SCREEN' ? ['MOVIE', 'TV_SHOW'] : (type ? [type] : null);
+    const typeFilterSql = mediaTypesForFilter
+      ? Prisma.sql`AND "mediaType"::text IN (${Prisma.join(mediaTypesForFilter)})`
+      : Prisma.empty;
+
     const [genreRows, tagRows, personCandidates] = await Promise.all([
-      prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ORDER BY g LIMIT 5`,
-      prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ORDER BY t LIMIT 5`,
+      prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ${typeFilterSql} ORDER BY g LIMIT 5`,
+      prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ${typeFilterSql} ORDER BY t LIMIT 5`,
       // A wider net than what's actually shown — re-ranked by review count
       // below, so a common-name match with the most-reviewed work (e.g.
       // "damon" matching Matt Damon over a more obscure namesake) surfaces

@@ -3,6 +3,7 @@ const router = require('express').Router();
 const { query } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { clusterBookSeries, pickSeriesRepresentative } = require('../lib/mediaHelpers');
 
 // ─── GET /api/feed ─── Friend activity + timeframe support ──────────────
 // optionalAuth (not requireAuth) — logged-out visitors can load mode=all/
@@ -82,6 +83,7 @@ router.get('/', optionalAuth, [
               id: true, title: true, slug: true, mediaType: true, releaseYear: true,
               imageUrl: true, genres: true, tags: true,
               tmdbRating: true, openCriticScore: true,
+              seriesName: true, seriesNumber: true, authors: { select: { id: true } },
             },
           },
           reactions: { select: { userId: true, emoji: true } },
@@ -95,8 +97,36 @@ router.get('/', optionalAuth, [
       prisma.review.count({ where }),
     ]);
 
+    // A review of a book that's its series' representative (see Browse's own
+    // "collapse into one series card" convention) should read the same way
+    // here — "The Tarot Sequence", not the representative's own title "Last
+    // Sun" — confirmed live: a review of Last Sun showed as a review of
+    // "Last Sun" in the feed even though Browse presents that exact book as
+    // the whole series' card. Only the representative gets this treatment;
+    // a review of any other book in the series still shows its own title,
+    // since that's a review of that specific book, not the series overall.
+    const seriesNames = [...new Set(
+      reviews.filter(r => r.mediaItem.mediaType === 'BOOK' && r.mediaItem.seriesName).map(r => r.mediaItem.seriesName)
+    )];
+    const seriesRepIds = new Set();
+    if (seriesNames.length) {
+      const seriesBooks = await prisma.mediaItem.findMany({
+        where: { mediaType: 'BOOK', seriesName: { in: seriesNames } },
+        select: { id: true, seriesName: true, seriesNumber: true, authors: { select: { id: true } } },
+      });
+      for (const cluster of clusterBookSeries(seriesBooks)) {
+        seriesRepIds.add(pickSeriesRepresentative(cluster.books).id);
+      }
+    }
+
     const enriched = reviews.map(r => ({
       ...r,
+      mediaItem: {
+        ...r.mediaItem,
+        displayTitle: (r.mediaItem.mediaType === 'BOOK' && seriesRepIds.has(r.mediaItem.id))
+          ? r.mediaItem.seriesName
+          : undefined,
+      },
       myReaction: r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null,
       reactionSummary: r.reactions.reduce((acc, { emoji }) => {
         acc[emoji] = (acc[emoji] || 0) + 1; return acc;

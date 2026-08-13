@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportGenres, detectStreamingTags, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportGenres, detectStreamingTags, detectDeckBuilderGenre, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail, getMovieKeywords, getTvKeywords,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -370,6 +370,8 @@ async function main() {
           }
         }
         genres = normalizeGenres([...genres, ...sportGenres, ...settingGenres]);
+      } else if (row.mediaType === 'VIDEO_GAME') {
+        genres = normalizeGameGenres([...genres, ...detectDeckBuilderGenre(data.title, data.description)]);
       }
       // Auto-detect Apple TV/Netflix/Amazon as tags (a franchise-style
       // freeform label, not a classification — see detectStreamingTags in

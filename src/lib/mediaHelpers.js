@@ -3,6 +3,58 @@
 // (the CLI importer) so both write identical, normalized data.
 const prisma = require('./prisma');
 
+// ─── Book series clustering ────────────────────────────────────────────────
+// Shared by media.js (Browse's series-collapsed cards) and feed.js (showing
+// the series name instead of one book's own title when the reviewed book is
+// the series representative) — moved here so both use identical clustering/
+// representative-picking logic instead of two definitions drifting apart.
+//
+// Clusters a list of `{ seriesName, seriesNumber, authors }`-shaped books
+// into distinct series — an exact `seriesName` match is necessary but not
+// sufficient, since two unrelated authors can each have a series with the
+// identical name (confirmed live: Brandon Mull's and Toby Neighbors'
+// unrelated "Five Kingdoms" series). A cluster requires overlapping
+// authorship with its own books, unioned by shared-author rather than
+// exact-set equality, so a series that gains a co-author partway through
+// (the Wheel of Time: solely Robert Jordan for books 1-11, Jordan & Brandon
+// Sanderson for 12-14) still stays one cluster. Returns an array of
+// `{ authorIds: Set, books: [] }` groups per distinct seriesName.
+function clusterBookSeries(books) {
+  const clustersByName = new Map(); // seriesName -> array of clusters
+  for (const book of books) {
+    if (!book.seriesName) continue;
+    const bookAuthorIds = new Set((book.authors || []).map(a => a.id));
+    const clusters = clustersByName.get(book.seriesName) || [];
+    let cluster = clusters.find(c => [...c.authorIds].some(id => bookAuthorIds.has(id)));
+    if (!cluster) {
+      cluster = { authorIds: new Set(), books: [] };
+      clusters.push(cluster);
+      clustersByName.set(book.seriesName, clusters);
+    }
+    for (const id of bookAuthorIds) cluster.authorIds.add(id);
+    cluster.books.push(book);
+  }
+  return [...clustersByName.values()].flat();
+}
+
+// Picks which book in a series cluster acts as its representative (the one
+// whose cover/page the series card shows). Prefers seriesNumber === 1 — the
+// actual flagship first novel — over any lower-numbered prequel/novella
+// (0, 0.5, etc.), since those exist specifically to NOT be a reader's first
+// impression of the series. Falls back to the lowest available number only
+// when no book is numbered exactly 1 (e.g. a series that starts at 0 with no
+// separate "book 1"). Confirmed live: without this, series with a numbered
+// prequel — Throne of Glass's "The Assassin's Blade" (0.5), the Powder Mage
+// Trilogy's "Siege of Tilpur" (0) — showed the obscure prequel's cover as
+// the series' public face instead of the actual first novel.
+function pickSeriesRepresentative(books) {
+  const bookOne = books.find(b => b.seriesNumber === 1);
+  if (bookOne) return bookOne;
+  return books.reduce((rep, book) =>
+    (book.seriesNumber ?? Infinity) < (rep.seriesNumber ?? Infinity) ? book : rep
+  );
+}
+
 // ─── Tag and genre normalization ──────────────────────────────────────────
 const TAG_OVERRIDES = {
   'hbo': 'HBO', 'hbo max': 'HBO Max', 'hbomax': 'HBO Max',
@@ -11,7 +63,7 @@ const TAG_OVERRIDES = {
   'bbc': 'BBC', 'pbs': 'PBS', 'mtv': 'MTV', 'vh1': 'VH1',
   'usa': 'USA', 'tnt': 'TNT', 'tbs': 'TBS', 'syfy': 'Syfy',
   'cnn': 'CNN', 'espn': 'ESPN', 'nfl': 'NFL', 'nba': 'NBA',
-  'mlb': 'MLB', 'nhl': 'NHL', 'dc': 'DC', 'mcu': 'MCU', 'dceu': 'DCEU',
+  'mlb': 'MLB', 'nhl': 'NHL', 'dc': 'DC', 'mcu': 'MCU', 'dceu': 'DCEU', 'dcu': 'DCU',
   'lgbtq': 'LGBTQ', 'lgbtq+': 'LGBTQ+', 'wwii': 'WWII', 'wwi': 'WWI',
   'uk': 'UK', 'us': 'US', 'snl': 'SNL',
 };
@@ -158,6 +210,20 @@ const VIDEO_GAME_GENRE_MAP = {
   'quiz/trivia': 'Trivia',
   "rogue-like": 'Roguelike',
 };
+
+// IGDB's own genre taxonomy has no "Deck Builder" category — the closest it
+// gets is "Card & Board Game" (mapped to Card Game + Board Game above), so a
+// true deck-builder like Slay the Spire II or Across the Obelisk never gets
+// it from IGDB's genre data alone (confirmed live: both list only Card
+// Game/Board Game/Strategy despite their own IGDB summaries literally
+// describing them as deckbuilders). Detected from title+description instead,
+// the same pattern as detectSportGenres above. "Deck Builder" is already a
+// recognized genre on this site (VIDEO_GAME_GENRE_CANON) — this is what
+// actually populates it, since nothing did before.
+function detectDeckBuilderGenre(title, description) {
+  const text = `${title || ''} ${description || ''}`;
+  return /\bdeck[\s-]?build(?:er|ers|ing)?\b/i.test(text) ? ['Deck Builder'] : [];
+}
 
 function normalizeGameGenres(genres) {
   if (!Array.isArray(genres)) return genres;
@@ -570,10 +636,13 @@ async function checkSeriesCollision(seriesName, authorNames) {
 }
 
 module.exports = {
+  clusterBookSeries,
+  pickSeriesRepresentative,
   normalizeTags,
   normalizeGenres,
   detectSportGenres,
   detectStreamingTags,
+  detectDeckBuilderGenre,
   normalizeGameGenres,
   VIDEO_GAME_GENRE_CANON,
   normalizeBookGenres,
