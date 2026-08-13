@@ -1278,6 +1278,14 @@ router.get('/search-suggestions', async (req, res, next) => {
     const q = (req.query.q || '').trim();
     if (q.length < 2) return res.json([]);
     const like = `%${q}%`;
+    // Scopes which of a person's roles count toward ranking/filtering below.
+    // Without this, a Books search could surface an actor of the same/
+    // similar name ahead of the actual author — candidates were being ranked
+    // by review count summed across ALL roles (director+cast+author)
+    // regardless of which type was actually being browsed. type is whatever
+    // Browse's currentApiType() sent (BOOK/MOVIE/TV_SHOW), or absent for the
+    // merged Screen view and games, where role-scoping doesn't apply.
+    const type = req.query.type;
 
     const [genreRows, tagRows, personCandidates] = await Promise.all([
       prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ORDER BY g LIMIT 5`,
@@ -1293,17 +1301,28 @@ router.get('/search-suggestions', async (req, res, next) => {
       }),
     ]);
 
-    const persons = (await Promise.all(personCandidates.map(async p => {
-      const reviewCount = await prisma.review.count({
-        where: { mediaItem: { OR: [
-          { directors: { some: { id: p.id } } },
-          { cast:      { some: { id: p.id } } },
-          { authors:   { some: { id: p.id } } },
-        ] } },
-      });
+    const relevantRoleCount = p => {
+      if (type === 'BOOK') return p._count.authored;
+      if (type === 'MOVIE' || type === 'TV_SHOW') return p._count.directed + p._count.appeared;
+      return p._count.directed + p._count.appeared + p._count.authored;
+    };
+    // Drop candidates with zero relevant-role works entirely, rather than
+    // just deprioritizing them — an actor with no authored books shouldn't
+    // appear at all in a Books search, even ranked last.
+    const scopedCandidates = (type === 'BOOK' || type === 'MOVIE' || type === 'TV_SHOW')
+      ? personCandidates.filter(p => relevantRoleCount(p) > 0)
+      : personCandidates;
+
+    const persons = (await Promise.all(scopedCandidates.map(async p => {
+      const roleClause = type === 'BOOK'
+        ? { authors: { some: { id: p.id } } }
+        : (type === 'MOVIE' || type === 'TV_SHOW')
+          ? { OR: [{ directors: { some: { id: p.id } } }, { cast: { some: { id: p.id } } }] }
+          : { OR: [{ directors: { some: { id: p.id } } }, { cast: { some: { id: p.id } } }, { authors: { some: { id: p.id } } }] };
+      const reviewCount = await prisma.review.count({ where: { mediaItem: roleClause } });
       return {
         kind: 'person', label: p.name, value: p.id, reviewCount,
-        workCount: (p._count.directed || 0) + (p._count.appeared || 0) + (p._count.authored || 0),
+        workCount: relevantRoleCount(p),
       };
     })))
       .sort((a, b) => b.reviewCount - a.reviewCount)
