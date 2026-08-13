@@ -407,7 +407,10 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
             effectiveItem = { ...item, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear };
           }
         }
-        processedEntries.push({ rating: review.rating, item: effectiveItem });
+        processedEntries.push({
+          rating: review.rating, item: effectiveItem,
+          seriesLevel: item.mediaType === 'BOOK' && review.seasonNumber === 0,
+        });
         continue;
       }
       if (item.parentId) {
@@ -438,6 +441,46 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       processedEntries.push({ rating, item: showItem });
     }
 
+    // ── Series-condensed view (Author cards only) ──────────────────────────
+    // A series reviewed book-by-book (13 Cradle books averaging 7.1) vs.
+    // rated as a whole (one series-level review of 9) are very different
+    // "favorite author" signals, and unlike TV — always consolidated to one
+    // rating per show above — books default to counting every review
+    // individually. This builds the alternate "condensed" view: every book
+    // series the user touched collapses to ONE data point (their own
+    // series-level rating if they wrote one, else the average of whichever
+    // books in that series they rated individually), same rule TV already
+    // uses. Non-series entries pass through unchanged either way. Powers the
+    // series-count toggle on the Author taste cards (authorsCondensed below)
+    // — left BOOK-only/author-only since that's the only category where
+    // per-review counting was skewing a "how many things" signal.
+    const bookSeriesClusters = new Map(); // seriesName|authorIds -> { seriesRating, bookRatings, sampleItem }
+    const condensedEntries = [];
+    for (const entry of processedEntries) {
+      const item = entry.item;
+      if (item.mediaType === 'BOOK' && item.seriesName) {
+        const authorIds = (item.authors || []).map(a => a.id).sort();
+        const key = `${item.seriesName}|${authorIds.join(',')}`;
+        if (!bookSeriesClusters.has(key)) bookSeriesClusters.set(key, { seriesRating: null, bookRatings: [], sampleItem: item });
+        const cluster = bookSeriesClusters.get(key);
+        if (entry.seriesLevel) cluster.seriesRating = entry.rating;
+        else cluster.bookRatings.push(entry.rating);
+      } else {
+        condensedEntries.push(entry);
+      }
+    }
+    for (const cluster of bookSeriesClusters.values()) {
+      const rating = cluster.seriesRating != null
+        ? cluster.seriesRating
+        : cluster.bookRatings.reduce((a, b) => a + b, 0) / cluster.bookRatings.length;
+      // Always resolve to the TRUE current representative (book 1) for the
+      // cover/title shown — not just whichever book happened to be seen
+      // first while building the cluster.
+      const rep = await resolveSeriesRepresentative(cluster.sampleItem);
+      const repItem = rep ? { ...cluster.sampleItem, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear } : cluster.sampleItem;
+      condensedEntries.push({ rating, item: repItem });
+    }
+
     // ── Helper: build a ranked list from person/genre occurrences ─────────────
     // Takes a map of { id/name -> { name, slug?, ratings: [] } }
     // Returns array sorted by avgRating desc, filtered to min 2 entries
@@ -448,6 +491,11 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           name:      entry.name,
           slug:      entry.slug || null,
           count:     entry.ratings.length,
+          // Defaults to count for every category — only authorsCondensed
+          // overrides it, to the true (pre-condensing) review count, so the
+          // "min. appearances" threshold still gates on real review volume
+          // even when a series has been collapsed to one entry.
+          totalReviewCount: entry.totalReviewCount ?? entry.ratings.length,
           avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
           items:     entry.items || [],
         }))
@@ -466,6 +514,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           name:      entry.name,
           slug:      entry.slug || null,
           count:     entry.ratings.length,
+          totalReviewCount: entry.totalReviewCount ?? entry.ratings.length,
           avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
           items:     entry.items || [],
         }))
@@ -522,6 +571,27 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         genres[g].types[type] = (genres[g].types[type] || 0) + 1;
         genres[g].items.push(itemSummary(item, rating));
       }
+    }
+
+    // Same shape as `authors` above, but built from condensedEntries — see
+    // the comment on bookSeriesClusters for what "condensed" means.
+    const authorsCondensed = {};
+    for (const entry of condensedEntries) {
+      const item = entry.item, rating = entry.rating;
+      for (const p of (item.authors || [])) {
+        if (!authorsCondensed[p.id]) authorsCondensed[p.id] = { name: p.name, slug: p.slug, ratings: [], items: [] };
+        authorsCondensed[p.id].ratings.push(rating);
+        authorsCondensed[p.id].items.push(itemSummary(item, rating));
+      }
+    }
+    // The "min. appearances" threshold should still gate on the TRUE number
+    // of reviews behind an author (14 for someone who wrote 13 Cradle books
+    // + 1 series review), not the condensed count (1) — otherwise condensing
+    // a series down to one card entry would make that author fail a filter
+    // they clearly clear. Carries the real (expanded) count alongside the
+    // condensed one so the frontend can filter on one and display the other.
+    for (const id of Object.keys(authorsCondensed)) {
+      authorsCondensed[id].totalReviewCount = authors[id]?.ratings.length ?? authorsCondensed[id].ratings.length;
     }
 
     // Dynamic threshold: at least 1/10th of reviews in that type, minimum 1
@@ -605,6 +675,7 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
           name:      entry.name,
           slug:      entry.slug || null,
           count:     entry.ratings.length,
+          totalReviewCount: entry.totalReviewCount ?? entry.ratings.length,
           avgRating: entry.ratings.reduce((a, b) => a + b, 0) / entry.ratings.length,
           items:     entry.items || [],
         }))
@@ -636,6 +707,13 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       favoriteTagByType,
       leastFavoriteTagByType,
       countByType,
+      // "Condensed" Author variants — each book series the user touched
+      // counts as one data point instead of one per book. See buildTasteCards
+      // in profile.html for the toggle that picks between these and the
+      // per-review Author fields above.
+      favoriteAuthorsCondensed:     rankEntries(authorsCondensed,          1, Infinity),
+      leastFavoriteAuthorsCondensed: rankEntriesAscending(authorsCondensed, 1, Infinity),
+      mostReviewedAuthorsCondensed: rankByCount(authorsCondensed,          1, Infinity),
     });
   } catch (err) { next(err); }
 });
