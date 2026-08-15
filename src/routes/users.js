@@ -404,7 +404,13 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         if (item.mediaType === 'BOOK' && item.seriesName && review.seasonNumber === 0) {
           const rep = await resolveSeriesRepresentative(item);
           if (rep && rep.id !== item.id) {
-            effectiveItem = { ...item, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear };
+            // displayTitle carries the series name through to itemSummary()
+            // below — a series-level review should show as e.g. "The Wheel
+            // of Time" on taste cards, not "The Eye of the World" (book 1's
+            // own title), matching how /api/media already labels series
+            // cards for Browse. title/slug/etc. still point at the actual
+            // representative row, since that's what the link needs to go to.
+            effectiveItem = { ...item, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear, displayTitle: item.seriesName };
           }
         }
         processedEntries.push({
@@ -474,10 +480,16 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         ? cluster.seriesRating
         : cluster.bookRatings.reduce((a, b) => a + b, 0) / cluster.bookRatings.length;
       // Always resolve to the TRUE current representative (book 1) for the
-      // cover/title shown — not just whichever book happened to be seen
-      // first while building the cluster.
+      // cover/link shown — not just whichever book happened to be seen
+      // first while building the cluster. displayTitle carries the series
+      // name through to itemSummary() below, same reasoning as the
+      // series-level-review branch above — a condensed author card is
+      // always conceptually "the series", so it should read as e.g. "The
+      // Wheel of Time", not book 1's own title.
       const rep = await resolveSeriesRepresentative(cluster.sampleItem);
-      const repItem = rep ? { ...cluster.sampleItem, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear } : cluster.sampleItem;
+      const repItem = rep
+        ? { ...cluster.sampleItem, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear, displayTitle: cluster.sampleItem.seriesName }
+        : { ...cluster.sampleItem, displayTitle: cluster.sampleItem.seriesName };
       condensedEntries.push({ rating, item: repItem });
     }
 
@@ -532,11 +544,16 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // Build a lowercase set of ignored genres for fast lookup
     const ignoredSet = new Set((target.ignoredGenres || []).map(g => g.toLowerCase()));
 
-    // mediaItem summary for linking from taste cards
+    // mediaItem summary for linking from taste cards. displayTitle only
+    // exists on items resolved to a book-series representative above (a
+    // series-level review, or a condensed-view cluster) — everywhere else
+    // it's undefined, so an individually-rated book still shows its own
+    // title, not its series' name.
     const itemSummary = (item, rating) => ({
       id: item.id, title: item.title, slug: item.slug,
       mediaType: item.mediaType, imageUrl: item.imageUrl,
       releaseYear: item.releaseYear, rating,
+      displayTitle: item.displayTitle || undefined,
     });
 
     for (const entry of processedEntries) {
