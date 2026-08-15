@@ -1164,12 +1164,22 @@ router.get('/', optionalAuth, async (req, res, next) => {
         const isSeriesCard = i.mediaType === 'BOOK' && i.seriesName && !req.query.series && !req.query.individual && isSeriesRep;
         const isTvParentCard = i.mediaType === 'TV_SHOW' && !i.parentId;
 
-        // avgRating: series-level reviews (written about the whole series/show)
-        // For book series cards: direct reviews of the first book (series rep)
+        // avgRating: for book series cards, the same 3-tier priority
+        // effectiveRating() above already documents and uses for sorting —
+        // a genuine series-level review (directRatingMap) outranks the
+        // cross-book average (bookSeriesRatingMap), which outranks the
+        // representative's own individual rating (ratingMap) — but this
+        // display value wasn't actually using that fallback chain, so a
+        // series with no direct series-level review showed "No reviews
+        // yet" (or the representative's lone individual rating) instead of
+        // the real average across whatever books in the series had been
+        // rated. Confirmed live: a series with only individually-rated
+        // books showed nothing here despite "Avg book" having a real
+        // number right next to it.
         // For TV parent cards: direct reviews of the show parent item
         // For individual items: their own reviews
-        const avg   = isSeriesCard ? (directRatingMap[i.id]?.avg   || null) : ratingMap[i.id]?.avg;
-        const count = isSeriesCard ? (directRatingMap[i.id]?.count || 0)    : ratingMap[i.id]?.count;
+        const avg   = isSeriesCard ? (directRatingMap[i.id]?.avg   ?? bookSeriesRatingMap[i.id]?.avg   ?? ratingMap[i.id]?.avg   ?? null) : ratingMap[i.id]?.avg;
+        const count = isSeriesCard ? (directRatingMap[i.id]?.count ?? bookSeriesRatingMap[i.id]?.count ?? ratingMap[i.id]?.count ?? 0)    : ratingMap[i.id]?.count;
 
         // seriesAvgRating: aggregate of all books/seasons (only for series cards)
         const seriesAvgRating = isSeriesCard
