@@ -210,13 +210,18 @@ async function getMovieKeywords(id, token = process.env.TMDB_READ_ACCESS_TOKEN) 
 // JustWatch via TMDB's partnership; TMDB's terms require attributing
 // JustWatch as the source wherever this is displayed (see item.html) or
 // they can revoke API access — do not drop that attribution.
+// Returns null ONLY when the fetch itself failed (unknown state — caller
+// should leave any existing data alone). A successful fetch always returns
+// a real object, even an all-empty one when TMDB has no results.<region>
+// entry at all — that's a genuine, known answer ("not available here"),
+// not a fetch failure, and callers should write it so the frontend can
+// tell "checked, unavailable" apart from "never checked" (see item.html).
 async function getWatchProviders(id, mediaKind = 'movie', region = 'US', token = process.env.TMDB_READ_ACCESS_TOKEN) {
   if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
   const res = await fetchWithRetry(`https://api.themoviedb.org/3/${mediaKind}/${id}/watch/providers`, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) return null;
   const data = await res.json();
-  const regionData = data.results?.[region];
-  if (!regionData) return null;
+  const regionData = data.results?.[region] || {};
   const mapProviders = list => (list || []).map(p => ({ id: p.provider_id, name: p.provider_name, logoPath: p.logo_path }));
   return {
     link: regionData.link || null,

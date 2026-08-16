@@ -15,6 +15,24 @@ const { getWatchProviders } = require('../src/services/mediaLookup');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// A script holding one Prisma connection open for the better part of an
+// hour, mostly idle between calls (see the sleep() below), turned out to
+// occasionally hit a connection reset against Railway's proxy — confirmed
+// live, logged as "Error in PostgreSQL connection: ... ConnectionReset".
+// Prisma reconnects on its own for the *next* query, but the query that was
+// in flight when it happened still fails — so retry it once here rather
+// than losing that item's update or, worse, letting the whole run die.
+async function updateWithRetry(id, data, retries = 2, delayMs = 1000) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await prisma.mediaItem.update({ where: { id }, data });
+    } catch (err) {
+      if (attempt === retries) throw err;
+      await sleep(delayMs * (attempt + 1));
+    }
+  }
+}
+
 async function main() {
   const dryRun = process.argv.includes('--dry-run');
   const items = await prisma.mediaItem.findMany({
@@ -39,16 +57,18 @@ async function main() {
       const hasAny = providers && (providers.flatrate.length || providers.rent.length || providers.buy.length);
       if (hasAny) withProviders++;
 
-      if (!dryRun) {
-        await prisma.mediaItem.update({
-          where: { id: item.id },
-          data: { streamingProviders: providers || undefined, streamingUpdatedAt: new Date() },
-        });
+      // providers is only ever null when the TMDB fetch itself failed (see
+      // getWatchProviders) — a successful check always writes a real
+      // object, even an empty one, so item.html can tell "checked, nothing
+      // available" apart from "never checked".
+      if (!dryRun && providers) {
+        await updateWithRetry(item.id, { streamingProviders: providers, streamingUpdatedAt: new Date() });
       }
       updated++;
     } catch (err) {
       console.log(`✗ "${item.title}" — ${err.message}`);
     }
+    if (updated % 1000 === 0) console.log(`...${updated}/${items.length} checked so far`);
     await sleep(150);
   }
 
