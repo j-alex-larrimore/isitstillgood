@@ -184,9 +184,34 @@ router.get('/', optionalAuth, async (req, res, next) => {
             { displayName: { contains: reviewedBy, mode: 'insensitive' } },
           ],
         },
-        select: { id: true },
+        select: { id: true, profilePublic: true },
       });
       if (reviewedByUser) {
+        // Same visibility rule as GET /api/users/:username and its
+        // taste-profile counterpart — a private account is only viewable by
+        // its own owner and accepted friends. This was previously missing
+        // entirely here, so a shared browse-card link (or the "Reviewed by"
+        // search field) could be used to enumerate a private account's
+        // ratings by username alone, bypassing the same gate the profile
+        // page already enforces. Confirmed live as a real gap, not just a
+        // theoretical one.
+        const isSelf = req.user?.id === reviewedByUser.id;
+        let canView = reviewedByUser.profilePublic || isSelf;
+        if (!canView && req.user) {
+          const friendship = await prisma.friendship.findFirst({
+            where: {
+              status: 'ACCEPTED',
+              OR: [
+                { initiatorId: req.user.id, receiverId: reviewedByUser.id },
+                { initiatorId: reviewedByUser.id, receiverId: req.user.id },
+              ],
+            },
+          });
+          if (friendship) canView = true;
+        }
+        if (!canView) {
+          return res.json({ items: [], total: 0, page: parseInt(page), pages: 0, reviewedByPrivate: true });
+        }
         reviewedByUserId = reviewedByUser.id;
         req.reviewedByRatings = await buildUserRatingsMap(reviewedByUser.id, { visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] }, ...consumedFilter });
         // reviewedByIds still drives the legacy "only their reviewed items"

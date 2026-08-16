@@ -188,9 +188,13 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
     }
 
     if (!canView) {
-      // Return minimal info so the page can show a "friends only" message
+      // Return minimal info so the page can show a "friends only" message —
+      // id is included (opaque CUID, not sensitive) so the frontend can
+      // still offer "add as friend" from this gated state, since that's the
+      // actual way to unlock viewing a private profile.
       return res.status(403).json({
         error: 'friends_only',
+        id: target.id,
         displayName: target.displayName,
         username: target.username,
       });
