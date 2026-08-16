@@ -41,6 +41,16 @@ jobs:
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
         run: node scripts/sync-new-seasons.js
 
+      # Full-catalog sweep (~27,000+ movies/shows, one TMDB call each) —
+      # refreshes streaming/rent/buy availability (JustWatch via TMDB).
+      # Same reasoning as "Sync new seasons" above: no "what changed"
+      # endpoint to narrow this to, so every run re-checks everything.
+      - name: Sync streaming providers
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+        run: node scripts/sync-streaming-providers.js
+
       - name: Sync new books
         env:
           DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}

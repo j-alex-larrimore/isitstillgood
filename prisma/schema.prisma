@@ -60,6 +60,15 @@ model MediaItem {
   openCriticScore Int?      // IGDB rating for games (repurposed field)
   externalRatingsUpdatedAt DateTime?
 
+  // Where to watch — movies and TV parent rows only (see
+  // scripts/sync-streaming-providers.js), US region, sourced from JustWatch
+  // via TMDB's watch/providers endpoint. Shape:
+  // { link, flatrate: [{id,name,logoPath}], rent: [...], buy: [...] }
+  // TMDB's terms require attributing JustWatch as the source wherever this
+  // is displayed (see item.html) — don't drop that attribution.
+  streamingProviders   Json?
+  streamingUpdatedAt   DateTime?
+
   // Movie-specific
   directors       Person[]   @relation("DirectedBy")
   cast            Person[]   @relation("AppearedIn")

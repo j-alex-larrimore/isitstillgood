@@ -205,6 +205,27 @@ async function getMovieKeywords(id, token = process.env.TMDB_READ_ACCESS_TOKEN) 
   return (data.keywords || []).map(k => k.name.toLowerCase());
 }
 
+// Per-title watch-provider availability (subscription/rent/buy, by region) —
+// used by scripts/sync-streaming-providers.js. Data is sourced from
+// JustWatch via TMDB's partnership; TMDB's terms require attributing
+// JustWatch as the source wherever this is displayed (see item.html) or
+// they can revoke API access — do not drop that attribution.
+async function getWatchProviders(id, mediaKind = 'movie', region = 'US', token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/${mediaKind}/${id}/watch/providers`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const regionData = data.results?.[region];
+  if (!regionData) return null;
+  const mapProviders = list => (list || []).map(p => ({ id: p.provider_id, name: p.provider_name, logoPath: p.logo_path }));
+  return {
+    link: regionData.link || null,
+    flatrate: mapProviders(regionData.flatrate),
+    rent: mapProviders(regionData.rent),
+    buy: mapProviders(regionData.buy),
+  };
+}
+
 // ─── Google Books ──────────────────────────────────────────────────────────────
 async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BOOKS_API_KEY, langRestrict = null) {
   if (!apiKey) throw new Error('GOOGLE_BOOKS_API_KEY not configured');
@@ -653,4 +674,5 @@ module.exports = {
   getTvSeasonCast,
   getTvKeywords,
   getMovieKeywords,
+  getWatchProviders,
 };
