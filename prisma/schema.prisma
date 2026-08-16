@@ -356,3 +356,16 @@ model Message {
   @@index([senderId])
   @@index([recipientId, senderId])
 }
+
+// Short codes for Share-a-Snapshot links (browse.html/profile.html) —
+// POST /api/share-links mints one from a full path+query, GET
+// /api/share-links/:code resolves it back. Exists purely so a shared link
+// reads as a short code instead of the full filter state spelled out in
+// the query string (type, several filter chips, reviewedBy, recency, etc.
+// all at once can run long). No expiry — the underlying filtered view
+// doesn't go stale the way e.g. an invite token would.
+model ShareLink {
+  code      String   @id
+  path      String   @db.Text
+  createdAt DateTime @default(now())
+}
