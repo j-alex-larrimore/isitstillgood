@@ -41,20 +41,76 @@ function buildTagVariants(rawTerm) {
 async function buildUserRatingsMap(userId, whereExtra = {}) {
   const reviews = await prisma.review.findMany({
     where: { userId, ...whereExtra },
-    select: { mediaItemId: true, rating: true },
+    select: { mediaItemId: true, rating: true, seasonNumber: true },
   });
-  const map = Object.fromEntries(reviews.map(r => [r.mediaItemId, r.rating]));
+  // A book series representative can carry two separate reviews on the same
+  // mediaItemId — an ordinary individual rating of that one book
+  // (seasonNumber: null) and a genuine whole-series verdict (seasonNumber:
+  // 0, see item.html's Rating Scope toggle) — the direct series review
+  // always wins over the individual one when both exist.
+  const map = {};
+  for (const r of reviews) {
+    if (map[r.mediaItemId] == null || r.seasonNumber === 0) map[r.mediaItemId] = r.rating;
+  }
+
   const seasons = await prisma.mediaItem.findMany({
     where: { id: { in: reviews.map(r => r.mediaItemId) }, parentId: { not: null } },
     select: { id: true, parentId: true },
   });
-  if (!seasons.length) return map;
-  const byParent = {};
-  for (const s of seasons) (byParent[s.parentId] ||= []).push(map[s.id]);
-  for (const [parentId, ratings] of Object.entries(byParent)) {
-    if (map[parentId] != null) continue; // an explicit series-level review wins
-    map[parentId] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+  if (seasons.length) {
+    const byParent = {};
+    for (const s of seasons) (byParent[s.parentId] ||= []).push(map[s.id]);
+    for (const [parentId, ratings] of Object.entries(byParent)) {
+      if (map[parentId] != null) continue; // an explicit series-level review wins
+      map[parentId] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+    }
   }
+
+  // Book series: same "series rating if one exists, else average what I've
+  // rated across the series" convention as TV above, but books have no
+  // parent/child rows to roll up (see CLAUDE.md) — clusterBookSeries groups
+  // by seriesName+shared-authorship instead. Mirrors the community-wide
+  // aggregate's priority (directRatingMap > bookSeriesRatingMap) built
+  // further down in the main /media handler, just scoped to this one user's
+  // own reviews. Without this, "You: X/10" on a series card showed only
+  // whatever this user rated the representative book itself, ignoring any
+  // other books in the series they'd individually rated (confirmed live:
+  // a series showed the user's 7/10 for book 1 even though they'd since
+  // rated several later books much lower).
+  const seasonIds = new Set(seasons.map(s => s.id));
+  const bookReviewIds = reviews.filter(r => !seasonIds.has(r.mediaItemId)).map(r => r.mediaItemId);
+  if (bookReviewIds.length) {
+    const reviewedBooks = await prisma.mediaItem.findMany({
+      where: { id: { in: bookReviewIds }, mediaType: 'BOOK', seriesName: { not: null } },
+      select: { seriesName: true },
+    });
+    const seriesNames = [...new Set(reviewedBooks.map(b => b.seriesName))];
+    if (seriesNames.length) {
+      const allSeriesBooks = await prisma.mediaItem.findMany({
+        where: { mediaType: 'BOOK', seriesName: { in: seriesNames } },
+        select: { id: true, seriesName: true, seriesNumber: true, authors: { select: { id: true } } },
+      });
+      const bookIdToRepId = {};
+      for (const cluster of clusterBookSeries(allSeriesBooks)) {
+        const rep = pickSeriesRepresentative(cluster.books);
+        for (const b of cluster.books) bookIdToRepId[b.id] = rep.id;
+      }
+      const directByRep = {};
+      const individualByRep = {};
+      for (const r of reviews) {
+        const repId = bookIdToRepId[r.mediaItemId];
+        if (!repId) continue;
+        if (r.seasonNumber === 0) directByRep[repId] = r.rating;
+        else (individualByRep[repId] ||= []).push(r.rating);
+      }
+      for (const repId of new Set([...Object.keys(directByRep), ...Object.keys(individualByRep)])) {
+        if (directByRep[repId] != null) { map[repId] = directByRep[repId]; continue; }
+        const ratings = individualByRep[repId];
+        if (ratings?.length) map[repId] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+      }
+    }
+  }
+
   return map;
 }
 
