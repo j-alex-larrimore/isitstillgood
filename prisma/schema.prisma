@@ -160,6 +160,8 @@ model User {
   sentInvites     InviteToken[]    // invitations this user has sent
   sentMessages    Message[] @relation("MessageSender")
   receivedMessages Message[] @relation("MessageRecipient")
+  sentListShares     ListShare[] @relation("ListShareSender")
+  receivedListShares ListShare[] @relation("ListShareRecipient")
   emailVerificationTokens EmailVerificationToken[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
@@ -269,6 +271,7 @@ model MediaList {
   isPublic    Boolean    @default(true)
   user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   items       ListItem[]
+  shares      ListShare[]
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 }
@@ -283,6 +286,24 @@ model ListItem {
   mediaItem   MediaItem @relation(fields: [mediaItemId], references: [id])
   addedAt     DateTime  @default(now())
   @@unique([listId, mediaItemId])
+}
+
+// A list actively sent to a specific friend ("Alex recommends this list to
+// you") — distinct from MediaList.isPublic, which controls passive
+// visibility (anyone vs. friends-only) rather than targeting one person.
+// Sharing again with the same recipient is a no-op (@@unique below) rather
+// than a duplicate notification.
+model ListShare {
+  id          String    @id @default(cuid())
+  listId      String
+  list        MediaList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  sharedById  String
+  sharedBy    User      @relation("ListShareSender",    fields: [sharedById],  references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   User      @relation("ListShareRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  @@unique([listId, recipientId])
+  @@index([recipientId])
 }
 
 model Notification {
