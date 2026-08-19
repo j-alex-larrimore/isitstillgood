@@ -31,12 +31,38 @@ router.get('/item/:slug', async (req, res, next) => {
       include: {
         directors: { select: { name: true }, take: 10 },
         authors:   { select: { name: true }, take: 10 },
-        cast:      { select: { name: true }, take: 10 },
+        cast:      { select: { id: true, name: true }, take: 10 },
         _count:    { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+        // For seasons: a season row's own `cast` is only its season-specific
+        // guest stars — the recurring ensemble lives on the parent show's
+        // cast instead. Same split media.js's /:slug route already merges
+        // for the real page; without it here, bots/crawlers saw only the
+        // guest list (e.g. one season of Parks and Rec showed "Paul Rudd,
+        // Kathryn Hahn" — that season's guests — with the actual regular
+        // cast missing entirely). See the merge below.
+        parent: { include: { cast: { select: { id: true, name: true }, take: 10 } } },
       },
     });
 
     if (!item || !item.verified) return res.status(404).send('<h1>Not Found</h1>');
+
+    // Same merge media.js's GET /:slug does: season's own cast (guest stars)
+    // plus whichever parent-show regulars aren't already covered, minus
+    // anyone in excludedCast (departed actors) — matched by name since a
+    // Person's id can differ between how it's connected on the season vs.
+    // the parent.
+    if (item.parentId && item.parent?.cast?.length) {
+      const seasonCastIds  = new Set((item.cast || []).map(p => p.id));
+      const excluded       = new Set((item.excludedCast || []).map(n => n.toLowerCase()));
+      const parentOnlyCast = item.parent.cast.filter(p =>
+        !seasonCastIds.has(p.id) && !excluded.has(p.name.toLowerCase())
+      );
+      item.cast = [...(item.cast || []), ...parentOnlyCast];
+    }
+    if (item.excludedCast?.length) {
+      const excluded = new Set(item.excludedCast.map(n => n.toLowerCase()));
+      item.cast = (item.cast || []).filter(p => !excluded.has(p.name.toLowerCase()));
+    }
 
     // Community stats
     const stats = await prisma.review.aggregate({
@@ -55,6 +81,19 @@ router.get('/item/:slug', async (req, res, next) => {
 
     const avg = stats._avg.rating;
     const count = stats._count.rating;
+    // TV seasons of the same show share almost all their content (cast,
+    // genre, a synced-from-TMDB description) — the only thing unique to any
+    // one season's page is its own reviews. With none yet, that page is a
+    // near-duplicate of its siblings and Google was already declining to
+    // index most of them (confirmed live via Search Console). noindex,follow
+    // tells it not to bother while still letting it follow the links here
+    // (cast, "all seasons") — this stops applying automatically the moment
+    // the season gets its first review, since count is recomputed per
+    // request, not cached. Scoped to seasons specifically (parentId set) —
+    // a standalone reviewless movie/book/game still has its own genuinely
+    // unique metadata even with zero reviews, so it doesn't have the same
+    // near-duplicate-cluster problem.
+    const isReviewlessSeason = !!item.parentId && count === 0;
     const typeLabel = { MOVIE:'Movie', BOOK:'Book', TV_SHOW:'TV Show', VIDEO_GAME:'Video Game' }[item.mediaType] || '';
     const title = item.title;
     const year = item.releaseYear ? ` (${item.releaseYear})` : '';
@@ -101,6 +140,7 @@ router.get('/item/:slug', async (req, res, next) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${isReviewlessSeason ? '<meta name="robots" content="noindex,follow">' : ''}
   <title>${esc(title)}${esc(year)} — Is It (Still) Good?</title>
   <meta name="description" content="${esc(desc)}">
   <meta property="og:title" content="${esc(title)}${esc(year)} — Is It (Still) Good?">
