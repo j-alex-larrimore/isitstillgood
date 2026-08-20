@@ -1351,6 +1351,24 @@ router.get('/search-suggestions', async (req, res, next) => {
     const q = (req.query.q || '').trim();
     if (q.length < 2) return res.json([]);
     const like = `%${q}%`;
+
+    // Decade suggestion — parsed from the query itself rather than a DB
+    // lookup, so "1980"/"1980s" resolves to a single deterministic decade
+    // chip (kind:'decade', value the decade's start year) the same way a
+    // typed genre/tag resolves to an exact suggestion. "80s"/"'80s" is
+    // resolved against the two full centuries this site's catalog actually
+    // spans — 20-99 means 19XX (most titles), 00-19 means 20XX — so "80s"
+    // means the 1980s and "10s" means the 2010s, matching how people
+    // actually use the shorthand rather than requiring the full 4-digit year.
+    let decadeSuggestion = null;
+    const fourDigit = q.match(/^(\d{4})s?$/);
+    const twoDigit = q.match(/^'?(\d{2})s$/i);
+    if (fourDigit) {
+      decadeSuggestion = Math.floor(parseInt(fourDigit[1]) / 10) * 10;
+    } else if (twoDigit) {
+      const n = parseInt(twoDigit[1]);
+      decadeSuggestion = (n >= 20 ? 1900 : 2000) + n;
+    }
     // Scopes which of a person's roles count toward ranking/filtering below.
     // Without this, a Books search could surface an actor of the same/
     // similar name ahead of the actual author — candidates were being ranked
@@ -1426,6 +1444,7 @@ router.get('/search-suggestions', async (req, res, next) => {
     // since they surface an exact spelling a user might not have known to
     // type, ahead of confirming a specific person they likely already typed.
     res.json([
+      ...(decadeSuggestion ? [{ kind: 'decade', label: `${decadeSuggestion}s`, value: decadeSuggestion }] : []),
       ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
       ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
       ...persons,
