@@ -493,6 +493,33 @@ router.get('/', optionalAuth, async (req, res, next) => {
         ...(req.query.yearTo   ? { lte: parseInt(req.query.yearTo)   } : {}),
       }});
     }
+    // `decade`/`excludeDecade` — Browse's Decade picker, comma-separated
+    // decade-start-years (e.g. "1980,2000" for the 1980s and 2000s). Each
+    // decade OR's its own 10-year range, and multiple decades are
+    // themselves OR'd together — separate from yearFrom/yearTo (a single
+    // continuous range) since decades need to support disjoint selections,
+    // e.g. 1980s + 2000s without also matching the 1990s.
+    if (req.query.decade) {
+      const decades = req.query.decade.split(',').map(d => parseInt(d.trim())).filter(d => !isNaN(d));
+      if (decades.length) {
+        andClauses.push({ OR: decades.map(d => ({ releaseYear: { gte: d, lte: d + 9 } })) });
+      }
+    }
+    if (req.query.excludeDecade) {
+      const decades = req.query.excludeDecade.split(',').map(d => parseInt(d.trim())).filter(d => !isNaN(d));
+      if (decades.length) {
+        // Same NULL-handling gotcha as the tags/genres exclude below: an
+        // item with no releaseYear at all should pass an exclude filter
+        // (it's not IN the excluded decade), but `NOT (NULL BETWEEN...)`
+        // evaluates to NULL under Postgres's three-valued logic, which a
+        // WHERE clause treats as "drop this row" — the explicit
+        // releaseYear:null branch is what actually keeps it.
+        andClauses.push({ OR: [
+          { releaseYear: null },
+          { NOT: { OR: decades.map(d => ({ releaseYear: { gte: d, lte: d + 9 } })) } },
+        ]});
+      }
+    }
     if (genreFilter)    andClauses.push(genreFilter);
     let tagVariants = [];
     if (req.query.tag) {
