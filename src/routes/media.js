@@ -1352,22 +1352,34 @@ router.get('/search-suggestions', async (req, res, next) => {
     if (q.length < 2) return res.json([]);
     const like = `%${q}%`;
 
-    // Decade suggestion — parsed from the query itself rather than a DB
-    // lookup, so "1980"/"1980s" resolves to a single deterministic decade
-    // chip (kind:'decade', value the decade's start year) the same way a
-    // typed genre/tag resolves to an exact suggestion. "80s"/"'80s" is
-    // resolved against the two full centuries this site's catalog actually
-    // spans — 20-99 means 19XX (most titles), 00-19 means 20XX — so "80s"
-    // means the 1980s and "10s" means the 2010s, matching how people
-    // actually use the shorthand rather than requiring the full 4-digit year.
-    let decadeSuggestion = null;
-    const fourDigit = q.match(/^(\d{4})s?$/);
-    const twoDigit = q.match(/^'?(\d{2})s$/i);
-    if (fourDigit) {
-      decadeSuggestion = Math.floor(parseInt(fourDigit[1]) / 10) * 10;
-    } else if (twoDigit) {
-      const n = parseInt(twoDigit[1]);
-      decadeSuggestion = (n >= 20 ? 1900 : 2000) + n;
+    // Decade suggestions — parsed from the query itself rather than a DB
+    // lookup, so digits the user is still typing resolve to real decade
+    // chips the same way a partial genre/tag resolves to an exact
+    // suggestion. Two input shapes:
+    //  - a numeric prefix ("1", "19", "198", "1980", "1980s") — matched
+    //    against every decade's own 4-digit start year, so "198" surfaces
+    //    1980s while it's still ambiguous which digit comes next, not only
+    //    once the full year has been typed.
+    //  - "80s"/"'80s" shorthand — resolved against the two full centuries
+    //    this site's catalog actually spans (20-99 means 19XX, 00-19 means
+    //    20XX), so "80s" means the 1980s and "10s" means the 2010s.
+    // Capped at 5, same as tag/genre/person below, since a bare "19" or "20"
+    // prefix alone matches most of the last two centuries' decades.
+    let decadeSuggestions = [];
+    const shorthand = q.match(/^'?(\d{2})s$/i);
+    if (shorthand) {
+      const n = parseInt(shorthand[1]);
+      decadeSuggestions = [(n >= 20 ? 1900 : 2000) + n];
+    } else {
+      const digitPrefix = q.match(/^(\d{1,4})s?$/);
+      if (digitPrefix) {
+        const prefix = digitPrefix[1];
+        const currentDecade = Math.floor(new Date().getFullYear() / 10) * 10;
+        for (let d = 1900; d <= currentDecade; d += 10) {
+          if (String(d).startsWith(prefix)) decadeSuggestions.push(d);
+        }
+        decadeSuggestions = decadeSuggestions.slice(0, 5);
+      }
     }
     // Scopes which of a person's roles count toward ranking/filtering below.
     // Without this, a Books search could surface an actor of the same/
@@ -1444,7 +1456,7 @@ router.get('/search-suggestions', async (req, res, next) => {
     // since they surface an exact spelling a user might not have known to
     // type, ahead of confirming a specific person they likely already typed.
     res.json([
-      ...(decadeSuggestion ? [{ kind: 'decade', label: `${decadeSuggestion}s`, value: decadeSuggestion }] : []),
+      ...decadeSuggestions.map(d => ({ kind: 'decade', label: `${d}s`, value: d })),
       ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
       ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
       ...persons,
