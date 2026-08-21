@@ -655,6 +655,33 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       if (byCount.length)  mostReviewedGenreByType[type] = byCount;
     }
 
+    // ── Per-media-type decade breakdowns — same shape/threshold as genre
+    // above, but keyed by release-decade instead of genre string. Items with
+    // no releaseYear (a handful of untimestamped catalog entries) are simply
+    // excluded from this breakdown rather than bucketed under some
+    // placeholder decade.
+    const decadesByType = {};
+    for (const entry of processedEntries) {
+      const year = entry.item.releaseYear;
+      if (year == null) continue;
+      const decade = Math.floor(year / 10) * 10;
+      const label = `${decade}s`;
+      const type = entry.item.mediaType;
+      if (!decadesByType[type]) decadesByType[type] = {};
+      if (!decadesByType[type][label]) decadesByType[type][label] = { name: label, ratings: [], items: [] };
+      decadesByType[type][label].ratings.push(entry.rating);
+      decadesByType[type][label].items.push(itemSummary(entry.item, entry.rating));
+    }
+    const favoriteDecadeByType = {};
+    const leastFavoriteDecadeByType = {};
+    for (const [type, dMap] of Object.entries(decadesByType)) {
+      const minCount = threshold(countByType[type] || 0);
+      const byRating = rankEntries(dMap, minCount, Infinity);
+      const byLeast  = rankEntriesAscending(dMap, minCount, Infinity);
+      if (byRating.length) favoriteDecadeByType[type]      = byRating;
+      if (byLeast.length)  leastFavoriteDecadeByType[type]  = byLeast;
+    }
+
     // ── Per-type tag breakdowns — Games, Books, and a merged TV/Movies bucket
     // (mirroring Browse's own MOVIE+TV_SHOW "Screen" grouping, since a tag
     // like "Marvel" or "HBO" is just as relevant compared across both).
@@ -725,6 +752,8 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
       mostReviewedGenres:    rankByCount(genres,    1, Infinity),
       favoriteGenreByType,
       mostReviewedGenreByType,
+      favoriteDecadeByType,
+      leastFavoriteDecadeByType,
       favoriteTagByType,
       leastFavoriteTagByType,
       countByType,
