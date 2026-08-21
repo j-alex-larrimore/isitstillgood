@@ -660,17 +660,45 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
     // no releaseYear (a handful of untimestamped catalog entries) are simply
     // excluded from this breakdown rather than bucketed under some
     // placeholder decade.
+    //
+    // TV needs its own pass rather than reusing processedEntries: that list
+    // consolidates every review of a show down to ONE rating (correct for
+    // genre/cast/director, which don't change season to season), tagged with
+    // the PARENT show's own releaseYear (its original premiere). A season
+    // reviewed individually can air a full decade+ after that premiere on a
+    // long-running show, so decade attribution needs each SEASON's own
+    // releaseYear, not the parent's — otherwise every season of a show that
+    // premiered in the 1990s gets bucketed as "1990s" even if the specific
+    // season reviewed actually aired in the 2010s. A series-level review
+    // (made directly on the parent row, no specific season) has no
+    // individual season to attribute to, so it still falls back to the
+    // parent's own releaseYear — the only sensible year available for "the
+    // show as a whole". Books/movies/games are unaffected: processedEntries
+    // already carries one entry per individual review for those types (only
+    // an explicit series-level book review resolves to the series
+    // representative's year, same reasoning as the TV series-level case).
+    function addDecadeEntry(map, item, rating) {
+      const year = item.releaseYear;
+      if (year == null) return;
+      const label = `${Math.floor(year / 10) * 10}s`;
+      if (!map[item.mediaType]) map[item.mediaType] = {};
+      if (!map[item.mediaType][label]) map[item.mediaType][label] = { name: label, ratings: [], items: [] };
+      map[item.mediaType][label].ratings.push(rating);
+      map[item.mediaType][label].items.push(itemSummary(item, rating));
+    }
     const decadesByType = {};
     for (const entry of processedEntries) {
-      const year = entry.item.releaseYear;
-      if (year == null) continue;
-      const decade = Math.floor(year / 10) * 10;
-      const label = `${decade}s`;
-      const type = entry.item.mediaType;
-      if (!decadesByType[type]) decadesByType[type] = {};
-      if (!decadesByType[type][label]) decadesByType[type][label] = { name: label, ratings: [], items: [] };
-      decadesByType[type][label].ratings.push(entry.rating);
-      decadesByType[type][label].items.push(itemSummary(entry.item, entry.rating));
+      if (entry.item.mediaType === 'TV_SHOW') continue; // handled below, per-season
+      addDecadeEntry(decadesByType, entry.item, entry.rating);
+    }
+    for (const review of reviews) {
+      const item = review.mediaItem;
+      if (item.mediaType !== 'TV_SHOW') continue;
+      // item.parentId present = a season-level review — item IS the season
+      // row itself, carrying that season's own releaseYear. No parentId = a
+      // series-level review made directly on the parent row, where item
+      // already IS the parent.
+      addDecadeEntry(decadesByType, { ...item, mediaType: 'TV_SHOW' }, review.rating);
     }
     const favoriteDecadeByType = {};
     const leastFavoriteDecadeByType = {};
