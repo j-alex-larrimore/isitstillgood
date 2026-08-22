@@ -520,6 +520,36 @@ router.get('/', optionalAuth, async (req, res, next) => {
         ]});
       }
     }
+    // `platform`/`excludePlatform` — Browse's Filter/Not boxes, comma-
+    // separated streaming provider names (e.g. "Netflix,Max"). Only ever
+    // populated on movies and TV parent rows (scripts/sync-streaming-
+    // providers.js is show-level, not per-season), and only ever checks
+    // flatrate (subscription-included) availability, not rent/buy — "on
+    // Netflix" means it's included with the subscription, not that it's
+    // rentable there. streamingProviders is a JSON column, so matching an
+    // element inside its flatrate array isn't expressible through Prisma's
+    // query builder — resolved via a raw query to the matching ids first,
+    // same two-step pattern as everywhere else in this file that needs SQL
+    // Prisma can't generate (see buildTagVariants usage / search-suggestions).
+    async function idsWithPlatform(names) {
+      if (!names.length) return [];
+      const rows = await prisma.$queryRaw`
+        SELECT DISTINCT "MediaItem".id
+        FROM "MediaItem", jsonb_array_elements(COALESCE("streamingProviders"->'flatrate', '[]'::jsonb)) AS p
+        WHERE p->>'name' ILIKE ANY(${names.map(n => `%${n}%`)})
+      `;
+      return rows.map(r => r.id);
+    }
+    if (req.query.platform) {
+      const names = req.query.platform.split(',').map(t => t.trim()).filter(Boolean);
+      const ids = await idsWithPlatform(names);
+      andClauses.push({ id: { in: ids } });
+    }
+    if (req.query.excludePlatform) {
+      const names = req.query.excludePlatform.split(',').map(t => t.trim()).filter(Boolean);
+      const ids = await idsWithPlatform(names);
+      andClauses.push({ id: { notIn: ids } });
+    }
     if (genreFilter)    andClauses.push(genreFilter);
     let tagVariants = [];
     if (req.query.tag) {
@@ -1403,7 +1433,19 @@ router.get('/search-suggestions', async (req, res, next) => {
       ? Prisma.sql`AND "mediaType"::text IN (${Prisma.join(mediaTypesForFilter)})`
       : Prisma.empty;
 
-    const [genreRows, tagRows, personCandidates] = await Promise.all([
+    // Platform suggestions — streamingProviders is only ever populated on
+    // movies and TV parent rows (see the `platform` filter comment in GET
+    // / above), so skip the query entirely for Books/Games rather than
+    // running a jsonb scan that can never match anything there.
+    const platformQuery = (type === 'BOOK' || type === 'VIDEO_GAME')
+      ? Promise.resolve([])
+      : prisma.$queryRaw`
+          SELECT DISTINCT p->>'name' AS val
+          FROM "MediaItem", jsonb_array_elements(COALESCE("streamingProviders"->'flatrate', '[]'::jsonb)) AS p
+          WHERE p->>'name' ILIKE ${like} ${typeFilterSql}
+          ORDER BY val LIMIT 5`;
+
+    const [genreRows, tagRows, personCandidates, platformRows] = await Promise.all([
       prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ${typeFilterSql} ORDER BY g LIMIT 5`,
       prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ${typeFilterSql} ORDER BY t LIMIT 5`,
       // A wider net than what's actually shown — re-ranked by review count
@@ -1415,6 +1457,7 @@ router.get('/search-suggestions', async (req, res, next) => {
         select: { id: true, name: true, _count: { select: { directed: true, appeared: true, authored: true } } },
         take: 20,
       }),
+      platformQuery,
     ]);
 
     const relevantRoleCount = p => {
@@ -1457,6 +1500,7 @@ router.get('/search-suggestions', async (req, res, next) => {
     // type, ahead of confirming a specific person they likely already typed.
     res.json([
       ...decadeSuggestions.map(d => ({ kind: 'decade', label: `${d}s`, value: d })),
+      ...platformRows.map(r => ({ kind: 'platform', label: r.val, value: r.val })),
       ...tagRows.map(r => ({ kind: 'tag', label: r.val, value: r.val })),
       ...genreRows.map(r => ({ kind: 'genre', label: r.val, value: r.val })),
       ...persons,
