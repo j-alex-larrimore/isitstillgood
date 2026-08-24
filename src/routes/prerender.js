@@ -108,6 +108,81 @@ router.get('/item/:slug', async (req, res, next) => {
 
     const castList = (item.cast || []).slice(0, 8).map(c => c.name).join(', ');
 
+    // External community scores — deliberately rendered as plain attributed
+    // text and NOT folded into the aggregateRating JSON-LD below.
+    // aggregateRating must describe ratings THIS site collected; passing
+    // TMDB's or IGDB's off as ours would misrepresent a third party's data
+    // and is exactly the kind of structured-data misuse Google penalises.
+    // Mirrors the meta-chips item.html already shows (TMDB 7.7 / IGDB 82).
+    const externalBits = [
+      ...(item.tmdbRating      ? [`TMDB ${item.tmdbRating.toFixed(1)}/10`] : []),
+      ...(item.openCriticScore ? [`IGDB ${item.openCriticScore}/100`]      : []),
+    ];
+    const externalHtml = externalBits.length
+      ? `<div class="meta">Elsewhere: ${externalBits.map(esc).join(' · ')}</div>`
+      : '';
+
+    // Where to watch — the single biggest piece of genuinely differentiating,
+    // regularly-refreshed content these pages have (synced weekly by
+    // scripts/sync-streaming-providers.js, US region, JustWatch via TMDB).
+    // It was previously rendered only on the real page, leaving crawlers with
+    // a TMDB synopsis and nothing else on titles that had no reviews yet.
+    // Display logic intentionally mirrors item.html's exactly — subscription
+    // (flatrate) first, falling back to rent/buy — because prerendered output
+    // that diverges from what a user sees is cloaking. Note this differs from
+    // Browse's platform FILTER, which is flatrate-only by design; that's a
+    // filtering decision, this is a display one.
+    // TMDB's terms require crediting JustWatch by name wherever this data is
+    // shown (see CLAUDE.md / item.html) — don't drop that attribution.
+    let streamingHtml = '';
+    let streamingSummary = '';
+    const sp = item.streamingProviders;
+    if ((item.mediaType === 'MOVIE' || item.mediaType === 'TV_SHOW') && sp) {
+      const flatrate = sp.flatrate || [];
+      const rentBuy = [...(sp.rent || []), ...(sp.buy || [])]
+        .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
+      const providers = flatrate.length ? flatrate : rentBuy;
+      if (providers.length && sp.link) {
+        const label = flatrate.length
+          ? 'Streaming in the US on'
+          : 'Available to rent or buy in the US on';
+        // TMDB lists storefront resellers of a service ("HBO Max Amazon
+        // Channel", "Paramount+ Roku Premium Channel") and ad-tier variants
+        // as separate providers alongside the service itself, and returns
+        // them in no useful order — Prometheus led with "HBO Max Amazon
+        // Channel" ahead of plain "HBO Max". Nearly every major service has
+        // such a shadow entry (verified against the catalog: 10.8k rows for
+        // "Amazon Prime Video with Ads" vs 10.9k for "Amazon Prime Video"),
+        // so without this the recognisable name often loses the snippet slot
+        // it needs to be worth anything in search results. Stable partition,
+        // so the reseller entries are demoted rather than dropped.
+        const isReseller = n => /(Amazon Channel|Apple TV Channel|Roku Premium Channel|with Ads)$/i.test(n);
+        const ordered = [
+          ...providers.filter(p => !isReseller(p.name)),
+          ...providers.filter(p =>  isReseller(p.name)),
+        ];
+        const names = ordered.slice(0, 8).map(p => p.name);
+        streamingHtml = `
+  <h2>Where to Watch</h2>
+  <p>${esc(label)} ${esc(names.join(', '))}.</p>
+  <p style="font-size:0.85em;color:#7A6E5A">Streaming data by <a href="${esc(sp.link)}" rel="noopener">JustWatch</a>.</p>`;
+        // Folded into the meta description too — on a title with no reviews
+        // this is the only thing making that snippet differ from every other
+        // site running the same TMDB synopsis.
+        streamingSummary = flatrate.length
+          ? ` Now streaming on ${names.slice(0, 3).join(', ')}.`
+          : ` Available to rent or buy on ${names.slice(0, 3).join(', ')}.`;
+      } else {
+        streamingHtml = `
+  <h2>Where to Watch</h2>
+  <p>Not currently available to stream, rent, or buy in the US.</p>`;
+      }
+    }
+
+    // `desc` is built above before streaming is known; this is the version
+    // that actually goes in the meta/og description tags.
+    const metaDesc = `${desc}${streamingSummary}`;
+
     const reviewsHtml = reviews.map(r => `
       <div style="border-bottom:1px solid #ddd;padding:12px 0">
         <strong>${esc(r.user.displayName)}</strong> rated it <strong>${r.rating}/10</strong> — ${ratingToVerdict(r.rating)}
@@ -142,9 +217,9 @@ router.get('/item/:slug', async (req, res, next) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   ${isReviewlessSeason ? '<meta name="robots" content="noindex,follow">' : ''}
   <title>${esc(title)}${esc(year)} — Is It (Still) Good?</title>
-  <meta name="description" content="${esc(desc)}">
+  <meta name="description" content="${esc(metaDesc)}">
   <meta property="og:title" content="${esc(title)}${esc(year)} — Is It (Still) Good?">
-  <meta property="og:description" content="${esc(desc)}">
+  <meta property="og:description" content="${esc(metaDesc)}">
   ${item.imageUrl ? `<meta property="og:image" content="${esc(item.imageUrl)}">` : ''}
   <link rel="canonical" href="${BASE}/item.html?slug=${esc(item.slug)}">
   <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
@@ -167,8 +242,10 @@ router.get('/item/:slug', async (req, res, next) => {
     ${people ? ` · ${esc(people)}` : ''}
   </div>
   ${avg ? `<div class="rating">${avg.toFixed(1)}/10 — ${ratingToVerdict(avg)} · ${count} review${count !== 1 ? 's' : ''}</div>` : '<div class="meta">No reviews yet</div>'}
+  ${externalHtml}
   ${item.description ? `<div class="desc">${esc(item.description)}</div>` : ''}
   ${castList ? `<p><strong>Cast:</strong> ${esc(castList)}</p>` : ''}
+  ${streamingHtml}
   <hr>
   <h2>Community Reviews</h2>
   ${reviewsHtml || '<p>No reviews yet — be the first!</p>'}
