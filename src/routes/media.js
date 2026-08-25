@@ -38,7 +38,7 @@ function buildTagVariants(rawTerm) {
 // were excluded from their average). Matches the same "series rating if one
 // exists, else average of seasons" convention used by taste-profile in
 // src/routes/users.js.
-async function buildUserRatingsMap(userId, whereExtra = {}) {
+async function buildUserRatingsMap(userId, whereExtra = {}, individualBookMode = false) {
   const reviews = await prisma.review.findMany({
     where: { userId, ...whereExtra },
     select: { mediaItemId: true, rating: true, seasonNumber: true },
@@ -46,11 +46,22 @@ async function buildUserRatingsMap(userId, whereExtra = {}) {
   // A book series representative can carry two separate reviews on the same
   // mediaItemId — an ordinary individual rating of that one book
   // (seasonNumber: null) and a genuine whole-series verdict (seasonNumber:
-  // 0, see item.html's Rating Scope toggle) — the direct series review
-  // always wins over the individual one when both exist.
+  // 0, see item.html's Rating Scope toggle). Which one should win depends
+  // entirely on what the card being built actually represents: the
+  // condensed/series card (individualBookMode: false, the default) stands
+  // in for "the series as a whole", so the series verdict is the more
+  // authoritative answer there. But Browse's "Show Individually" toggle
+  // renders that exact same row as book 1 specifically, alongside book 2,
+  // book 3, etc. — showing the series verdict there is simply wrong, not a
+  // stand-in choice, since the card is explicitly "book 1", not "the
+  // series". Confirmed live: He Who Fights With Monsters book 1 individually
+  // rated 7, later given an overall series verdict of 5 — the individually-
+  // shown book-1 card was showing 5 (the series review winning
+  // unconditionally, regardless of which card was being built).
   const map = {};
   for (const r of reviews) {
-    if (map[r.mediaItemId] == null || r.seasonNumber === 0) map[r.mediaItemId] = r.rating;
+    const prefersThis = individualBookMode ? r.seasonNumber !== 0 : r.seasonNumber === 0;
+    if (map[r.mediaItemId] == null || prefersThis) map[r.mediaItemId] = r.rating;
   }
 
   const seasons = await prisma.mediaItem.findMany({
@@ -77,9 +88,18 @@ async function buildUserRatingsMap(userId, whereExtra = {}) {
   // other books in the series they'd individually rated (confirmed live:
   // a series showed the user's 7/10 for book 1 even though they'd since
   // rated several later books much lower).
+  //
+  // Entirely skipped in individualBookMode: this whole block exists to
+  // answer "what's my rating for the SERIES", which only makes sense for
+  // the condensed/representative card. In individual mode the representative
+  // is being shown as book 1 specifically, and every book (including book 1)
+  // already got its own direct rating from the loop above — cross-book
+  // averaging or letting a series-level review leak onto book 1's own card
+  // would both be wrong there, not just a different way of answering the
+  // same question.
   const seasonIds = new Set(seasons.map(s => s.id));
   const bookReviewIds = reviews.filter(r => !seasonIds.has(r.mediaItemId)).map(r => r.mediaItemId);
-  if (bookReviewIds.length) {
+  if (bookReviewIds.length && !individualBookMode) {
     const reviewedBooks = await prisma.mediaItem.findMany({
       where: { id: { in: bookReviewIds }, mediaType: 'BOOK', seriesName: { not: null } },
       select: { seriesName: true },
@@ -125,6 +145,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
   // surface in a search for any of those names — title-only search sidesteps
   // that class of noise entirely.
   const qScope = req.query.qScope === 'title' ? 'title' : 'keyword';
+  // Whether this request is Browse's "Show Individually" book view (each
+  // book its own card, e.g. book 1 shown as book 1, not as the series
+  // representative) — see buildUserRatingsMap's individualBookMode param.
+  const individualBookMode = type === 'BOOK' && !!req.query.individual;
   const friendsOnly      = req.query.friendsOnly === 'true';
   // excludeFriends: comma-separated emails to exclude from friend ratings
   const excludeFriends   = req.query.excludeFriends
@@ -213,7 +237,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
           return res.json({ items: [], total: 0, page: parseInt(page), pages: 0, reviewedByPrivate: true });
         }
         reviewedByUserId = reviewedByUser.id;
-        req.reviewedByRatings = await buildUserRatingsMap(reviewedByUser.id, { visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] }, ...consumedFilter });
+        req.reviewedByRatings = await buildUserRatingsMap(reviewedByUser.id, { visibility: { in: ['PUBLIC', 'FRIENDS_ONLY'] }, ...consumedFilter }, individualBookMode);
         // reviewedByIds still drives the legacy "only their reviewed items"
         // filter below (search.html) — direct ids only, since andClauses
         // separately rolls seasons up to parentId for the reviewStatus path.
@@ -232,7 +256,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // below). Cheap regardless — bounded by the user's own review count, not
     // catalog size. Not surfaced per-card outside the friend-comparison case.
     if (req.user && (!reviewedByUserId || req.user.id !== reviewedByUserId)) {
-      req.myRatings = await buildUserRatingsMap(req.user.id, consumedFilter);
+      req.myRatings = await buildUserRatingsMap(req.user.id, consumedFilter, individualBookMode);
     }
 
     // Person search — look up matching person IDs
