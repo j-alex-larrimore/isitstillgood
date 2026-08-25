@@ -126,7 +126,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
   // that class of noise entirely.
   const qScope = req.query.qScope === 'title' ? 'title' : 'keyword';
   const friendsOnly      = req.query.friendsOnly === 'true';
-  // excludeFriends: comma-separated usernames to exclude from friend ratings
+  // excludeFriends: comma-separated emails to exclude from friend ratings
   const excludeFriends   = req.query.excludeFriends
     ? req.query.excludeFriends.split(',').map(s => s.trim()).filter(Boolean)
     : [];
@@ -396,10 +396,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
       );
       friendIds.push(req.user.id);
 
-      // Apply excluded friends — look up their user IDs by username
+      // Apply excluded friends — look up their user IDs by email. Email, not
+      // username: excludedFriends stores email now that a username can be
+      // changed by its owner (PATCH /api/users/me/settings) — a stored
+      // username would silently stop matching on rename.
       if (excludeFriends.length) {
         const excluded = await prisma.user.findMany({
-          where: { username: { in: excludeFriends } },
+          where: { email: { in: excludeFriends } },
           select: { id: true },
         });
         const excludedIds = new Set(excluded.map(u => u.id));
@@ -1854,7 +1857,7 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
     // Friends-only filter — restrict to reviews by friends of the logged-in user
     let userFilter = {};
     const friendsOnly      = req.query.friendsOnly === 'true';
-  // excludeFriends: comma-separated usernames to exclude from friend ratings
+  // excludeFriends: comma-separated emails to exclude from friend ratings
   const excludeFriends   = req.query.excludeFriends
     ? req.query.excludeFriends.split(',').map(s => s.trim()).filter(Boolean)
     : [];

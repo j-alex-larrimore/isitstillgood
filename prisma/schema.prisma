@@ -138,7 +138,10 @@ model User {
   profilePublic   Boolean   @default(false)
   tasteThreshold  Int       @default(2)
   ignoredGenres   String[]  @default([])  // false = friends only, true = public
-  excludedFriends String[]  @default([])  // usernames excluded from friend rating filters
+  // Emails (not usernames) — a username can now be changed by its owner
+  // (see PATCH /api/users/me/settings), and a stored username would go
+  // stale silently on rename since nothing here points back at a user id.
+  excludedFriends String[]  @default([])  // emails excluded from friend rating filters
   consumedWithin  String?                 // e.g. "12m" or "2y" — default recency filter
 
   // Self-service account cancellation (soft — distinct from the admin

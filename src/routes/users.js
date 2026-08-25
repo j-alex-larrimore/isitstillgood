@@ -271,6 +271,9 @@ router.patch('/me/settings', requireAuth, [
   body('profilePublic').optional().isBoolean(),
   body('bio').optional().trim().isLength({ max: 500 }),
   body('displayName').optional().trim().isLength({ min: 1, max: 100 }),
+  // Same format rule as signup (POST /api/auth/register) — a changed
+  // username still has to satisfy whatever a brand-new one would.
+  body('username').optional().matches(/^[a-zA-Z0-9_]{3,30}$/).withMessage('Username: 3-30 chars, letters/numbers/underscores only'),
 ], async (req, res, next) => {
   const e = validationResult(req);
   if (!e.isEmpty()) return res.status(422).json({ errors: e.array() });
@@ -279,6 +282,7 @@ router.patch('/me/settings', requireAuth, [
     if (req.body.profilePublic !== undefined) data.profilePublic = req.body.profilePublic;
     if (req.body.bio !== undefined)           data.bio           = req.body.bio;
     if (req.body.displayName !== undefined)   data.displayName   = req.body.displayName;
+    if (req.body.username !== undefined)      data.username      = req.body.username;
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
@@ -289,7 +293,16 @@ router.patch('/me/settings', requireAuth, [
       },
     });
     res.json(updated);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // @@unique on username — a taken name, not a real server error. Note a
+    // rename doesn't touch the JWT (it only ever carries the user id, see
+    // src/lib/tokens.js), so no re-login is needed; existing short share
+    // links minted under the old username DO go stale, though (ShareLink.path
+    // is a stored literal string with no user-id reference to resolve
+    // through) — an accepted gap, not handled here.
+    if (err.code === 'P2002') return res.status(409).json({ error: 'Username taken' });
+    next(err);
+  }
 });
 
 // ─── GET /api/users/:username/taste-profile ───────────────────────────────────

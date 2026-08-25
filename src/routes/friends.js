@@ -12,8 +12,15 @@ router.get('/', requireAuth, async (req, res, next) => {
         OR: [{ initiatorId: req.user.id }, { receiverId: req.user.id }],
       },
       include: {
-        initiator: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
-        receiver:  { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+        // email included so the profile page's "exclude friend from
+        // ratings" picker can resolve a chosen friend to their email —
+        // excludedFriends stores email, not username, since username is
+        // now user-editable (see PATCH /api/users/me/settings) and a
+        // stored username would silently go stale on rename. Only ever
+        // shown to a mutually-ACCEPTED friend, same trust boundary the
+        // email-based friend search (GET /users/search) already uses.
+        initiator: { select: { id: true, username: true, displayName: true, avatarUrl: true, email: true } },
+        receiver:  { select: { id: true, username: true, displayName: true, avatarUrl: true, email: true } },
       },
     });
 
