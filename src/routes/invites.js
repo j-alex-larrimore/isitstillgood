@@ -261,7 +261,14 @@ router.post('/claim', requireAuth, [
       where: { token: req.body.token },
     });
 
-    if (!invite || invite.claimed || invite.expiresAt < new Date()) {
+    // A generic link (email: null — the "Share via..." button, see POST /
+    // above) is meant to be handed to a whole group, so it's exempt from the
+    // single-use check entirely — never marked claimed, so every recipient
+    // who signs up or signs in through it becomes an instant friend, not
+    // just the first. A personalized invite (email set — sent to one
+    // specific address) stays single-use, since it was only ever meant for
+    // that one recipient.
+    if (!invite || (invite.email && invite.claimed) || invite.expiresAt < new Date()) {
       return res.status(410).json({ error: 'Invalid or expired invite token' });
     }
 
@@ -270,11 +277,17 @@ router.post('/claim', requireAuth, [
       return res.status(400).json({ error: 'Cannot claim your own invite' });
     }
 
-    // Mark the token as used so it can't be claimed again
-    await prisma.inviteToken.update({
-      where: { token: req.body.token },
-      data: { claimed: true },
-    });
+    // Mark the token as used so it can't be claimed again — generic links
+    // skip this and stay claimed:false forever, both so the check above
+    // keeps letting new people through and so POST /'s "reuse an existing
+    // unclaimed generic link" lookup keeps finding and reusing this same
+    // token on the next "Share via..." click instead of minting a new one.
+    if (invite.email) {
+      await prisma.inviteToken.update({
+        where: { token: req.body.token },
+        data: { claimed: true },
+      });
+    }
 
     // Create an ACCEPTED friendship directly — no pending step needed
     // since the invite itself is the acceptance of the connection
