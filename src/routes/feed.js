@@ -127,7 +127,7 @@ router.get('/', optionalAuth, [
           ? r.mediaItem.seriesName
           : undefined,
       },
-      myReaction: r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null,
+      myReaction: req.user ? (r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null) : null,
       reactionSummary: r.reactions.reduce((acc, { emoji }) => {
         acc[emoji] = (acc[emoji] || 0) + 1; return acc;
       }, {}),
