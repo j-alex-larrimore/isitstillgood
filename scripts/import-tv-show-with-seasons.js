@@ -7,7 +7,7 @@
 // admin review UI before running it at ~9,400-show scale.
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, connectCast, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const { searchTmdb, getTmdbDetail } = require('../src/services/mediaLookup');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -43,6 +43,7 @@ async function main() {
     }
 
     const slug = await uniqueSlug(slugify(detail.title, releaseYear));
+    const mainCastData = await connectCast(detail.cast || []);
     const parent = await prisma.mediaItem.create({
       data: {
         mediaType: 'TV_SHOW',
@@ -57,7 +58,8 @@ async function main() {
         tmdbRating: detail.tmdbRating || null,
         seasons: detail.seasons || null,
         directors: await connectPersons(detail.directors || []), // creators, per getTmdbDetail
-        cast: await connectPersons(detail.cast || []),
+        cast: mainCastData.cast,
+        castOrder: mainCastData.castOrder,
       },
     });
     console.log(`Created parent "${parent.title}" (${releaseYear}), ${detail.seasons || 0} season(s) — ${parent.slug}`);
@@ -75,6 +77,7 @@ async function main() {
       // TMDB's season credits surface who aren't part of the main cast.
       const guestCast = season.cast.filter(name => !mainCastNames.has(name.toLowerCase()));
       const seasonSlug = await uniqueSlug(slugify(`${detail.title} Season ${n}`, season.releaseYear));
+      const guestCastData = await connectCast(guestCast);
 
       await prisma.mediaItem.create({
         data: {
@@ -87,7 +90,8 @@ async function main() {
           seasonNumber: n,
           genres: normalizeGenres(detail.genres || []),
           excludedCast,
-          cast: await connectPersons(guestCast),
+          cast: guestCastData.cast,
+          castOrder: guestCastData.castOrder,
         },
       });
       console.log(`  Season ${n} (${season.releaseYear || 'year unknown'}): ${guestCast.length} guest cast, ${excludedCast.length} excluded`);

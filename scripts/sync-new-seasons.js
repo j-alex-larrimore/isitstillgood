@@ -17,7 +17,7 @@
 // pipeline (sync-new-releases.js, sync-new-tv.js).
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectCast } = require('../src/lib/mediaHelpers');
 const { getTvSeasonNumbers, getTvSeasonCast } = require('../src/services/mediaLookup');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -56,6 +56,7 @@ async function main() {
             if (!season) continue;
             const excludedCast = show.cast.map(c => c.name).filter(name => !season.cast.some(c => c.toLowerCase() === name.toLowerCase()));
             const guestCast = season.cast.filter(name => !mainCastNames.has(name.toLowerCase()));
+            const guestCastData = await connectCast(guestCast);
             const seasonSlug = await uniqueSlug(slugify(`${show.title} Season ${n}`, season.releaseYear));
             await prisma.mediaItem.create({
               data: {
@@ -68,7 +69,8 @@ async function main() {
                 seasonNumber: n,
                 genres: show.genres,
                 excludedCast,
-                cast: await connectPersons(guestCast),
+                cast: guestCastData.cast,
+                castOrder: guestCastData.castOrder,
               },
             });
           }

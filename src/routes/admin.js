@@ -7,7 +7,7 @@ const { requireAdmin } = require('../middleware/admin');
 const { fetchExternalRatings } = require('../services/externalRatings');
 const {
   normalizeTags, normalizeGenres, normalizeGameGenres, normalizeBookGenres,
-  slugify, uniqueSlug, connectPersons, checkSeriesCollision, normalizeTitleForSearch,
+  slugify, uniqueSlug, connectPersons, connectCast, sortByCastOrder, checkSeriesCollision, normalizeTitleForSearch,
 } = require('../lib/mediaHelpers');
 
 // Genres are normalized server-side, by mediaType, no matter what the
@@ -173,6 +173,8 @@ router.post('/media', requireAdmin, [
       seriesCollisionWarning = await checkSeriesCollision(seriesName, authorNames || []);
     }
 
+    const castData = await connectCast(castNames);
+
     const item = await prisma.mediaItem.create({
       data: {
         mediaType,
@@ -201,7 +203,8 @@ router.post('/media', requireAdmin, [
         seriesNumber:    seriesNumber ? parseFloat(seriesNumber) : null,
         // Person relations
         directors: await connectPersons(directorNames),
-        cast:      await connectPersons(castNames),
+        cast:      castData.cast,
+        castOrder: castData.castOrder,
         authors:   await connectPersons(authorNames),
       },
       include: { directors: true, cast: true, authors: true },
@@ -239,9 +242,11 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
     // An empty array clears the relation entirely (allows removing all cast).
     const { castNames, directorNames, authorNames } = req.body;
 
-    // Pass isUpdate=true so connectPersons uses {set:[...]} to fully replace relations
+    // Pass isUpdate=true so connectPersons/connectCast use {set:[...]} to fully replace relations
     if (castNames !== undefined) {
-      data.cast = await connectPersons(castNames, true);
+      const castData = await connectCast(castNames, true);
+      data.cast = castData.cast;
+      data.castOrder = castData.castOrder;
     }
     if (directorNames !== undefined) {
       data.directors = await connectPersons(directorNames, true);
@@ -289,9 +294,11 @@ router.patch('/media/:id', requireAdmin, async (req, res, next) => {
         authors:   { select: { id: true, name: true }, take: 100 },
       },
     });
-    // Sort people alphabetically — orderBy not supported on implicit M2M
+    // Directors/authors alphabetically — orderBy not supported on implicit
+    // M2M, and these lists are short enough that alphabetical is fine. Cast
+    // uses castOrder (billing order) instead — see sortByCastOrder.
     const sbn = (a, b) => a.name.localeCompare(b.name);
-    if (item.cast)      item.cast      = item.cast.sort(sbn);
+    if (item.cast)      item.cast      = sortByCastOrder(item.cast, item.castOrder);
     if (item.directors) item.directors = item.directors.sort(sbn);
     if (item.authors)   item.authors   = item.authors.sort(sbn);
     res.json(seriesCollisionWarning ? { ...item, seriesCollisionWarning } : item);
@@ -393,16 +400,16 @@ router.get('/shows', requireAdmin, async (req, res, next) => {
       select: {
         id: true, title: true, releaseYear: true, imageUrl: true,
         seasons: true, description: true, genres: true, tags: true, tmdbId: true,
-        // Include cast so seasons can inherit the main cast — ordered by name for consistency
+        castOrder: true,
+        // Include cast so seasons can inherit the main cast — in billing order
         cast: { select: { id: true, name: true }, take: 100 },
       },
       orderBy: { title: 'asc' },
       take: 20,
     });
-    // Sort cast alphabetically — orderBy not supported on implicit M2M
     const sorted = shows.map(s => ({
       ...s,
-      cast: (s.cast || []).sort((a, b) => a.name.localeCompare(b.name)),
+      cast: sortByCastOrder(s.cast, s.castOrder),
     }));
     res.json(sorted);
   } catch (err) { next(err); }
@@ -461,7 +468,7 @@ router.get('/season-data', requireAdmin, async (req, res, next) => {
         source: 'parent_show',        // tells the frontend where this data came from
         sourceLabel: 'the main show entry',
         seasonNumber: null,
-        cast: parentShow.cast.map(p => p.name),
+        cast: sortByCastOrder(parentShow.cast, parentShow.castOrder).map(p => p.name),
         genres: parentShow.genres || [],
         description: parentShow.description || '',
         imageUrl: null,               // don't copy the show poster to individual seasons
@@ -473,7 +480,7 @@ router.get('/season-data', requireAdmin, async (req, res, next) => {
       source: 'previous_season',
       sourceLabel: `Season ${previousSeason.seasonNumber}`,
       seasonNumber: previousSeason.seasonNumber,
-      cast: previousSeason.cast.map(p => p.name),  // array of name strings
+      cast: sortByCastOrder(previousSeason.cast, previousSeason.castOrder).map(p => p.name),  // array of name strings, billing order
       genres: previousSeason.genres || [],
       description: previousSeason.description || '',
       imageUrl: previousSeason.imageUrl || null,    // previous season's poster
@@ -657,7 +664,7 @@ router.get('/media/pending', requireAdmin, async (req, res, next) => {
           imageUrl: true, description: true, genres: true, tags: true,
           seriesName: true, seriesNumber: true, tmdbId: true, tmdbRating: true,
           goodreadsId: true, openCriticId: true, openCriticScore: true,
-          seasons: true, createdAt: true,
+          seasons: true, createdAt: true, castOrder: true,
           directors: { select: { id: true, name: true }, take: 50 },
           authors:   { select: { id: true, name: true }, take: 50 },
           cast:      { select: { id: true, name: true }, take: 50 },
@@ -667,7 +674,7 @@ router.get('/media/pending', requireAdmin, async (req, res, next) => {
           seasonEntries: {
             where: { seasonNumber: { not: null } },
             select: {
-              id: true, title: true, seasonNumber: true, releaseYear: true, excludedCast: true,
+              id: true, title: true, seasonNumber: true, releaseYear: true, excludedCast: true, castOrder: true,
               cast: { select: { id: true, name: true }, take: 50 },
             },
             orderBy: { seasonNumber: 'asc' },
@@ -678,6 +685,14 @@ router.get('/media/pending', requireAdmin, async (req, res, next) => {
       }),
       prisma.mediaItem.count({ where }),
     ]);
+    // Billing order — see sortByCastOrder. Applied here rather than at
+    // query time since Prisma can't sort an implicit M2M relation itself.
+    for (const item of items) {
+      item.cast = sortByCastOrder(item.cast, item.castOrder);
+      for (const season of item.seasonEntries || []) {
+        season.cast = sortByCastOrder(season.cast, season.castOrder);
+      }
+    }
     res.json({ items, total, page, pages: Math.ceil(total / take) });
   } catch (err) { next(err); }
 });
@@ -696,6 +711,7 @@ router.get('/media/by-slug/:slug', requireAdmin, async (req, res, next) => {
       },
     });
     if (!item) return res.status(404).json({ error: 'Not found' });
+    item.cast = sortByCastOrder(item.cast, item.castOrder);
     res.json(item);
   } catch (err) { next(err); }
 });
@@ -775,6 +791,7 @@ router.post('/bulk-import', requireAdmin, async (req, res, next) => {
 
       const finalTitle = m.title;
       const slug = await uniqueSlug(slugify(finalTitle, m.releaseYear));
+      const castData = await connectCast(m.cast || []);
       await prisma.mediaItem.create({
         data: {
           mediaType:   'MOVIE',
@@ -791,7 +808,8 @@ router.post('/bulk-import', requireAdmin, async (req, res, next) => {
           tmdbId:      m.tmdbId,
           tmdbRating:  m.tmdbRating,
           directors:   await connectPersons(m.directors || []),
-          cast:        await connectPersons(m.cast || []),
+          cast:        castData.cast,
+          castOrder:   castData.castOrder,
         },
       });
       results.added.push(m.title);

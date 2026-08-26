@@ -5,7 +5,7 @@ const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
-const { normalizeTitleForSearch, clusterBookSeries, pickSeriesRepresentative } = require('../lib/mediaHelpers');
+const { normalizeTitleForSearch, clusterBookSeries, pickSeriesRepresentative, sortByCastOrder } = require('../lib/mediaHelpers');
 
 // Shared by the `tag` param (tags array only, AND-combined with other active
 // filters — used by search.html's dedicated tag field), the genre/tag
@@ -1569,16 +1569,23 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     // didn't exist. Review happens via GET /api/admin/media/pending instead.
     if (!item.verified) return res.status(404).json({ error: 'Not found' });
 
-    // For TV seasons: merge parent cast with season-specific cast.
+    // For TV seasons: merge parent cast with season-specific cast — season's
+    // own cast (its billing order) first, then parent-only regulars (the
+    // parent's own billing order) appended, rather than sorting the merged
+    // list as one — a guest star billed #2 for this season shouldn't jump
+    // ahead of the show's #1-billed lead just because they're not in this
+    // season's own cast list.
     // Exclude any cast members listed in excludedCast (departed actors).
     // Exclusion is by name (case-insensitive) so it works even if Person IDs differ.
     if (item.parentId && item.parent?.cast?.length) {
       const seasonCastIds  = new Set((item.cast || []).map(p => p.id));
       const excluded       = new Set((item.excludedCast || []).map(n => n.toLowerCase()));
-      const parentOnlyCast = item.parent.cast.filter(p =>
+      const parentOnlyCast = sortByCastOrder(item.parent.cast, item.parent.castOrder).filter(p =>
         !seasonCastIds.has(p.id) && !excluded.has(p.name.toLowerCase())
       );
-      item.cast = [...(item.cast || []), ...parentOnlyCast];
+      item.cast = [...sortByCastOrder(item.cast, item.castOrder), ...parentOnlyCast];
+    } else {
+      item.cast = sortByCastOrder(item.cast, item.castOrder);
     }
     // Also filter season's own cast against excludedCast (in case someone was
     // added to a season's cast and then added to excludedCast later)
@@ -1785,10 +1792,12 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       }
     }
 
-    // Sort cast, directors, authors alphabetically in JS — Prisma doesn't support
-    // orderBy on implicit many-to-many relations, so we sort after fetching
+    // Directors/authors alphabetically in JS — Prisma doesn't support orderBy
+    // on implicit many-to-many relations, and these lists are short enough
+    // that alphabetical is fine. Cast was already sorted into billing order
+    // above (sortByCastOrder, before the season/parent merge) — don't
+    // re-sort it alphabetically here, that's the exact bug this replaced.
     const sortByName = (a, b) => a.name.localeCompare(b.name);
-    if (item.cast)      item.cast      = item.cast.sort(sortByName);
     if (item.directors) item.directors = item.directors.sort(sortByName);
     if (item.authors)   item.authors   = item.authors.sort(sortByName);
 

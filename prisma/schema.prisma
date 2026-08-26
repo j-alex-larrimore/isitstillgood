@@ -72,6 +72,20 @@ model MediaItem {
   // Movie-specific
   directors       Person[]   @relation("DirectedBy")
   cast            Person[]   @relation("AppearedIn")
+  // Person ids from `cast` above, in billing order. Necessary because `cast`
+  // is an implicit many-to-many relation — Prisma gives implicit M2M no
+  // extra columns to carry a per-relation order on, and Postgres doesn't
+  // guarantee row order for a SELECT without ORDER BY, so retrieval order
+  // was effectively undefined once connected (confirmed: multiple read
+  // sites were papering over this with an explicit alphabetical-by-name
+  // sort — see media.js's GET /:slug and admin.js — which is what actually
+  // produced the "random-looking" order relative to real billing).
+  // Written by connectCast() (src/lib/mediaHelpers.js) whenever cast is
+  // set, sourced from TMDB's already-billing-ordered credits.cast. Empty
+  // for any item added before this field existed — read sites fall back to
+  // the old alphabetical sort when castOrder is empty, not to Postgres's
+  // undefined native order.
+  castOrder       String[]   @default([])
 
   // TV Show-specific
   // parentId links a season entry back to its parent show MediaItem.

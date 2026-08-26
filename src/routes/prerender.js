@@ -4,6 +4,7 @@
 
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
+const { sortByCastOrder } = require('../lib/mediaHelpers');
 const router  = express.Router();
 const prisma  = new PrismaClient();
 
@@ -50,14 +51,19 @@ router.get('/item/:slug', async (req, res, next) => {
     // plus whichever parent-show regulars aren't already covered, minus
     // anyone in excludedCast (departed actors) — matched by name since a
     // Person's id can differ between how it's connected on the season vs.
-    // the parent.
+    // the parent. Each half sorted into its OWN billing order before
+    // merging (see sortByCastOrder) — a prerendered page that showed cast
+    // in a different order than the real page would be cloaking, not just
+    // a cosmetic gap.
     if (item.parentId && item.parent?.cast?.length) {
       const seasonCastIds  = new Set((item.cast || []).map(p => p.id));
       const excluded       = new Set((item.excludedCast || []).map(n => n.toLowerCase()));
-      const parentOnlyCast = item.parent.cast.filter(p =>
+      const parentOnlyCast = sortByCastOrder(item.parent.cast, item.parent.castOrder).filter(p =>
         !seasonCastIds.has(p.id) && !excluded.has(p.name.toLowerCase())
       );
-      item.cast = [...(item.cast || []), ...parentOnlyCast];
+      item.cast = [...sortByCastOrder(item.cast, item.castOrder), ...parentOnlyCast];
+    } else {
+      item.cast = sortByCastOrder(item.cast, item.castOrder);
     }
     if (item.excludedCast?.length) {
       const excluded = new Set(item.excludedCast.map(n => n.toLowerCase()));

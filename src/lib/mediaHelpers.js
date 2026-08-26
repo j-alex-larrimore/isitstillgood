@@ -480,16 +480,15 @@ async function uniqueSlug(base) {
 }
 
 // ─── Person relations ────────────────────────────────────────────────────
-// connectPersons builds the Prisma relation payload for cast/directors/authors.
-// isUpdate=true  → uses {set:[...]} which replaces the full relation (correct for PATCH)
-// isUpdate=false → uses {connect:[...]} which adds relations (correct for CREATE)
-// Empty names + isUpdate → {set:[]} removes all; empty + create → undefined (skip field)
-async function connectPersons(names, isUpdate = false) {
-  if (!names?.length) {
-    return isUpdate ? { set: [] } : undefined;
-  }
-
-  const persons = await Promise.all(names.map(name => {
+// Shared upsert step behind connectPersons/connectCast below — every person
+// name becomes a real Person row (matched/created by a slugified version of
+// the name), in the SAME order the names array was given. Promise.all
+// preserves input order in its results regardless of which upsert actually
+// resolves first, which connectCast below depends on to capture billing
+// order — don't swap this for sequential awaits assuming it'd be "more
+// correct"; order preservation is exactly why Promise.all is used here.
+async function upsertPersonsByName(names) {
+  return Promise.all(names.map(name => {
     const personSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     return prisma.person.upsert({
       where: { slug: personSlug },
@@ -497,9 +496,60 @@ async function connectPersons(names, isUpdate = false) {
       create: { name, slug: personSlug },
     });
   }));
+}
 
+// connectPersons builds the Prisma relation payload for directors/authors
+// (cast should use connectCast below instead — see its comment for why).
+// isUpdate=true  → uses {set:[...]} which replaces the full relation (correct for PATCH)
+// isUpdate=false → uses {connect:[...]} which adds relations (correct for CREATE)
+// Empty names + isUpdate → {set:[]} removes all; empty + create → undefined (skip field)
+async function connectPersons(names, isUpdate = false) {
+  if (!names?.length) {
+    return isUpdate ? { set: [] } : undefined;
+  }
+  const persons = await upsertPersonsByName(names);
   const ids = persons.map(p => ({ id: p.id }));
   return isUpdate ? { set: ids } : { connect: ids };
+}
+
+// Cast specifically needs billing order preserved, which connectPersons
+// alone can't provide — `cast` is an implicit many-to-many relation, so
+// Prisma has no extra column to hang a per-relation order off of, and
+// Postgres doesn't guarantee row order for a SELECT without ORDER BY. This
+// returns BOTH the relation payload (spread as `cast` into the caller's
+// data) and a parallel `castOrder` array of person ids in the order `names`
+// was given — write both together so they never drift apart. Read sites
+// (media.js's GET /:slug, prerender.js, admin.js) sort the fetched cast
+// list by castOrder's index.
+async function connectCast(names, isUpdate = false) {
+  if (!names?.length) {
+    return { cast: isUpdate ? { set: [] } : undefined, castOrder: [] };
+  }
+  const persons = await upsertPersonsByName(names);
+  const ids = persons.map(p => p.id);
+  return {
+    cast: isUpdate ? { set: ids.map(id => ({ id })) } : { connect: ids.map(id => ({ id })) },
+    castOrder: ids,
+  };
+}
+
+// Sorts a fetched cast array into billing order using castOrder (an id
+// array — see the MediaItem.castOrder schema comment). Falls back to
+// alphabetical-by-name when castOrder is empty (any item added before this
+// field existed) rather than leaving order at Postgres's undefined native
+// SELECT order for an implicit many-to-many relation. Anyone in `cast` but
+// missing from castOrder (e.g. a TV season's merged-in parent-only
+// regulars, which live in the PARENT's own castOrder, not this row's) sorts
+// after everyone ranked, alphabetically among themselves — never dropped.
+function sortByCastOrder(cast, castOrder) {
+  if (!cast?.length) return cast || [];
+  if (!castOrder?.length) return [...cast].sort((a, b) => a.name.localeCompare(b.name));
+  const rank = new Map(castOrder.map((id, i) => [id, i]));
+  return [...cast].sort((a, b) => {
+    const ra = rank.has(a.id) ? rank.get(a.id) : Infinity;
+    const rb = rank.has(b.id) ? rank.get(b.id) : Infinity;
+    return ra !== rb ? ra - rb : a.name.localeCompare(b.name);
+  });
 }
 
 // Title normalization for BOOK duplicate matching — an exact (even
@@ -655,6 +705,8 @@ module.exports = {
   slugify,
   uniqueSlug,
   connectPersons,
+  connectCast,
+  sortByCastOrder,
   findDuplicate,
   checkSeriesCollision,
   normalizeBookTitle,

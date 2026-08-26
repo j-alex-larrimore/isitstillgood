@@ -22,7 +22,7 @@
 
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, connectCast, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
 const { discoverNewMovies, getTmdbDetail } = require('../src/services/mediaLookup');
 
 const STUDIO_NAMES = [
@@ -103,6 +103,7 @@ async function main() {
       }
 
       const slug = await uniqueSlug(slugify(detail.title, releaseYear));
+      const castData = await connectCast(detail.cast || []);
       await prisma.mediaItem.create({
         data: {
           mediaType: 'MOVIE',
@@ -116,7 +117,8 @@ async function main() {
           tmdbId: detail.tmdbId,
           tmdbRating: detail.tmdbRating || null,
           directors: await connectPersons(detail.directors || []),
-          cast: await connectPersons(detail.cast || []),
+          cast: castData.cast,
+          castOrder: castData.castOrder,
         },
       });
       console.log(`✓ "${detail.title}" (${releaseYear || 'year unknown'}) — added`);

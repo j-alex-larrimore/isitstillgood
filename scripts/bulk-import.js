@@ -28,7 +28,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeTags, normalizeGenres, detectSportGenres, detectStreamingTags, detectDeckBuilderGenre, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, connectCast, normalizeTags, normalizeGenres, detectSportGenres, detectStreamingTags, detectDeckBuilderGenre, settingGenresFor, normalizeGameGenres, normalizeBookGenres, findDuplicate, checkSeriesCollision, normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 const {
   searchTmdb, getTmdbDetail, getMovieKeywords, getTvKeywords,
   searchGoogleBooks, getGoogleBooksDetail,
@@ -395,6 +395,7 @@ async function main() {
       }
 
       const slug = await uniqueSlug(slugify(data.title, releaseYear));
+      const castData = await connectCast(data.cast || []);
       await prisma.mediaItem.create({
         data: {
           mediaType:       row.mediaType,
@@ -416,7 +417,8 @@ async function main() {
           seriesName:      row.mediaType === 'BOOK' ? row.seriesName : null,
           seriesNumber:    row.mediaType === 'BOOK' ? row.seriesNumber : null,
           directors:       await connectPersons(data.directors || []),
-          cast:            await connectPersons(data.cast || []),
+          cast:            castData.cast,
+          castOrder:       castData.castOrder,
           authors:         await connectPersons(data.authors || []),
         },
       });

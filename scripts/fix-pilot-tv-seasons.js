@@ -4,7 +4,7 @@
 // and adds the School genre to Abbott Elementary.
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { connectPersons } = require('../src/lib/mediaHelpers');
+const { connectCast } = require('../src/lib/mediaHelpers');
 
 async function main() {
   for (const slug of ['only-murders-in-the-building-2021', 'abbott-elementary-2021']) {
@@ -16,9 +16,10 @@ async function main() {
 
     for (const season of item.seasonEntries) {
       const guestCast = season.cast.map(c => c.name).filter(name => !mainCastNames.has(name.toLowerCase()));
+      const castData = await connectCast(guestCast, true);
       await prisma.mediaItem.update({
         where: { id: season.id },
-        data: { cast: await connectPersons(guestCast, true) },
+        data: { cast: castData.cast, castOrder: castData.castOrder },
       });
       console.log(`${item.title} S${season.seasonNumber}: cast -> [${guestCast.join(', ') || 'none'}]`);
     }

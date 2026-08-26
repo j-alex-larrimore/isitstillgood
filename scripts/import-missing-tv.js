@@ -17,7 +17,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, normalizeGenres, findDuplicate, settingGenresFor } = require('../src/lib/mediaHelpers');
+const { slugify, uniqueSlug, connectPersons, connectCast, normalizeGenres, findDuplicate, settingGenresFor } = require('../src/lib/mediaHelpers');
 const { getTmdbDetail, getTvSeasonCast: getSeasonCast, getTvKeywords: getKeywords } = require('../src/services/mediaLookup');
 
 const SCRATCH = 'C:/Users/jalex/AppData/Local/Temp/claude/C--Users-jalex-Documents-GitHub-isitstillgood/e2623e02-e5ec-4ff2-8687-a0781bd04abe/scratchpad';
@@ -60,6 +60,7 @@ async function main() {
       }
 
       const slug = await uniqueSlug(slugify(detail.title, releaseYear));
+      const mainCastData = await connectCast(detail.cast || []);
       const parent = await prisma.mediaItem.create({
         data: {
           mediaType: 'TV_SHOW',
@@ -74,7 +75,8 @@ async function main() {
           tmdbRating: detail.tmdbRating || null,
           seasons: detail.seasons || null,
           directors: await connectPersons(detail.directors || []),
-          cast: await connectPersons(detail.cast || []),
+          cast: mainCastData.cast,
+          castOrder: mainCastData.castOrder,
         },
       });
 
@@ -85,6 +87,7 @@ async function main() {
         if (!season) continue;
         const excludedCast = (detail.cast || []).filter(name => !season.cast.some(c => c.toLowerCase() === name.toLowerCase()));
         const guestCast = season.cast.filter(name => !mainCastNames.has(name.toLowerCase()));
+        const guestCastData = await connectCast(guestCast);
         const seasonSlug = await uniqueSlug(slugify(`${detail.title} Season ${n}`, season.releaseYear));
         await prisma.mediaItem.create({
           data: {
@@ -97,7 +100,8 @@ async function main() {
             seasonNumber: n,
             genres,
             excludedCast,
-            cast: await connectPersons(guestCast),
+            cast: guestCastData.cast,
+            castOrder: guestCastData.castOrder,
           },
         });
       }
