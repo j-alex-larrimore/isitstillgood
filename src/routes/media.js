@@ -1472,25 +1472,58 @@ router.get('/search-suggestions', async (req, res, next) => {
           WHERE p->>'name' ILIKE ${like} ${typeFilterSql}
           ORDER BY val LIMIT 5`;
 
+    // Person candidates — a common name fragment ("Stephen", "King") can
+    // match hundreds of Person rows, so this is a raw query rather than
+    // Prisma's findMany: findMany with no orderBy and a LIMIT returns an
+    // ARBITRARY slice of the matches (Postgres doesn't guarantee row order
+    // for a query with no ORDER BY), which meant Stephen King — 81 authored
+    // books — had no better chance of surviving that limit than any other
+    // of the 481 people whose name contains "Stephen", most with a single
+    // unrelated credit. Confirmed live: "Stephen" and "King" alone both
+    // failed to surface him at all, while "Stephen K" (far fewer matches)
+    // worked — not a matching bug, a "got unlucky with which 20 rows came
+    // back" bug. Ordering by the type-relevant credit count BEFORE the
+    // LIMIT, directly in SQL, fixes this regardless of how many other
+    // people happen to share the fragment. VIDEO_GAME skips the query
+    // entirely, same reasoning as platformQuery below — every candidate
+    // gets filtered out further down anyway (this site models no
+    // director/cast/author role for games), so there's nothing to rank.
+    const personRelevanceExpr = type === 'BOOK'
+      ? Prisma.sql`"authoredCount"`
+      : (type === 'MOVIE' || type === 'TV_SHOW')
+        ? Prisma.sql`("appearedCount" + "directedCount")`
+        : Prisma.sql`("authoredCount" + "appearedCount" + "directedCount")`;
+    // Postgres only resolves a SELECT-list alias in ORDER BY when the ORDER
+    // BY item is the bare alias itself — "authoredCount" alone works, but
+    // ("appearedCount" + "directedCount") does not ("column ... does not
+    // exist", confirmed live testing the MOVIE/TV_SHOW branch). Wrapping in
+    // a subquery makes the counts real columns of the outer query instead
+    // of same-level aliases, which sidesteps that restriction entirely.
+    const personCandidatesQuery = type === 'VIDEO_GAME'
+      ? Promise.resolve([])
+      : prisma.$queryRaw`
+          SELECT * FROM (
+            SELECT p.id, p.name,
+              (SELECT COUNT(*)::int FROM "_AuthoredBy" WHERE "B" = p.id) AS "authoredCount",
+              (SELECT COUNT(*)::int FROM "_AppearedIn" WHERE "B" = p.id) AS "appearedCount",
+              (SELECT COUNT(*)::int FROM "_DirectedBy" WHERE "B" = p.id) AS "directedCount"
+            FROM "Person" p
+            WHERE p.name ILIKE ${like}
+          ) sub
+          ORDER BY ${personRelevanceExpr} DESC
+          LIMIT 20`;
+
     const [genreRows, tagRows, personCandidates, platformRows] = await Promise.all([
       prisma.$queryRaw`SELECT DISTINCT g AS val FROM "MediaItem", unnest(genres) AS g WHERE g ILIKE ${like} ${typeFilterSql} ORDER BY g LIMIT 5`,
       prisma.$queryRaw`SELECT DISTINCT t AS val FROM "MediaItem", unnest(tags)   AS t WHERE t ILIKE ${like} ${typeFilterSql} ORDER BY t LIMIT 5`,
-      // A wider net than what's actually shown — re-ranked by review count
-      // below, so a common-name match with the most-reviewed work (e.g.
-      // "damon" matching Matt Damon over a more obscure namesake) surfaces
-      // first instead of alphabetically.
-      prisma.person.findMany({
-        where: { name: { contains: q, mode: 'insensitive' } },
-        select: { id: true, name: true, _count: { select: { directed: true, appeared: true, authored: true } } },
-        take: 20,
-      }),
+      personCandidatesQuery,
       platformQuery,
     ]);
 
     const relevantRoleCount = p => {
-      if (type === 'BOOK') return p._count.authored;
-      if (type === 'MOVIE' || type === 'TV_SHOW') return p._count.directed + p._count.appeared;
-      return p._count.directed + p._count.appeared + p._count.authored;
+      if (type === 'BOOK') return p.authoredCount;
+      if (type === 'MOVIE' || type === 'TV_SHOW') return p.directedCount + p.appearedCount;
+      return p.directedCount + p.appearedCount + p.authoredCount;
     };
     // Drop candidates with zero relevant-role works entirely, rather than
     // just deprioritizing them — an actor with no authored books shouldn't
