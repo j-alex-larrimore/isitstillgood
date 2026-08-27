@@ -77,7 +77,7 @@ router.get('/', optionalAuth, [
       prisma.review.findMany({
         where,
         include: {
-          user: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          user: { select: { id: true, username: true, displayName: true, avatarUrl: true, avatarEmoji: true } },
           mediaItem: {
             select: {
               id: true, title: true, slug: true, mediaType: true, releaseYear: true,

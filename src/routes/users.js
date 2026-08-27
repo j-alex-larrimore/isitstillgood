@@ -160,7 +160,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       where: { username: req.params.username },
       select: {
         id: true, username: true, displayName: true,
-        bio: true, avatarUrl: true, profilePublic: true,
+        bio: true, avatarUrl: true, avatarEmoji: true, profilePublic: true,
         createdAt: true, email: true, canceledAt: true,
         // Count total reviews for the stats section
         _count: { select: { reviews: true } },
@@ -262,6 +262,25 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Curated feed-avatar icon set — the ONLY values PATCH /me/settings will
+// accept for avatarEmoji below. Kept as a fixed palette rather than a free
+// text field on purpose: this is meant to be a fun, lightweight identity
+// marker for the public feed (see index.html's renderReviewCard), not an
+// open text input someone could fill with something offensive. GET
+// /me/settings/avatar-icons exposes this same list so the frontend picker
+// never drifts out of sync with what the backend actually allows.
+const FEED_AVATAR_ICONS = [
+  '🦊', '🐻', '🐼', '🐨', '🦁', '🐯', '🐸', '🐙', '🦉', '🦄',
+  '🐢', '🦋', '🐬', '🦖', '🐝', '🐧', '🦩', '🦜', '🐺', '🦔',
+  '🎬', '📚', '🎮', '🎲', '🕹️', '👾', '🎧', '🎨',
+  '🔥', '⭐', '🌙', '☕', '🍕', '🚀', '👑', '💎',
+];
+
+// ─── GET /api/users/me/settings/avatar-icons ─── The pickable icon set ────────
+router.get('/me/settings/avatar-icons', (req, res) => {
+  res.json(FEED_AVATAR_ICONS);
+});
+
 // ─── PATCH /api/users/me/settings ─── Update profile visibility ───────────────
 // Allows the logged-in user to toggle profilePublic and update their bio.
 // Email is deliberately NOT handled here — changing it now requires clicking
@@ -274,6 +293,11 @@ router.patch('/me/settings', requireAuth, [
   // Same format rule as signup (POST /api/auth/register) — a changed
   // username still has to satisfy whatever a brand-new one would.
   body('username').optional().matches(/^[a-zA-Z0-9_]{3,30}$/).withMessage('Username: 3-30 chars, letters/numbers/underscores only'),
+  // null/empty clears the pick, reverting the feed to plain username
+  // initials (see index.html) — anything else must be one of the curated
+  // icons, never an arbitrary string.
+  body('avatarEmoji').optional({ nullable: true }).custom(v => v === null || v === '' || FEED_AVATAR_ICONS.includes(v))
+    .withMessage('Not a valid feed icon'),
 ], async (req, res, next) => {
   const e = validationResult(req);
   if (!e.isEmpty()) return res.status(422).json({ errors: e.array() });
@@ -283,13 +307,14 @@ router.patch('/me/settings', requireAuth, [
     if (req.body.bio !== undefined)           data.bio           = req.body.bio;
     if (req.body.displayName !== undefined)   data.displayName   = req.body.displayName;
     if (req.body.username !== undefined)      data.username      = req.body.username;
+    if (req.body.avatarEmoji !== undefined)   data.avatarEmoji   = req.body.avatarEmoji || null;
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data,
       select: {
         id: true, username: true, displayName: true,
-        bio: true, profilePublic: true, email: true,
+        bio: true, profilePublic: true, email: true, avatarEmoji: true,
       },
     });
     res.json(updated);

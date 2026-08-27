@@ -143,6 +143,14 @@ model User {
   displayName     String
   bio             String?
   avatarUrl       String?
+  // A user-picked emoji shown on the public feed (index.html) instead of
+  // the plain two-letter username initials — see FEED_AVATAR_ICONS in
+  // src/routes/users.js, the curated set this is validated against.
+  // Deliberately independent of avatarUrl (Google's real profile photo,
+  // never shown on the feed itself — see index.html's renderReviewCard):
+  // the feed intentionally shows usernames rather than real identity, and a
+  // real photo would undercut that the same way a real name would.
+  avatarEmoji     String?
   isVerified      Boolean   @default(false)
   isAdmin         Boolean   @default(false)
   passwordHash    String?
