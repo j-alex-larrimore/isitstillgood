@@ -119,6 +119,31 @@ router.get('/', optionalAuth, [
       }
     }
 
+    // The viewer's OWN rating of each media item shown, regardless of whose
+    // review the card displays — index.html's "+ Log mine" action used to
+    // show on every friend's review, even ones you'd already reviewed
+    // yourself (through your own separate review row on the same item),
+    // since it only ever checked whether THIS card's review belonged to
+    // you. Confirmed live: a friend's review of a movie you'd already rated
+    // still said "+ Log mine" instead of showing your existing rating.
+    // seasonNumber !== 0 (an individual review) wins over a whole-series
+    // verdict on the rare item that has both — the feed always shows one
+    // specific item, same reasoning as Browse's individual-item view (see
+    // buildUserRatingsMap's individualBookMode in media.js).
+    const myRatingByItem = {};
+    if (req.user) {
+      const itemIds = [...new Set(reviews.map(r => r.mediaItemId))];
+      const myOwnReviews = await prisma.review.findMany({
+        where: { userId: req.user.id, mediaItemId: { in: itemIds } },
+        select: { mediaItemId: true, rating: true, seasonNumber: true },
+      });
+      for (const r of myOwnReviews) {
+        if (myRatingByItem[r.mediaItemId] == null || r.seasonNumber !== 0) {
+          myRatingByItem[r.mediaItemId] = r.rating;
+        }
+      }
+    }
+
     const enriched = reviews.map(r => ({
       ...r,
       mediaItem: {
@@ -128,6 +153,7 @@ router.get('/', optionalAuth, [
           : undefined,
       },
       myReaction: req.user ? (r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null) : null,
+      myRatingForItem: myRatingByItem[r.mediaItemId] ?? null,
       reactionSummary: r.reactions.reduce((acc, { emoji }) => {
         acc[emoji] = (acc[emoji] || 0) + 1; return acc;
       }, {}),
