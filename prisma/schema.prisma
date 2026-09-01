@@ -151,19 +151,30 @@ model User {
   // the feed intentionally shows usernames rather than real identity, and a
   // real photo would undercut that the same way a real name would.
   avatarEmoji     String?
-  // Whether a new-message email goes out when someone messages this user
-  // (see sendNewMessageEmail in src/services/email.js, triggered from
-  // POST /api/messages). Defaults to true — messaging is easy to miss
-  // without a nudge, unlike e.g. a friend request, which already shows up
-  // via the in-app notification bell.
-  emailOnMessage  Boolean   @default(true)
+  // Email notification preferences, both opt-out (see the Email Preferences
+  // modal in profile.html). The in-app notification bell isn't a sufficient
+  // nudge on its own for either of these — it's only seen by someone already
+  // on the site, which is exactly who doesn't need telling.
+  //   emailOnMessage       — sendNewMessageEmail, from POST /api/messages
+  //   emailOnFriendRequest — sendFriendRequestEmail / sendFriendAcceptedEmail,
+  //                          from POST /api/friends/request/:userId and
+  //                          POST /api/friends/accept/:friendshipId. One
+  //                          toggle covers both halves of the exchange:
+  //                          they're the same conversation, and wanting one
+  //                          without the other isn't a real preference.
+  emailOnMessage       Boolean @default(true)
+  emailOnFriendRequest Boolean @default(true)
   isVerified      Boolean   @default(false)
   isAdmin         Boolean   @default(false)
   passwordHash    String?
   googleId        String?   @unique
   googleEmail     String?
   defaultVisibility ReviewVisibility @default(PUBLIC)
-  profilePublic   Boolean   @default(false)
+  // Public by default: a friends-only default made the lock screen the normal
+  // result of clicking any user you weren't already friends with, which is a
+  // dead end on a site whose point is reading other people's reviews. Note a
+  // default only governs NEW rows — existing accounts keep whatever they have.
+  profilePublic   Boolean   @default(true)
   tasteThreshold  Int       @default(2)
   ignoredGenres   String[]  @default([])  // false = friends only, true = public
   // Emails (not usernames) — a username can now be changed by its owner

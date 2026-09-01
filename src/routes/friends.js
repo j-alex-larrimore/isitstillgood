@@ -2,6 +2,7 @@
 const router = require('express').Router();
 const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
+const { sendFriendRequestEmail, sendFriendAcceptedEmail } = require('../services/email');
 
 // ─── GET /api/friends ─── My accepted friends ────────────────────────────
 router.get('/', requireAuth, async (req, res, next) => {
@@ -52,7 +53,10 @@ router.post('/request/:userId', requireAuth, async (req, res, next) => {
     return res.status(400).json({ error: 'Cannot add yourself' });
   }
   try {
-    const target = await prisma.user.findUnique({ where: { id: req.params.userId } });
+    const target = await prisma.user.findUnique({
+      where: { id: req.params.userId },
+      select: { id: true, email: true, displayName: true, emailOnFriendRequest: true },
+    });
     if (!target) return res.status(404).json({ error: 'User not found' });
 
     // Check for any existing relationship in either direction
@@ -84,6 +88,17 @@ router.post('/request/:userId', requireAuth, async (req, res, next) => {
       },
     }).catch(console.error);
 
+    // Fire-and-forget, like the notification above — the request is already
+    // saved, so a mail failure must not turn this into an error response.
+    if (target.emailOnFriendRequest) {
+      sendFriendRequestEmail({
+        to: target.email,
+        displayName: target.displayName,
+        fromDisplayName: req.user.displayName,
+        fromUsername: req.user.username,
+      }).catch(console.error);
+    }
+
     res.status(201).json(friendship);
   } catch (err) { next(err); }
 });
@@ -102,6 +117,37 @@ router.post('/accept/:friendshipId', requireAuth, async (req, res, next) => {
     });
 
     res.json(updated);
+
+    // Accepting used to tell the requester nothing at all — no notification,
+    // no email — so the person who made the first move never learned it had
+    // worked. Both are fire-and-forget: the friendship is already committed
+    // and the response has been sent.
+    const initiator = await prisma.user.findUnique({
+      where: { id: friendship.initiatorId },
+      select: { email: true, displayName: true, emailOnFriendRequest: true },
+    }).catch(() => null);
+    if (!initiator) return;
+
+    prisma.notification.create({
+      data: {
+        userId: friendship.initiatorId,
+        type: 'FRIEND_ACCEPTED',
+        payload: {
+          fromUserId: req.user.id,
+          fromUsername: req.user.username,
+          fromDisplayName: req.user.displayName,
+        },
+      },
+    }).catch(console.error);
+
+    if (initiator.emailOnFriendRequest) {
+      sendFriendAcceptedEmail({
+        to: initiator.email,
+        displayName: initiator.displayName,
+        friendDisplayName: req.user.displayName,
+        friendUsername: req.user.username,
+      }).catch(console.error);
+    }
   } catch (err) { next(err); }
 });
 

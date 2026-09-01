@@ -348,8 +348,58 @@ async function sendNewMessageEmail({ to, displayName, fromDisplayName, fromUsern
   return sendEmail({ to, subject: `${fromDisplayName} sent you a message`, html });
 }
 
+// ─── Friend request notifications ─────────────────────────────────────────
+// Both sent from src/routes/friends.js when the recipient has
+// emailOnFriendRequest:true (the default — see the schema comment on
+// User.emailOnFriendRequest), and both fire-and-forget like the message
+// email above: a delivery failure must never fail the request itself.
+//
+// The two halves point at different places on purpose. A pending request is
+// acted on from the Friends page, so that's where the incoming one sends
+// you; once you're actually friends, the interesting thing is the profile
+// that just opened up, so the acceptance links straight to it.
+async function sendFriendRequestEmail({ to, displayName, fromDisplayName, fromUsername }) {
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:18px;color:#1C1710;">
+      Hi <strong>${escapeHtml(displayName)}</strong> —
+    </p>
+    <p style="margin:0 0 24px;font-size:14px;color:#3D3526;line-height:1.6;">
+      <strong>${escapeHtml(fromDisplayName)}</strong> (@${escapeHtml(fromUsername)})
+      wants to be friends on Is It (Still) Good. Once you accept, their reviews
+      start showing up in your feed — and yours in theirs.
+    </p>`;
+  const html = buildEmailHtml({
+    title: `${fromDisplayName} sent you a friend request — Is It (Still) Good`,
+    bodyHtml,
+    ctaLabel: 'View request',
+    ctaUrl: `${SITE_URL}/friends.html`,
+    footerNote: 'You can turn these emails off anytime in your profile settings.',
+  });
+  return sendEmail({ to, subject: `${fromDisplayName} sent you a friend request`, html });
+}
+
+async function sendFriendAcceptedEmail({ to, displayName, friendDisplayName, friendUsername }) {
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:18px;color:#1C1710;">
+      Hi <strong>${escapeHtml(displayName)}</strong> —
+    </p>
+    <p style="margin:0 0 24px;font-size:14px;color:#3D3526;line-height:1.6;">
+      <strong>${escapeHtml(friendDisplayName)}</strong> accepted your friend
+      request. You'll start seeing their reviews in your feed.
+    </p>`;
+  const html = buildEmailHtml({
+    title: `${friendDisplayName} accepted your friend request — Is It (Still) Good`,
+    bodyHtml,
+    ctaLabel: `View ${friendDisplayName}'s profile`,
+    ctaUrl: `${SITE_URL}/profile.html?username=${encodeURIComponent(friendUsername)}`,
+    footerNote: 'You can turn these emails off anytime in your profile settings.',
+  });
+  return sendEmail({ to, subject: `${friendDisplayName} accepted your friend request`, html });
+}
+
 module.exports = {
   sendEmail, sendInviteEmail,
   sendVerificationEmail, sendEmailChangeConfirmation, sendEmailChangeNotice,
   sendNewMessageEmail,
+  sendFriendRequestEmail, sendFriendAcceptedEmail,
 };
