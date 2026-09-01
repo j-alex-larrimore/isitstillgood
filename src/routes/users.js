@@ -3,7 +3,7 @@ const router = require('express').Router();
 const { body, param, query, validationResult } = require('express-validator');
 const prisma  = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
-const { pickSeriesRepresentative } = require('../lib/mediaHelpers');
+const { pickSeriesRepresentative, buildSeriesRepMap } = require('../lib/mediaHelpers');
 
 function ok(req, res) {
   const e = validationResult(req);
@@ -212,6 +212,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
           select: {
             id: true, title: true, slug: true, mediaType: true,
             releaseYear: true, imageUrl: true, genres: true,
+            seriesName: true, seriesNumber: true,
           },
         },
         _count: { select: { reactions: true, comments: true } },
@@ -221,6 +222,30 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       // nulls:'last' fixes that.
       orderBy: [{ dateConsumed: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }],
       take: 20,
+    });
+
+    // A series-level book review (seasonNumber:0) is a verdict on the whole
+    // series, so it reads as the series here too — same convention the feed
+    // and the taste cards below already follow. Resolving the current
+    // representative also keeps the cover on book 1 when the review is
+    // sitting on a since-superseded row (see buildSeriesRepMap).
+    const profileRepMap = await buildSeriesRepMap(reviews.map(r => r.mediaItem));
+    const reviewsForClient = reviews.map(r => {
+      if (!(r.mediaItem.mediaType === 'BOOK' && r.mediaItem.seriesName && r.seasonNumber === 0)) return r;
+      const rep = profileRepMap.get(r.mediaItem.id);
+      return {
+        ...r,
+        mediaItem: {
+          ...r.mediaItem,
+          ...(rep ? {
+            title: rep.title, slug: rep.slug,
+            imageUrl: rep.imageUrl, releaseYear: rep.releaseYear,
+            seriesNumber: rep.seriesNumber,
+          } : {}),
+          displayTitle: r.mediaItem.seriesName,
+          isSeries: true,
+        },
+      };
     });
 
     // Compute aggregate stats
@@ -252,7 +277,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
         emailOnMessage: isSelf ? target.emailOnMessage : undefined,
       },
       isSelf,
-      reviews,
+      reviews: reviewsForClient,
       stats: {
         totalReviews:  stats._count.rating,
         avgRating:     stats._avg.rating,
@@ -448,15 +473,20 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
         let effectiveItem = item;
         if (item.mediaType === 'BOOK' && item.seriesName && review.seasonNumber === 0) {
           const rep = await resolveSeriesRepresentative(item);
-          if (rep && rep.id !== item.id) {
-            // displayTitle carries the series name through to itemSummary()
-            // below — a series-level review should show as e.g. "The Wheel
-            // of Time" on taste cards, not "The Eye of the World" (book 1's
-            // own title), matching how /api/media already labels series
-            // cards for Browse. title/slug/etc. still point at the actual
-            // representative row, since that's what the link needs to go to.
-            effectiveItem = { ...item, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear, displayTitle: item.seriesName };
-          }
+          // displayTitle carries the series name through to itemSummary()
+          // below — a series-level review should show as e.g. "The Wheel of
+          // Time" on taste cards, not "The Eye of the World" (book 1's own
+          // title), matching how /api/media already labels series cards for
+          // Browse. It's set for EVERY series-level review, not only the ones
+          // whose representative has since moved: this used to sit inside the
+          // `rep.id !== item.id` branch, so a review still living on the
+          // current representative kept that book's own title (confirmed
+          // live: annie_h's "The Tarot Sequence" verdict read "Last Sun").
+          // Remapping title/slug/cover to the representative is the part
+          // that's only needed when the rep actually differs.
+          effectiveItem = (rep && rep.id !== item.id)
+            ? { ...item, id: rep.id, title: rep.title, slug: rep.slug, imageUrl: rep.imageUrl, releaseYear: rep.releaseYear, displayTitle: item.seriesName }
+            : { ...item, displayTitle: item.seriesName };
         }
         processedEntries.push({
           rating: review.rating, item: effectiveItem,

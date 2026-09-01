@@ -39,7 +39,7 @@ router.post('/', requireAuth, [
       }),
       reviewId ? prisma.review.findUnique({
         where: { id: reviewId },
-        select: { id: true, mediaItem: { select: { title: true, slug: true } } },
+        select: { id: true, mediaItem: { select: { title: true, slug: true, mediaType: true } } },
       }) : Promise.resolve(null),
     ]);
 
@@ -56,7 +56,7 @@ router.post('/', requireAuth, [
       include: {
         sender:    { select: USER_SELECT },
         recipient: { select: USER_SELECT },
-        review:    { select: { id: true, mediaItem: { select: { title: true, slug: true } } } },
+        review:    { select: { id: true, mediaItem: { select: { title: true, slug: true, mediaType: true } } } },
       },
     });
 
@@ -105,7 +105,7 @@ router.get('/', requireAuth, async (req, res, next) => {
       include: {
         sender:    { select: USER_SELECT },
         recipient: { select: USER_SELECT },
-        review:    { select: { id: true, mediaItem: { select: { title: true, slug: true } } } },
+        review:    { select: { id: true, mediaItem: { select: { title: true, slug: true, mediaType: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -154,7 +154,7 @@ router.get('/:username', requireAuth, async (req, res, next) => {
       include: {
         sender:    { select: USER_SELECT },
         recipient: { select: USER_SELECT },
-        review:    { select: { id: true, mediaItem: { select: { title: true, slug: true } } } },
+        review:    { select: { id: true, mediaItem: { select: { title: true, slug: true, mediaType: true } } } },
       },
       orderBy: { createdAt: 'asc' },
     });

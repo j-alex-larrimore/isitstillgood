@@ -55,6 +55,44 @@ function pickSeriesRepresentative(books) {
   );
 }
 
+// Maps every book in the given items' series to that series' CURRENT
+// representative (book 1), returning `bookId -> representative row`.
+//
+// A series-level review (the seasonNumber:0 sentinel) is written against
+// whichever book represented the series at the time, so it goes stale the
+// moment an earlier-numbered prequel/novella is added — the review stays on
+// the old row while the representative moves. Anything presenting such a
+// review as "the series" therefore has to resolve the representative fresh
+// rather than trusting the reviewed row, or it shows the prequel's title and
+// cover instead of book 1's (confirmed live on 16 real reviews, e.g. a "The
+// Wheel of Time" review sitting on "New Spring" #0).
+//
+// The seriesNumber/verified filters match media.js's own representative
+// lookup so every surface agrees on which book is book 1.
+async function buildSeriesRepMap(items) {
+  const seriesNames = [...new Set(
+    items.filter(i => i.mediaType === 'BOOK' && i.seriesName).map(i => i.seriesName)
+  )];
+  const repByBookId = new Map();
+  if (!seriesNames.length) return repByBookId;
+
+  const seriesBooks = await prisma.mediaItem.findMany({
+    where: {
+      mediaType: 'BOOK', seriesName: { in: seriesNames },
+      seriesNumber: { not: null }, verified: true,
+    },
+    select: {
+      id: true, title: true, slug: true, imageUrl: true, releaseYear: true,
+      seriesName: true, seriesNumber: true, authors: { select: { id: true } },
+    },
+  });
+  for (const cluster of clusterBookSeries(seriesBooks)) {
+    const rep = pickSeriesRepresentative(cluster.books);
+    for (const b of cluster.books) repByBookId.set(b.id, rep);
+  }
+  return repByBookId;
+}
+
 // ─── Tag and genre normalization ──────────────────────────────────────────
 const TAG_OVERRIDES = {
   'hbo': 'HBO', 'hbo max': 'HBO Max', 'hbomax': 'HBO Max',
@@ -688,6 +726,7 @@ async function checkSeriesCollision(seriesName, authorNames) {
 module.exports = {
   clusterBookSeries,
   pickSeriesRepresentative,
+  buildSeriesRepMap,
   normalizeTags,
   normalizeGenres,
   detectSportGenres,

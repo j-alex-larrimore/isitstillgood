@@ -3,7 +3,7 @@ const router = require('express').Router();
 const { query } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
-const { clusterBookSeries, pickSeriesRepresentative } = require('../lib/mediaHelpers');
+const { buildSeriesRepMap } = require('../lib/mediaHelpers');
 
 // ─── GET /api/feed ─── Friend activity + timeframe support ──────────────
 // optionalAuth (not requireAuth) — logged-out visitors can load mode=all/
@@ -97,27 +97,22 @@ router.get('/', optionalAuth, [
       prisma.review.count({ where }),
     ]);
 
-    // A review of a book that's its series' representative (see Browse's own
-    // "collapse into one series card" convention) should read the same way
-    // here — "The Tarot Sequence", not the representative's own title "Last
-    // Sun" — confirmed live: a review of Last Sun showed as a review of
-    // "Last Sun" in the feed even though Browse presents that exact book as
-    // the whole series' card. Only the representative gets this treatment;
-    // a review of any other book in the series still shows its own title,
-    // since that's a review of that specific book, not the series overall.
-    const seriesNames = [...new Set(
-      reviews.filter(r => r.mediaItem.mediaType === 'BOOK' && r.mediaItem.seriesName).map(r => r.mediaItem.seriesName)
-    )];
-    const seriesRepIds = new Set();
-    if (seriesNames.length) {
-      const seriesBooks = await prisma.mediaItem.findMany({
-        where: { mediaType: 'BOOK', seriesName: { in: seriesNames } },
-        select: { id: true, seriesName: true, seriesNumber: true, authors: { select: { id: true } } },
-      });
-      for (const cluster of clusterBookSeries(seriesBooks)) {
-        seriesRepIds.add(pickSeriesRepresentative(cluster.books).id);
-      }
-    }
+    // A book review reads as the SERIES only when it's a series-level review
+    // (the seasonNumber:0 sentinel) — a verdict on the series as a whole.
+    // This used to key off "is this book its series' representative?"
+    // instead, which relabeled an ordinary review of book 1 with the series
+    // name while the card still linked to that one book, so the title and
+    // the destination disagreed (73 such reviews live). A review of a
+    // specific book is a review of that book, whichever number it is.
+    //
+    // Series-level reviews are written against whatever book represented the
+    // series at the time, so they go stale when an earlier-numbered
+    // prequel/novella is added later. Resolve to the CURRENT representative
+    // for title, cover and link — the same staleness users.js already
+    // corrects for taste profiles. Confirmed live: a "The Wheel of Time"
+    // series review sits on "New Spring" (#0) and surfaced here as a review
+    // of New Spring, showing the prequel's cover instead of book 1's.
+    const repByBookId = await buildSeriesRepMap(reviews.map(r => r.mediaItem));
 
     // The viewer's OWN rating of each media item shown, regardless of whose
     // review the card displays — index.html's "+ Log mine" action used to
@@ -144,20 +139,36 @@ router.get('/', optionalAuth, [
       }
     }
 
-    const enriched = reviews.map(r => ({
-      ...r,
-      mediaItem: {
-        ...r.mediaItem,
-        displayTitle: (r.mediaItem.mediaType === 'BOOK' && seriesRepIds.has(r.mediaItem.id))
-          ? r.mediaItem.seriesName
-          : undefined,
-      },
-      myReaction: req.user ? (r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null) : null,
-      myRatingForItem: myRatingByItem[r.mediaItemId] ?? null,
-      reactionSummary: r.reactions.reduce((acc, { emoji }) => {
-        acc[emoji] = (acc[emoji] || 0) + 1; return acc;
-      }, {}),
-    }));
+    const enriched = reviews.map(r => {
+      const isBookSeriesReview =
+        r.mediaItem.mediaType === 'BOOK' && !!r.mediaItem.seriesName && r.seasonNumber === 0;
+      // Only the display/link fields move to the representative — `id` stays
+      // the reviewed row's own, since myRatingByItem and the reaction
+      // handlers below are keyed off the actual review target.
+      const rep = isBookSeriesReview ? repByBookId.get(r.mediaItem.id) : null;
+      return {
+        ...r,
+        mediaItem: {
+          ...r.mediaItem,
+          ...(rep ? {
+            title: rep.title, slug: rep.slug,
+            imageUrl: rep.imageUrl, releaseYear: rep.releaseYear,
+            // seriesNumber travels with the rest, or the payload would pair
+            // book 1's title with the superseded host row's number.
+            seriesNumber: rep.seriesNumber,
+          } : {}),
+          displayTitle: isBookSeriesReview ? r.mediaItem.seriesName : undefined,
+          // Lets the client link to the series page instead of appending
+          // ?book=1 for an individual book (see renderReviewCard in index.html).
+          isSeries: isBookSeriesReview || undefined,
+        },
+        myReaction: req.user ? (r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null) : null,
+        myRatingForItem: myRatingByItem[r.mediaItemId] ?? null,
+        reactionSummary: r.reactions.reduce((acc, { emoji }) => {
+          acc[emoji] = (acc[emoji] || 0) + 1; return acc;
+        }, {}),
+      };
+    });
 
     // Get admin timeframe setting for client
     const setting = await prisma.adminSetting.findUnique({ where: { key: 'feedTimeframeDays' } });
