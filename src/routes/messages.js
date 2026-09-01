@@ -2,6 +2,7 @@ const express  = require('express');
 const { body, validationResult } = require('express-validator');
 const { PrismaClient } = require('@prisma/client');
 const { requireAuth } = require('../middleware/auth');
+const { sendNewMessageEmail } = require('../services/email');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -25,11 +26,16 @@ router.post('/', requireAuth, [
     if (recipientUsername === req.user.username)
       return res.status(400).json({ error: "You can't message yourself" });
 
-    // Look up recipient and review in parallel
+    // Look up recipient and review in parallel. email/emailOnMessage are
+    // fetched here (for the notification email below) but deliberately kept
+    // OUT of USER_SELECT — that shape gets echoed straight back to the
+    // sender via the created message's `include` further down, and a
+    // recipient's email/notification preference has no business reaching
+    // whoever's messaging them.
     const [recipient, review] = await Promise.all([
       prisma.user.findUnique({
         where: { username: recipientUsername },
-        select: USER_SELECT,
+        select: { ...USER_SELECT, email: true, emailOnMessage: true },
       }),
       reviewId ? prisma.review.findUnique({
         where: { id: reviewId },
@@ -69,6 +75,21 @@ router.post('/', requireAuth, [
         },
       },
     }).catch(console.error);
+
+    // emailOnMessage defaults to true (see the schema comment) — messaging
+    // has no other nudge like a friend request's notification-bell badge,
+    // so this is opt-out rather than opt-in. Fire-and-forget, same as the
+    // in-app notification above — a delivery failure here shouldn't affect
+    // the message itself, which already sent successfully.
+    if (recipient.emailOnMessage) {
+      sendNewMessageEmail({
+        to: recipient.email,
+        displayName: recipient.displayName,
+        fromDisplayName: req.user.displayName,
+        fromUsername: req.user.username,
+        preview: msgBody.slice(0, 80),
+      }).catch(console.error);
+    }
 
   } catch (err) { next(err); }
 });

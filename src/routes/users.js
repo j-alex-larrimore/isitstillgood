@@ -161,7 +161,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       select: {
         id: true, username: true, displayName: true,
         bio: true, avatarUrl: true, avatarEmoji: true, profilePublic: true,
-        createdAt: true, email: true, canceledAt: true,
+        createdAt: true, email: true, emailOnMessage: true, canceledAt: true,
         // Count total reviews for the stats section
         _count: { select: { reviews: true } },
       },
@@ -249,6 +249,7 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
       user: {
         ...target,
         email: isSelf ? target.email : undefined,
+        emailOnMessage: isSelf ? target.emailOnMessage : undefined,
       },
       isSelf,
       reviews,
@@ -298,6 +299,7 @@ router.patch('/me/settings', requireAuth, [
   // icons, never an arbitrary string.
   body('avatarEmoji').optional({ nullable: true }).custom(v => v === null || v === '' || FEED_AVATAR_ICONS.includes(v))
     .withMessage('Not a valid feed icon'),
+  body('emailOnMessage').optional().isBoolean(),
 ], async (req, res, next) => {
   const e = validationResult(req);
   if (!e.isEmpty()) return res.status(422).json({ errors: e.array() });
@@ -308,13 +310,14 @@ router.patch('/me/settings', requireAuth, [
     if (req.body.displayName !== undefined)   data.displayName   = req.body.displayName;
     if (req.body.username !== undefined)      data.username      = req.body.username;
     if (req.body.avatarEmoji !== undefined)   data.avatarEmoji   = req.body.avatarEmoji || null;
+    if (req.body.emailOnMessage !== undefined) data.emailOnMessage = req.body.emailOnMessage;
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data,
       select: {
         id: true, username: true, displayName: true,
-        bio: true, profilePublic: true, email: true, avatarEmoji: true,
+        bio: true, profilePublic: true, email: true, avatarEmoji: true, emailOnMessage: true,
       },
     });
     res.json(updated);

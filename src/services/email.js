@@ -321,7 +321,35 @@ async function sendEmailChangeNotice({ to, displayName, newEmail }) {
   return sendEmail({ to, subject: 'Email change requested on your account', html });
 }
 
+// ─── New message notification ─────────────────────────────────────────────
+// Sent from POST /api/messages when the recipient has emailOnMessage:true
+// (the default — see the schema comment on User.emailOnMessage). Fire-and-
+// forget, same as the in-app notification it's sent alongside; a failure
+// here should never block the message itself from sending.
+async function sendNewMessageEmail({ to, displayName, fromDisplayName, fromUsername, preview }) {
+  const messagesUrl = `${SITE_URL}/messages.html?with=${encodeURIComponent(fromUsername)}`;
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:18px;color:#1C1710;">
+      Hi <strong>${escapeHtml(displayName)}</strong> —
+    </p>
+    <p style="margin:0 0 16px;font-size:14px;color:#3D3526;line-height:1.6;">
+      <strong>${escapeHtml(fromDisplayName)}</strong> sent you a message on Is It (Still) Good:
+    </p>
+    <p style="margin:0 0 24px;padding:12px 16px;background:#F5EFE0;border-left:3px solid #C8832A;font-size:14px;color:#3D3526;line-height:1.6;font-style:italic;">
+      "${escapeHtml(preview)}${preview.length >= 80 ? '…' : ''}"
+    </p>`;
+  const html = buildEmailHtml({
+    title: `${fromDisplayName} sent you a message — Is It (Still) Good`,
+    bodyHtml,
+    ctaLabel: 'Reply',
+    ctaUrl: messagesUrl,
+    footerNote: 'You can turn these emails off anytime in your profile settings.',
+  });
+  return sendEmail({ to, subject: `${fromDisplayName} sent you a message`, html });
+}
+
 module.exports = {
   sendEmail, sendInviteEmail,
   sendVerificationEmail, sendEmailChangeConfirmation, sendEmailChangeNotice,
+  sendNewMessageEmail,
 };

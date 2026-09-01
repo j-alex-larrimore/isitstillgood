@@ -151,6 +151,12 @@ model User {
   // the feed intentionally shows usernames rather than real identity, and a
   // real photo would undercut that the same way a real name would.
   avatarEmoji     String?
+  // Whether a new-message email goes out when someone messages this user
+  // (see sendNewMessageEmail in src/services/email.js, triggered from
+  // POST /api/messages). Defaults to true — messaging is easy to miss
+  // without a nudge, unlike e.g. a friend request, which already shows up
+  // via the in-app notification bell.
+  emailOnMessage  Boolean   @default(true)
   isVerified      Boolean   @default(false)
   isAdmin         Boolean   @default(false)
   passwordHash    String?
