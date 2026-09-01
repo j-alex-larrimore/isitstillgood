@@ -75,9 +75,22 @@ router.post('/request/:userId', requireAuth, async (req, res, next) => {
       if (existing.status === 'BLOCKED')  return res.status(403).json({ error: 'Unable to send request' });
     }
 
-    const friendship = await prisma.friendship.create({
-      data: { initiatorId: req.user.id, receiverId: req.params.userId },
-    });
+    // @@unique([initiatorId, receiverId]) is directional, so it stops a
+    // duplicate of THIS direction but not two people requesting each other in
+    // the same instant — the existing-row check above can't see a row that
+    // hasn't committed yet. P2002 covers the same-direction race cleanly; the
+    // reciprocal one is healed at accept time, which deletes any other row for
+    // the pair (see below), so a pair can never end up mutually "friends and
+    // still pending".
+    let friendship;
+    try {
+      friendship = await prisma.friendship.create({
+        data: { initiatorId: req.user.id, receiverId: req.params.userId },
+      });
+    } catch (err) {
+      if (err.code === 'P2002') return res.status(409).json({ error: 'Request already pending' });
+      throw err;
+    }
 
     // Notify the receiver
     await prisma.notification.create({
@@ -115,6 +128,20 @@ router.post('/accept/:friendshipId', requireAuth, async (req, res, next) => {
       where: { id: req.params.friendshipId },
       data: { status: 'ACCEPTED' },
     });
+
+    // Drop any other row for this pair — the reciprocal request that a
+    // simultaneous "add" race can leave behind (see the P2002 note above).
+    // Without this, accepting one would leave the other still PENDING, so the
+    // pair would show as friends while one of them still had a live request.
+    await prisma.friendship.deleteMany({
+      where: {
+        id: { not: updated.id },
+        OR: [
+          { initiatorId: friendship.initiatorId, receiverId: friendship.receiverId },
+          { initiatorId: friendship.receiverId,  receiverId: friendship.initiatorId },
+        ],
+      },
+    }).catch(console.error);
 
     res.json(updated);
 
@@ -165,9 +192,22 @@ router.delete('/decline/:friendshipId', requireAuth, async (req, res, next) => {
 });
 
 // ─── POST /api/friends/block/:userId ─────────────────────────────────────
+// Blocking replaces whatever relationship existed — an accepted friendship, a
+// request in either direction — with a single BLOCKED row owned by the
+// blocker. POST /request/:userId then refuses either direction of a new
+// request for as long as that row stands (see the BLOCKED branch above).
 router.post('/block/:userId', requireAuth, async (req, res, next) => {
+  if (req.params.userId === req.user.id) {
+    return res.status(400).json({ error: 'Cannot block yourself' });
+  }
   try {
-    // Remove any existing friendship first, then create a BLOCKED record
+    const target = await prisma.user.findUnique({
+      where: { id: req.params.userId }, select: { id: true },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
+
+    // Clearing first makes this idempotent: re-blocking someone already
+    // blocked replaces the row rather than colliding with the unique index.
     await prisma.friendship.deleteMany({
       where: {
         OR: [
@@ -180,6 +220,52 @@ router.post('/block/:userId', requireAuth, async (req, res, next) => {
       data: { initiatorId: req.user.id, receiverId: req.params.userId, status: 'BLOCKED' },
     });
     res.json(blocked);
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/friends/block/:userId ─── Unblock ───────────────────────
+// Only removes a block THIS user owns. Deleting by the pair rather than by
+// friendship id keeps a block the other person placed out of reach, which
+// matching on either direction would have exposed.
+router.delete('/block/:userId', requireAuth, async (req, res, next) => {
+  try {
+    const result = await prisma.friendship.deleteMany({
+      where: { initiatorId: req.user.id, receiverId: req.params.userId, status: 'BLOCKED' },
+    });
+    if (!result.count) return res.status(404).json({ error: 'Not blocked' });
+    res.json({ message: 'Unblocked' });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/friends/blocked ─── Who I've blocked ───────────────────────
+// Only blocks this user placed. Someone who blocked you is deliberately not
+// listed — that would turn the block into a notification.
+router.get('/blocked', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await prisma.friendship.findMany({
+      where: { initiatorId: req.user.id, status: 'BLOCKED' },
+      include: {
+        receiver: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+    res.json(rows.map(r => r.receiver));
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/friends/requests/sent ─── Outgoing pending requests ────────
+// The counterpart to /requests above. Without it the only way to see you'd
+// already asked someone was to search for them again one at a time.
+router.get('/requests/sent', requireAuth, async (req, res, next) => {
+  try {
+    const requests = await prisma.friendship.findMany({
+      where: { initiatorId: req.user.id, status: 'PENDING' },
+      include: {
+        receiver: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(requests);
   } catch (err) { next(err); }
 });
 
