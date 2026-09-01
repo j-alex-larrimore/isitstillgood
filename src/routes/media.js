@@ -1930,7 +1930,8 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
   // consumedWithin: only count reviews where dateConsumed >= N months ago
   // Format: "12m" = 12 months, "2y" = 2 years
   const consumedWithin   = req.query.consumedWithin || null;
-    if (friendsOnly && req.user) {
+    let friendIds = [];
+    if (req.user) {
       const friendships = await prisma.friendship.findMany({
         where: {
           status: 'ACCEPTED',
@@ -1938,9 +1939,11 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
         },
         select: { initiatorId: true, receiverId: true },
       });
-      const friendIds = friendships.map(f =>
+      friendIds = friendships.map(f =>
         f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
       );
+    }
+    if (friendsOnly && req.user) {
       userFilter = { userId: { in: friendIds.length ? friendIds : ['__none__'] } };
     }
 
@@ -1948,11 +1951,27 @@ router.get('/:slug/reviews', optionalAuth, async (req, res, next) => {
       ? { in: ['PUBLIC', 'FRIENDS_ONLY'] }
       : 'PUBLIC';
 
+    // Someone with a private profile shouldn't have their writing published to
+    // readers who can't open that profile — this list is the other place a
+    // review's text is shown publicly besides the Everyone feed, and unlike
+    // the feed these pages are crawlable (see prerender.js/sitemap.js). Same
+    // rule as feed.js and users.js's GET /:username: public, yours, or a
+    // friend's. Only the ratings-derived aggregates further up are unaffected,
+    // deliberately — a hidden review still counts toward the item's average,
+    // matching how the site treats ratings elsewhere.
+    const authorVisible = (friendsOnly && req.user) ? null : {
+      OR: [
+        { user: { profilePublic: true } },
+        ...(req.user ? [{ userId: req.user.id }, { userId: { in: friendIds } }] : []),
+      ],
+    };
+
     const where = {
       mediaItemId: seriesReviewMediaItemIds ? { in: seriesReviewMediaItemIds } : item.id,
       visibility: visibilityFilter,
       ...seasonFilter,
       ...userFilter,
+      ...(authorVisible && { AND: [authorVisible] }),
     };
     const [reviews, total] = await Promise.all([
       prisma.review.findMany({

@@ -55,9 +55,27 @@ router.get('/', optionalAuth, [
     // Build date filter
     const since = days ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : undefined;
 
+    // Everyone/trending only: don't surface reviews written by someone whose
+    // profile the viewer couldn't open anyway — clicking through to a private
+    // author just hits the lock screen, and their writing shouldn't be public
+    // reading when their profile isn't. Mirrors the rule in users.js's
+    // GET /:username exactly: a profile is viewable when it's public, your
+    // own, or a friend's. The friends feed needs no such filter — everyone in
+    // it is by definition a friend, so their profile is already open to you.
+    const authorVisible = authorIds ? null : {
+      OR: [
+        { user: { profilePublic: true } },
+        // Your own reviews stay in your Everyone feed even while your profile
+        // is private, and a private friend stays visible to their friends —
+        // neither is a disclosure to anyone who couldn't already look.
+        ...(req.user ? [{ userId: req.user.id }, { userId: { in: friendIds } }] : []),
+      ],
+    };
+
     const where = {
       ...(authorIds && { userId: { in: authorIds } }),
       visibility: authorIds ? { in: ['PUBLIC', 'FRIENDS_ONLY'] } : 'PUBLIC',
+      ...(authorVisible && { AND: [authorVisible] }),
       // mediaItem.verified:true guards against a review somehow existing on an
       // item still awaiting admin approval — shouldn't normally happen since
       // unverified items aren't reachable to review in the first place.
