@@ -45,6 +45,26 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
 
     if (!review) return res.status(404).json({ error: 'Review not found' });
 
+    // A PUBLIC review still isn't public reading when its author's profile
+    // isn't — same rule as feed.js, media.js and users.js. Lower exposure
+    // than those, since it needs the review's own opaque id rather than
+    // being listed anywhere, but the rule shouldn't differ by endpoint.
+    if (review.userId !== req.user?.id) {
+      const author = await prisma.user.findUnique({
+        where: { id: review.userId },
+        select: { profilePublic: true },
+      });
+      if (!author?.profilePublic) {
+        const areFriends = req.user && await prisma.friendship.findFirst({
+          where: { status: 'ACCEPTED', OR: [
+            { initiatorId: req.user.id, receiverId: review.userId },
+            { initiatorId: review.userId, receiverId: req.user.id },
+          ]},
+        });
+        if (!areFriends) return res.status(403).json({ error: 'friends_only' });
+      }
+    }
+
     if (review.visibility === 'PRIVATE' && review.userId !== req.user?.id) {
       return res.status(403).json({ error: 'This review is private' });
     }

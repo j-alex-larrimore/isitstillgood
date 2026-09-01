@@ -77,9 +77,21 @@ router.get('/item/:slug', async (req, res, next) => {
       _count: { rating: true },
     });
 
-    // Recent public reviews
+    // Recent public reviews, by authors whose profiles are public.
+    //
+    // This route has no viewer — it renders for crawlers — so the
+    // "or it's yours, or a friend's" half of the rule that feed.js and
+    // media.js apply has nothing to match on here: public is the only case
+    // that can qualify. Without the profilePublic clause a private profile's
+    // writing was still being served to Googlebot under the author's name,
+    // which is the most durable version of exactly the exposure the API-side
+    // filters exist to prevent.
     const reviews = await prisma.review.findMany({
-      where: { mediaItemId: item.id, visibility: 'PUBLIC' },
+      where: {
+        mediaItemId: item.id,
+        visibility: 'PUBLIC',
+        user: { profilePublic: true },
+      },
       include: { user: { select: { displayName: true, username: true } } },
       orderBy: { updatedAt: 'desc' },
       take: 10,

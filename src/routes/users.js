@@ -41,27 +41,39 @@ router.get('/:username/reviews', optionalAuth, [
 ], async (req, res, next) => {
   try {
     const target = await prisma.user.findUnique({ where: { username: req.params.username } });
-    if (!target) return res.status(404).json({ error: 'User not found' });
+    // Same 404-for-canceled rule as GET /:username below — a canceled account
+    // is gone, and this endpoint reaching past that told anyone who asked
+    // which titles they'd rated, contradicting the "your profile page will no
+    // longer be visible to anyone" promise in the cancellation dialog.
+    if (!target || target.canceledAt) return res.status(404).json({ error: 'User not found' });
 
     const isSelf = req.user?.id === target.id;
     const page   = parseInt(req.query.page) || 1;
     const take   = parseInt(req.query.limit) || 20;
+
+    const areFriends = !isSelf && req.user && await prisma.friendship.findFirst({
+      where: {
+        status: 'ACCEPTED',
+        OR: [
+          { initiatorId: req.user.id, receiverId: target.id },
+          { initiatorId: target.id, receiverId: req.user.id },
+        ],
+      },
+    });
+
+    // This endpoint is the profile page's own review list, so it has to honour
+    // the same gate the profile does — otherwise a friends-only profile that
+    // correctly 403s at GET /:username still handed its whole review history
+    // to anyone who asked for /:username/reviews directly.
+    if (!isSelf && !areFriends && !target.profilePublic) {
+      return res.status(403).json({ error: 'friends_only' });
+    }
 
     // Determine which visibility levels the requester can see
     let visibilityFilter;
     if (isSelf) {
       visibilityFilter = { in: ['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE'] };
     } else {
-      // Check friendship
-      const areFriends = req.user && await prisma.friendship.findFirst({
-        where: {
-          status: 'ACCEPTED',
-          OR: [
-            { initiatorId: req.user.id, receiverId: target.id },
-            { initiatorId: target.id, receiverId: req.user.id },
-          ],
-        },
-      });
       visibilityFilter = areFriends ? { in: ['PUBLIC', 'FRIENDS_ONLY'] } : { equals: 'PUBLIC' };
     }
 
