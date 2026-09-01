@@ -1,9 +1,13 @@
 // src/server.js
 require('dotenv').config();
 const app = require('./app');
-const { PrismaClient } = require('@prisma/client');
+// The same client the routes use (src/lib/prisma). This used to construct its
+// own, which made both uses below misleading: the startup $connect() opened a
+// pool nothing served requests from, and the shutdown $disconnect() drained
+// that idle pool while leaving the real one open — so Railway's SIGTERM on
+// redeploy never actually closed the connections in use.
+const prisma = require('./lib/prisma');
 
-const prisma = new PrismaClient();
 const PORT = process.env.PORT || 3001;
 
 async function main() {

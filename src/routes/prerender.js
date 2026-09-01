@@ -3,10 +3,9 @@
 // so they see real content instead of an empty JS shell
 
 const express = require('express');
-const { PrismaClient } = require('@prisma/client');
+const prisma  = require('../lib/prisma');
 const { sortByCastOrder } = require('../lib/mediaHelpers');
 const router  = express.Router();
-const prisma  = new PrismaClient();
 
 const BASE = 'https://www.isitstillgood.com';
 

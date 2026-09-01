@@ -1,11 +1,10 @@
 const express  = require('express');
 const { body, validationResult } = require('express-validator');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
 const { sendNewMessageEmail } = require('../services/email');
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 const USER_SELECT = {
   id: true, username: true, displayName: true, avatarUrl: true,
