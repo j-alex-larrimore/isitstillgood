@@ -4,3 +4,15 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# Derived cache from scripts/backfill-nyt-bestsellers.js — rebuilding it costs
+# a ~13 minute crawl against the NYT rate limit, so it's kept locally, but it's
+# generated data and shouldn't be in the repo.
+.nyt-sweep-cache.json
+
+# Scratch files from one-off analysis runs.
+_*.js
+_*.out
+_*.err
+_*.json
+_*.html
