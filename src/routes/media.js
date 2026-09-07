@@ -727,12 +727,48 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // seriesName is necessary but not sufficient (see clusterBookSeries).
       // BUT: if a text search returns multiple books from the same series,
       // show them individually rather than collapsing to the representative.
-      const clusters = clusterBookSeries(allSeriesEntries);
+      // Which book represents a series is a property of the SERIES, not of
+      // whatever subset the current filters happened to match. Clustering
+      // allSeriesEntries directly made the filtered subset the whole cluster,
+      // so a search matching one mid-series book left that book as its own
+      // "representative" and rendered it as the entire series — searching
+      // "lost world" produced a card reading "Jurassic Park · 2 books" that
+      // was really The Lost World's row (book 2, 1995).
+      //
+      // So: find which series matched, then re-cluster over their FULL
+      // membership to pick true representatives.
+      const matchedSeriesNames = [...new Set(allSeriesEntries.map(b => b.seriesName).filter(Boolean))];
+      const fullSeriesBooks = matchedSeriesNames.length
+        ? await prisma.mediaItem.findMany({
+            where: {
+              mediaType: 'BOOK', verified: true,
+              seriesName: { in: matchedSeriesNames },
+              seriesNumber: { not: null },
+            },
+            include: {
+              _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+              authors: { select: { id: true, name: true, slug: true }, take: 100 },
+              parent:  { select: { id: true, title: true, slug: true } },
+            },
+          })
+        : [];
+
+      const clusters = clusterBookSeries(fullSeriesBooks);
       seriesCountMap = new Map();
       for (const cluster of clusters) {
         seriesCountMap.set(cluster.books[0].seriesName, (seriesCountMap.get(cluster.books[0].seriesName) || 0) + cluster.books.length);
       }
-      seriesRepresentatives = clusters.map(cluster => pickSeriesRepresentative(cluster.books));
+
+      // Only surface a series card when the representative itself satisfies
+      // the active filters. A text query on the series NAME matches every
+      // book in it (so the rep is in the matched set and the card shows), but
+      // a query matching only a mid-series title leaves the rep out — and
+      // that book then falls through to an individual card below, which is
+      // what someone searching its title asked for.
+      const matchedIds = new Set(allSeriesEntries.map(b => b.id));
+      seriesRepresentatives = clusters
+        .map(cluster => pickSeriesRepresentative(cluster.books))
+        .filter(rep => matchedIds.has(rep.id));
     }
 
     // For rating/lowest sort: fetch ALL items so we can sort them together
