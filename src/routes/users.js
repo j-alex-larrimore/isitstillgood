@@ -894,7 +894,13 @@ router.get('/:username/taste-profile', optionalAuth, async (req, res, next) => {
 // convention that the lowest seriesNumber represents the series).
 // Same visibility rules as taste-profile: self always, otherwise only if
 // profilePublic or friends.
-router.get('/:username/card-data', optionalAuth, async (req, res, next) => {
+// Self only. This feeds the shareable profile-card image, which is a
+// publishing action — it turns someone's taste profile into a PNG made to be
+// posted anywhere. Being allowed to READ a friend's profile isn't consent to
+// package and republish it under your own hand, so the card can only ever be
+// built from your own. Viewing a friend's profile is unaffected; only the
+// card export is restricted.
+router.get('/:username/card-data', requireAuth, async (req, res, next) => {
   try {
     const target = await prisma.user.findUnique({
       where: { username: req.params.username },
@@ -902,20 +908,8 @@ router.get('/:username/card-data', optionalAuth, async (req, res, next) => {
     });
     if (!target || target.canceledAt) return res.status(404).json({ error: 'User not found' });
 
-    const isSelf = req.user?.id === target.id;
-    if (!target.profilePublic && !isSelf) {
-      if (!req.user) return res.status(403).json({ error: 'This profile is private' });
-      const areFriends = await prisma.friendship.findFirst({
-        where: {
-          status: 'ACCEPTED',
-          OR: [
-            { initiatorId: req.user.id, receiverId: target.id },
-            { initiatorId: target.id,   receiverId: req.user.id },
-          ],
-        },
-      });
-      if (!areFriends) return res.status(403).json({ error: 'This profile is friends only' });
-    }
+    const isSelf = req.user.id === target.id;
+    if (!isSelf) return res.status(403).json({ error: 'You can only create a card from your own profile' });
 
     const reviews = await prisma.review.findMany({
       where: {
