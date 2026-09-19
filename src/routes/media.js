@@ -775,6 +775,15 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // and paginate in JS. This ensures unrated items always appear at the bottom
     // of the last page rather than being pushed off by pagination.
     const ratingSort = sort === 'rating' || sort === 'lowest';
+    // "Most/least recently rated" — ordered by when ONE PERSON last reviewed
+    // each item (the selected friend, else the account holder; see
+    // buildLastRatedMap). Like avgRating this can't be an `orderBy` (Prisma
+    // has no orderBy-on-related-MAX), so it takes the same
+    // fetch-all-then-sort-in-JS route. Items the target person hasn't rated sort LAST in both
+    // directions — otherwise "least recently rated" leads with the ~98% of
+    // the catalogue they've never touched and never reaches the ones it's
+    // about. See buildLastRatedMap below for whose reviews count.
+    const ratedSort = sort === 'ratedRecent' || sort === 'ratedOldest';
     // When a text query is active, results need a relevance pass in JS too —
     // otherwise the chosen sort (recency, rating, etc.) is the ONLY ordering,
     // and since most items in a fresh catalog have zero reviews, "Top Rated"
@@ -783,7 +792,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // the actual Halo games — confirmed live. Fetch everything matching so the
     // relevance sort below can consider the whole result set before paginating.
     const textActive = !!(q && q.trim().length > 0);
-    const fullFetchMode = ratingSort || textActive;
+    const fullFetchMode = ratingSort || ratedSort || textActive;
 
     // Plain rating-sort browsing with no text search and no book-series
     // collapsing (i.e. Browse's default view for Movies/TV/Games, and Books
@@ -798,9 +807,110 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // still use the old full-fetch path since relevance ranking and series
     // clustering both genuinely need the whole matching set in hand.
     const canOptimizeRatingSort = ratingSort && !textActive && !collapseBookSeries;
+    const canOptimizeRatedSort  = ratedSort  && !textActive && !collapseBookSeries;
+    // Both id-list paths count the whole matching set up front, so the
+    // response must report THAT total rather than the current page's length.
+    const preCountedTotal = canOptimizeRatingSort || canOptimizeRatedSort;
+
+    // id -> epoch ms of the newest review on that item BY ONE PERSON, with
+    // per-season TV reviews rolled up to their parent show.
+    //
+    // Whose reviews: the friend currently selected in the reviewed-by filter
+    // if there is one, otherwise the account holder — the same precedence
+    // `statusTargetUserId` uses above. So "least recently rated" means "that
+    // I haven't rated in ages", not "that the community has neglected". A
+    // logged-out visitor has neither, and falls back to any public review so
+    // the option still orders something rather than going inert.
+    //
+    // Same `= ANY($1::text[])` raw form as the rating aggregate below, and
+    // for the same reason: an unfiltered catalogue browse puts ~49k ids in
+    // the list, past Postgres's 32,767 bind-variable ceiling via Prisma `in`.
+    const ratedTargetUserId = reviewedByUserId || req.user?.id || null;
+    // Your own reviews count whatever their visibility; someone else's only
+    // where you'd be allowed to see them anyway — mirroring the visibility
+    // scope buildUserRatingsMap uses for the reviewedBy target.
+    const ratedOwnReviews = !!ratedTargetUserId && ratedTargetUserId === req.user?.id;
+    async function buildLastRatedMap(ids, tvIds = []) {
+      if (!ids.length) return {};
+      const scoped = (idArr) => {
+        if (!ratedTargetUserId) {
+          return prisma.$queryRaw`SELECT "mediaItemId", MAX("createdAt") AS last FROM "Review" WHERE "mediaItemId" = ANY(${idArr}) AND visibility = 'PUBLIC' GROUP BY "mediaItemId"`;
+        }
+        if (ratedOwnReviews) {
+          return prisma.$queryRaw`SELECT "mediaItemId", MAX("createdAt") AS last FROM "Review" WHERE "mediaItemId" = ANY(${idArr}) AND "userId" = ${ratedTargetUserId} GROUP BY "mediaItemId"`;
+        }
+        return prisma.$queryRaw`SELECT "mediaItemId", MAX("createdAt") AS last FROM "Review" WHERE "mediaItemId" = ANY(${idArr}) AND "userId" = ${ratedTargetUserId} AND visibility IN ('PUBLIC','FRIENDS_ONLY') GROUP BY "mediaItemId"`;
+      };
+
+      const rows = await scoped(ids);
+      const map = Object.fromEntries(rows.map(r => [r.mediaItemId, new Date(r.last).getTime()]));
+
+      // TV reviews are written per season, never against the parent row, so
+      // without this every show reads as "never rated" — the same trap the
+      // rating rollup above documents. A show's "last rated" is the newest
+      // review across any of its seasons.
+      if (tvIds.length) {
+        const seasons = await prisma.mediaItem.findMany({
+          where: { parentId: { in: tvIds } },
+          select: { id: true, parentId: true },
+        });
+        if (seasons.length) {
+          const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
+          const seasonRows = await scoped(seasons.map(s => s.id));
+          for (const r of seasonRows) {
+            const parentId = seasonToParent[r.mediaItemId];
+            if (!parentId) continue;
+            const t = new Date(r.last).getTime();
+            if (map[parentId] == null || t > map[parentId]) map[parentId] = t;
+          }
+        }
+      }
+      return map;
+    }
+
+    // Unreviewed sorts last in BOTH directions — see the ratedSort note above.
+    function compareLastRated(a, b, map) {
+      const ta = map[a] ?? null, tb = map[b] ?? null;
+      if (ta === tb) return 0;
+      if (ta === null) return 1;
+      if (tb === null) return -1;
+      return sort === 'ratedOldest' ? ta - tb : tb - ta;
+    }
 
     let items, total;
-    if (canOptimizeRatingSort) {
+    if (canOptimizeRatedSort) {
+      // Same shape as the rating fast-path below: pull bare ids, order them
+      // in JS, then do the one expensive include-heavy fetch for just the
+      // page actually being returned.
+      const idRows = await prisma.mediaItem.findMany({ where, select: { id: true, mediaType: true } });
+      const idList = idRows.map(r => r.id);
+      total = idList.length;
+      const lastRatedMap = await buildLastRatedMap(
+        idList,
+        idRows.filter(r => r.mediaType === 'TV_SHOW').map(r => r.id),
+      );
+      // Deliberately NO reviewedBoost here. Elsewhere, items you've already
+      // rated float to the top of a filtered search; for these two sorts that
+      // boost reorders results by a different dimension than the one the user
+      // explicitly picked, and it shows: sorting by a friend's rating dates
+      // came back non-monotonic because items *you* had rated jumped the
+      // queue. A chosen ordering wins over the boost.
+      idList.sort((a, b) => compareLastRated(a, b, lastRatedMap));
+      const pageNum = parseInt(page) - 1;
+      const pageIds = idList.slice(pageNum * take, (pageNum + 1) * take);
+      const pageItemsUnordered = await prisma.mediaItem.findMany({
+        where: { id: { in: pageIds } },
+        include: {
+          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          directors: { select: { id: true, name: true, slug: true }, take: 100 },
+          authors:   { select: { id: true, name: true, slug: true }, take: 100 },
+          cast:      { select: { id: true, name: true, slug: true }, take: 100 },
+          parent:    { select: { id: true, title: true, slug: true } },
+        },
+      });
+      const byId = Object.fromEntries(pageItemsUnordered.map(i => [i.id, i]));
+      items = pageIds.map(id => byId[id]).filter(Boolean);
+    } else if (canOptimizeRatingSort) {
       const idRows = await prisma.mediaItem.findMany({ where, select: { id: true, mediaType: true, tmdbRating: true, openCriticScore: true } });
       const idList = idRows.map(r => r.id);
       total = idList.length;
@@ -1254,6 +1364,18 @@ router.get('/', optionalAuth, async (req, res, next) => {
       return Math.max(titleTier, personTier);
     }
 
+    // Last-rated timestamps for the paths that DIDN'T take the
+    // canOptimizeRatedSort fast path (text search, collapsed book series) —
+    // those sort from `where`-scoped ids instead, so this fills the gap from
+    // whatever finalItems actually holds.
+    let fallbackLastRatedMap = {};
+    if (ratedSort && !canOptimizeRatedSort) {
+      fallbackLastRatedMap = await buildLastRatedMap(
+        finalItems.map(i => i.id),
+        finalItems.filter(i => i.mediaType === 'TV_SHOW').map(i => i.id),
+      );
+    }
+
     // Secondary ordering key — whatever the user's chosen sort represents —
     // used only to break ties within the same relevance tier.
     function secondaryKey(i) {
@@ -1262,6 +1384,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
         case 'popular': return i._count?.reviews ?? 0;
         case 'year': case 'yearDesc': return i.releaseYear ?? null;
         case 'title':   return (i.title || '').toLowerCase();
+        // Populated just before the sort below, only on the paths that need
+        // it — an empty map yields null, i.e. "never rated", which sorts last.
+        case 'ratedRecent': case 'ratedOldest': return fallbackLastRatedMap[i.id] ?? null;
         case 'recent':  default: return new Date(i.createdAt).getTime();
       }
     }
@@ -1272,7 +1397,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (aKey === null && bKey === null) return 0;
       if (aKey === null) return 1;
       if (bKey === null) return -1;
-      return sort === 'lowest' || sort === 'year' ? aKey - bKey : bKey - aKey;
+      return sort === 'lowest' || sort === 'year' || sort === 'ratedOldest' ? aKey - bKey : bKey - aKey;
     }
 
     // Items the logged-in user has already reviewed float to the top of a
@@ -1306,6 +1431,11 @@ router.get('/', optionalAuth, async (req, res, next) => {
         if (boost !== 0) return boost;
         return relA !== relB ? relB - relA : compareSecondary(a, b);
       });
+      const pageNum = parseInt(page) - 1;
+      sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
+    } else if (ratedSort && !canOptimizeRatedSort) {
+      // No reviewedBoost — same reasoning as the fast path above.
+      sortedItems = [...finalItems].sort((a, b) => compareSecondary(a, b));
       const pageNum = parseInt(page) - 1;
       sortedItems = sortedItems.slice(pageNum * take, (pageNum + 1) * take);
     } else if ((sort === 'rating' || sort === 'lowest') && !canOptimizeRatingSort) {
@@ -1412,12 +1542,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
         }; // close the return object for isSeriesCard
       }),
       // For rating sort, total reflects the full sorted set (including series reps for books).
-      // canOptimizeRatingSort already computed the true total itself (finalItems there is only
-      // ever the current page), so it must NOT be overridden by finalItems.length like the
-      // legacy full-fetch path below still correctly does for text search / book-series collapsing.
-      total: canOptimizeRatingSort ? total : fullFetchMode ? finalItems.length : total,
+      // The id-list fast paths (canOptimizeRatingSort / canOptimizeRatedSort) already computed
+      // the true total themselves — finalItems there is only ever the current page — so they must
+      // NOT be overridden by finalItems.length like the legacy full-fetch path below still
+      // correctly does for text search / book-series collapsing. Missing that exemption caps
+      // total at one page's worth (24) and collapses pagination to a single page.
+      total: preCountedTotal ? total : fullFetchMode ? finalItems.length : total,
       page: parseInt(page),
-      pages: canOptimizeRatingSort ? Math.ceil(total / take) : fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
+      pages: preCountedTotal ? Math.ceil(total / take) : fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
       friendsOnly: friendsOnly && friendIds.length > 0,
       searchAvgRating,
       searchAvgIsFriend: !!req.reviewedByRatings,
