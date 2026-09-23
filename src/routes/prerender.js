@@ -4,7 +4,7 @@
 
 const express = require('express');
 const prisma  = require('../lib/prisma');
-const { sortByCastOrder } = require('../lib/mediaHelpers');
+const { sortByCastOrder, findRelatedItems } = require('../lib/mediaHelpers');
 const router  = express.Router();
 
 const BASE = 'https://www.isitstillgood.com';
@@ -29,8 +29,11 @@ router.get('/item/:slug', async (req, res, next) => {
     const item = await prisma.mediaItem.findUnique({
       where: { slug: req.params.slug },
       include: {
-        directors: { select: { name: true }, take: 10 },
-        authors:   { select: { name: true }, take: 10 },
+        // id is needed as well as name: findRelatedItems matches on director/
+        // author ids, and selecting only the name made that pass silently find
+        // nothing and fall through to a much weaker genre-only match.
+        directors: { select: { id: true, name: true }, take: 10 },
+        authors:   { select: { id: true, name: true }, take: 10 },
         cast:      { select: { id: true, name: true }, take: 10 },
         _count:    { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
         // For seasons: a season row's own `cast` is only its season-specific
@@ -128,6 +131,11 @@ router.get('/item/:slug', async (req, res, next) => {
       });
     }
 
+    // Only for titles that have no siblings to link to — a season or a book
+    // mid-series already has a real item→item block above, and stacking a
+    // second list of links under it would dilute both.
+    const related = siblings.length ? [] : await findRelatedItems(prisma, item, 8);
+
     const avg = stats._avg.rating;
     const count = stats._count.rating;
     // TV seasons of the same show share almost all their content (cast,
@@ -175,6 +183,12 @@ router.get('/item/:slug', async (req, res, next) => {
       const yr = s.releaseYear ? ` (${s.releaseYear})` : '';
       return `<li><a href="${BASE}/item.html?slug=${esc(s.slug)}">${esc(n)}${esc(s.title)}${esc(yr)}</a></li>`;
     }).join('\n    ')}
+  </ul>` : '';
+
+    const relatedHtml = related.length ? `
+  <h2>More ${esc(typeLabel)}s to Consider</h2>
+  <ul>
+    ${related.map(r => `<li><a href="${BASE}/item.html?slug=${esc(r.slug)}">${esc(r.title)}${r.releaseYear ? esc(` (${r.releaseYear})`) : ''}</a></li>`).join('\n    ')}
   </ul>` : '';
 
     // External community scores — deliberately rendered as plain attributed
@@ -316,6 +330,7 @@ router.get('/item/:slug', async (req, res, next) => {
   ${castList ? `<p><strong>Cast:</strong> ${castList}</p>` : ''}
   ${streamingHtml}
   ${siblingsHtml}
+  ${relatedHtml}
   <hr>
   <h2>Community Reviews</h2>
   ${reviewsHtml || '<p>No reviews yet — be the first!</p>'}

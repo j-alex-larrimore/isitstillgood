@@ -5,7 +5,7 @@ const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
-const { normalizeTitleForSearch, clusterBookSeries, pickSeriesRepresentative, sortByCastOrder } = require('../lib/mediaHelpers');
+const { normalizeTitleForSearch, clusterBookSeries, pickSeriesRepresentative, sortByCastOrder, findRelatedItems } = require('../lib/mediaHelpers');
 
 // Shared by the `tag` param (tags array only, AND-combined with other active
 // filters — used by search.html's dedicated tag field), the genre/tag
@@ -2002,11 +2002,19 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
     if (item.directors) item.directors = item.directors.sort(sortByName);
     if (item.authors)   item.authors   = item.authors.sort(sortByName);
 
+    // Same list the crawler-facing page renders (prerender.js), from the same
+    // helper, so the two can't drift. Only for titles with no siblings of
+    // their own — a season or a book mid-series already shows its siblings.
+    const relatedItems = (isTvParent || isBookSeries || item.parentId || item.seriesName)
+      ? []
+      : await findRelatedItems(prisma, item, 8);
+
     res.json({
       ...item,
       isTvParent,
       isBookSeries,
       isSeriesParent,
+      relatedItems,
       seriesBooksData: item.seriesBooksData || null,
       seriesRepSlug,
       communityStats: {

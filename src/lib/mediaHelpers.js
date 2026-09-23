@@ -723,7 +723,72 @@ async function checkSeriesCollision(seriesName, authorNames) {
   return { seriesName, collidingAuthors: [...collidingAuthors] };
 }
 
+// Titles worth linking to from an item page. Shared by the real page
+// (media.js GET /:slug) and the crawler-facing one (prerender.js) so the two
+// can't drift — a prerendered page offering links a user doesn't get is
+// cloaking, and this is the one piece of that page a crawler most depends on.
+//
+// Standalone movies/games are the gap this exists to close: seasons and book
+// series already link to their siblings, but a one-off title had no item→item
+// link at all, leaving it orphaned in the crawl graph.
+//
+// Two passes, strongest relationship first: same director/author, then shared
+// genre. Ordered by external rating so the links point at titles someone might
+// actually want, and so the ordering is stable across requests (the
+// prerendered page is cached for a day — a different order per request would
+// churn the cache for no reason).
+async function findRelatedItems(prisma, item, limit = 8) {
+  if (!item) return [];
+  const exclude = [item.id, ...(item.parentId ? [item.parentId] : [])];
+  const creatorIds = [
+    ...(item.directors || []).map(p => p.id),
+    ...(item.authors   || []).map(p => p.id),
+  ].filter(Boolean);
+
+  const select = { id: true, slug: true, title: true, releaseYear: true, imageUrl: true, mediaType: true };
+  // Seasons are never link targets in their own right — they're reachable
+  // from their show, and linking to them directly just spreads crawl budget
+  // across near-duplicate pages.
+  const base = { verified: true, mediaType: item.mediaType, parentId: null, id: { notIn: exclude } };
+  // Order by whichever external rating the type actually carries. Games store
+  // theirs in openCriticScore (IGDB, 0-100 — repurposed field, see the schema
+  // note), not tmdbRating, and sorting a game by tmdbRating means sorting by a
+  // column that is null for every row: the tiebreak takes over and you get the
+  // catalogue alphabetically ("100 Asian Cats", "100 Dino Cats"…). Books have
+  // no external rating at all, so they lean on review count.
+  const ratingField = item.mediaType === 'VIDEO_GAME' ? 'openCriticScore' : 'tmdbRating';
+  const order = [
+    { [ratingField]: { sort: 'desc', nulls: 'last' } },
+    { reviews: { _count: 'desc' } },
+    { title: 'asc' },
+  ];
+  const out = [];
+  const seen = new Set(exclude);
+
+  if (creatorIds.length) {
+    const byCreator = await prisma.mediaItem.findMany({
+      where: {
+        ...base,
+        OR: [{ directors: { some: { id: { in: creatorIds } } } }, { authors: { some: { id: { in: creatorIds } } } }],
+      },
+      select, orderBy: order, take: limit,
+    });
+    for (const r of byCreator) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
+  }
+
+  if (out.length < limit && item.genres?.length) {
+    const byGenre = await prisma.mediaItem.findMany({
+      where: { ...base, genres: { hasSome: item.genres.slice(0, 3) }, id: { notIn: [...seen] } },
+      select, orderBy: order, take: limit - out.length,
+    });
+    for (const r of byGenre) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
+  }
+
+  return out.slice(0, limit);
+}
+
 module.exports = {
+  findRelatedItems,
   clusterBookSeries,
   pickSeriesRepresentative,
   buildSeriesRepMap,
