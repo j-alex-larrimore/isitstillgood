@@ -96,6 +96,38 @@ router.get('/item/:slug', async (req, res, next) => {
       take: 10,
     });
 
+    // ── Sibling titles, for an internal link graph ───────────────────────
+    // Measured live: the prerendered page linked to nothing but itself, the
+    // homepage and TMDB, so every one of the 43.5K item pages looked orphaned
+    // to a crawler and discovery rested entirely on the sitemap. item.html
+    // has shown these links to users all along (seasons, series volumes,
+    // person chips, genres) — rendering them as plain text here meant bots
+    // saw strictly LESS than users, which is the wrong side of the same
+    // cloaking line this file is careful about elsewhere. These are item→item
+    // links, the ones actually worth having.
+    let siblings = [];
+    const siblingSelect = { slug: true, title: true, seasonNumber: true, seriesNumber: true, releaseYear: true };
+    if (item.mediaType === 'TV_SHOW') {
+      siblings = item.parentId
+        // A season links to its show and to its sibling seasons.
+        ? await prisma.mediaItem.findMany({
+            where: { verified: true, OR: [{ id: item.parentId }, { parentId: item.parentId, NOT: { id: item.id } }] },
+            select: siblingSelect, orderBy: { seasonNumber: 'asc' }, take: 30,
+          })
+        // A show links down to its seasons.
+        : await prisma.mediaItem.findMany({
+            where: { verified: true, parentId: item.id },
+            select: siblingSelect, orderBy: { seasonNumber: 'asc' }, take: 30,
+          });
+    } else if (item.mediaType === 'BOOK' && item.seriesName) {
+      // Books have no parent/child relation — a series is a shared
+      // seriesName ordered by seriesNumber (see CLAUDE.md).
+      siblings = await prisma.mediaItem.findMany({
+        where: { verified: true, mediaType: 'BOOK', seriesName: item.seriesName, NOT: { id: item.id } },
+        select: siblingSelect, orderBy: { seriesNumber: 'asc' }, take: 30,
+      });
+    }
+
     const avg = stats._avg.rating;
     const count = stats._count.rating;
     // TV seasons of the same show share almost all their content (cast,
@@ -118,12 +150,32 @@ router.get('/item/:slug', async (req, res, next) => {
       ? `Rated ${avg.toFixed(1)}/10 from ${count} review${count !== 1 ? 's' : ''}. Is ${title} still worth your time? Read community reviews on IsItStillGood.com.`
       : `Is ${title} still worth your time? Be the first to review it on IsItStillGood.com.`;
 
-    const people = [
+    // Person and genre links mirror item.html's own chips exactly — same
+    // /search.html?person= and ?genre= targets a user clicking through gets.
+    const personLink = n => `<a href="${BASE}/search.html?person=${encodeURIComponent(n)}">${esc(n)}</a>`;
+    const castList = (item.cast || []).slice(0, 8).map(c => personLink(c.name)).join(', ');
+    const creditsHtml = [
       ...(item.directors || []).map(d => d.name),
       ...(item.authors   || []).map(a => a.name),
-    ].slice(0, 3).join(', ');
+    ].slice(0, 5).map(personLink).join(', ');
+    const genreHtml = (item.genres || []).slice(0, 3)
+      .map(g => `<a href="${BASE}/search.html?genre=${encodeURIComponent(g)}">${esc(g)}</a>`).join(', ');
 
-    const castList = (item.cast || []).slice(0, 8).map(c => c.name).join(', ');
+    // The sibling block. Labelled by what the relationship actually is, since
+    // "Seasons" and a book series are different things to a reader.
+    const siblingLabel = item.mediaType === 'BOOK'
+      ? esc(item.seriesName || 'Series')
+      : (item.parentId ? 'This Show' : 'Seasons');
+    const siblingsHtml = siblings.length ? `
+  <h2>${siblingLabel}</h2>
+  <ul>
+    ${siblings.map(s => {
+      const n = s.seasonNumber != null ? `Season ${s.seasonNumber}: `
+              : s.seriesNumber != null ? `#${s.seriesNumber}: ` : '';
+      const yr = s.releaseYear ? ` (${s.releaseYear})` : '';
+      return `<li><a href="${BASE}/item.html?slug=${esc(s.slug)}">${esc(n)}${esc(s.title)}${esc(yr)}</a></li>`;
+    }).join('\n    ')}
+  </ul>` : '';
 
     // External community scores — deliberately rendered as plain attributed
     // text and NOT folded into the aggregateRating JSON-LD below.
@@ -255,14 +307,15 @@ router.get('/item/:slug', async (req, res, next) => {
   <h1>${esc(title)}${esc(year)}</h1>
   <div class="meta">
     ${esc(typeLabel)}
-    ${item.genres?.length ? ` · ${item.genres.slice(0,3).map(esc).join(', ')}` : ''}
-    ${people ? ` · ${esc(people)}` : ''}
+    ${genreHtml ? ` · ${genreHtml}` : ''}
+    ${creditsHtml ? ` · ${creditsHtml}` : ''}
   </div>
   ${avg ? `<div class="rating">${avg.toFixed(1)}/10 — ${ratingToVerdict(avg)} · ${count} review${count !== 1 ? 's' : ''}</div>` : '<div class="meta">No reviews yet</div>'}
   ${externalHtml}
   ${item.description ? `<div class="desc">${esc(item.description)}</div>` : ''}
-  ${castList ? `<p><strong>Cast:</strong> ${esc(castList)}</p>` : ''}
+  ${castList ? `<p><strong>Cast:</strong> ${castList}</p>` : ''}
   ${streamingHtml}
+  ${siblingsHtml}
   <hr>
   <h2>Community Reviews</h2>
   ${reviewsHtml || '<p>No reviews yet — be the first!</p>'}
