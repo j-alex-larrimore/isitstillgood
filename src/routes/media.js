@@ -1903,6 +1903,20 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       _count: { verdict: true },
     });
 
+    // The rating histogram, which is what the item page's distribution bar is
+    // actually built from. `verdict` above is denormalised text and carries
+    // two generations of values — the current per-rating words (Perfect,
+    // Excellent, … The Worst) and a residue of band names from the old
+    // four-verdict scheme (TIMELESS/STILL_GOOD/MIXED/NOT_GOOD) — so grouping
+    // on it gives a distribution whose keys depend on when each review was
+    // written. `rating` is the validated 1–10 source of truth and every
+    // review has one, legacy or not.
+    const ratingCounts = await prisma.review.groupBy({
+      by: ['rating'],
+      where: statsWhere,
+      _count: { rating: true },
+    });
+
     // Add avg rating to each season/book for the picker
     if (isTvParent && item.seasonEntries?.length) {
       const seasonIds = item.seasonEntries.map(s => s.id);
@@ -2043,7 +2057,9 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         // fell back to only ever displaying the average-across-books value.
         seriesAvgRating:   (seriesLevelStats?._count.rating > 0) ? seriesLevelStats._avg.rating : null,
         seriesReviewCount: seriesLevelStats?._count.rating || 0,
+        // Kept for any caller still reading it; the item page uses `ratings`.
         verdicts:     Object.fromEntries(verdicts.map(v => [v.verdict, v._count.verdict])),
+        ratings:      Object.fromEntries(ratingCounts.map(r => [r.rating, r._count.rating])),
         avgCompletion,
       },
       userReview,
