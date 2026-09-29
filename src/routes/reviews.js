@@ -2,6 +2,10 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const prisma = require('../lib/prisma');
+// Reads through `prisma` can't see drafts (see src/lib/prisma.js). This route
+// is the one place that legitimately needs to — an author saving over, reading
+// back, or publishing their own unpublished review.
+const { prismaWithDrafts } = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 
 function ok(req, res) {
@@ -44,6 +48,15 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
     });
 
     if (!review) return res.status(404).json({ error: 'Review not found' });
+
+    // findUnique can't carry the client extension's draft filter (its `where`
+    // only takes unique fields), so this is one of the few places that has to
+    // check by hand. An unpublished review doesn't exist to anyone but its
+    // author — 404 rather than 403, since acknowledging it would leak that the
+    // person is drafting something about this title.
+    if (review.isDraft && review.userId !== req.user?.id) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
 
     // A PUBLIC review still isn't public reading when its author's profile
     // isn't — same rule as feed.js, media.js and users.js. Lower exposure
@@ -94,9 +107,11 @@ router.post('/', requireAuth, [
   body('spoilerText').optional().trim().isLength({ max: 3000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
   body('isRevisit').optional().isBoolean(),
+  body('isDraft').optional().isBoolean(),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
-  const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit } = req.body;
+  const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit, isDraft } = req.body;
+  const saveAsDraft = isDraft === true || isDraft === 'true';
   try {
     const media = await prisma.mediaItem.findUnique({ where: { id: mediaItemId }, include: { authors: { select: { id: true } } } });
     if (!media) return res.status(404).json({ error: 'Media item not found' });
@@ -141,11 +156,17 @@ router.post('/', requireAuth, [
         where: { mediaType: 'BOOK', seriesName: media.seriesName, authors: { some: { id: { in: authorIds } } } },
         select: { id: true },
       })).map(b => b.id);
-      existing = await prisma.review.findFirst({
+      // Draft-aware: reads through `prisma` can't see drafts, so saving over
+      // an existing draft would miss it here and try to INSERT a second row,
+      // tripping the user+item+season unique constraint.
+      existing = await prismaWithDrafts.review.findFirst({
         where: { userId: req.user.id, mediaItemId: { in: clusterIds }, seasonNumber: 0 },
       });
     } else {
-      existing = await prisma.review.findFirst({
+      // Draft-aware: reads through `prisma` can't see drafts, so saving over
+      // an existing draft would miss it here and try to INSERT a second row,
+      // tripping the user+item+season unique constraint.
+      existing = await prismaWithDrafts.review.findFirst({
         where: { userId: req.user.id, mediaItemId, seasonNumber: season },
       });
     }
@@ -166,11 +187,20 @@ router.post('/', requireAuth, [
           rating: newRating,
           dateConsumed: consumed,
           reviewText, spoilerText, visibility: vis, verdict,
-          isRevisit: ratingChanged ? true : existing.isRevisit,
-          previousRating: ratingChanged ? existing.rating : existing.previousRating,
+          isDraft: saveAsDraft,
+          // A draft being saved over isn't a revisit — that only means "I
+          // changed my mind about something I'd already published".
+          isRevisit: existing.isDraft ? false : (ratingChanged ? true : existing.isRevisit),
+          previousRating: existing.isDraft ? null : (ratingChanged ? existing.rating : existing.previousRating),
         },
         include: reviewInclude,
       });
+      // Publishing a draft is the moment friends should hear about it — the
+      // create branch below never fired for this review, because it already
+      // existed as a draft.
+      if (existing.isDraft && !saveAsDraft) {
+        await notifyFriends(req.user.id, review.id, media.title).catch(console.error);
+      }
     } else {
       // Create a brand new review
       review = await prisma.review.create({
@@ -180,10 +210,14 @@ router.post('/', requireAuth, [
           seasonNumber: season,
           dateConsumed: consumed,        // store when they consumed it
           reviewText, spoilerText, visibility: vis, verdict, isRevisit: false,
+          isDraft: saveAsDraft,
         },
         include: reviewInclude,
       });
-      await notifyFriends(req.user.id, review.id, media.title).catch(console.error);
+      // Nobody is told about an unpublished review.
+      if (!saveAsDraft) {
+        await notifyFriends(req.user.id, review.id, media.title).catch(console.error);
+      }
     }
 
     res.status(existing ? 200 : 201).json(review);
@@ -263,5 +297,28 @@ async function notifyFriends(userId, reviewId, mediaTitle) {
     })),
   });
 }
+
+// ─── GET /api/reviews/drafts/mine ─────────────────────────────────────────
+// Your own unpublished reviews. Two path segments so it can't be swallowed by
+// the single-segment /:id route above.
+//
+// Uses prismaWithDrafts because the shared client filters drafts out of every
+// read by design — this is one of the few places that's supposed to see them,
+// and it's scoped to req.user.id so it can only ever return your own.
+router.get('/drafts/mine', requireAuth, async (req, res, next) => {
+  try {
+    const drafts = await prismaWithDrafts.review.findMany({
+      where: { userId: req.user.id, isDraft: true },
+      include: {
+        mediaItem: {
+          select: { id: true, title: true, slug: true, mediaType: true, releaseYear: true, imageUrl: true },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 100,
+    });
+    res.json({ drafts, total: drafts.length });
+  } catch (err) { next(err); }
+});
 
 module.exports = router;

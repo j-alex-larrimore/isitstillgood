@@ -3,6 +3,9 @@ const router = require('express').Router();
 const { query } = require('express-validator');
 const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
+// Reads through `prisma` hide drafts by design (see src/lib/prisma.js). The one
+// exception in this file is loading YOUR OWN review back into the form.
+const { prismaWithDrafts } = require('../lib/prisma');
 const { optionalAuth } = require('../middleware/auth');
 const { fetchExternalRatings } = require('../services/externalRatings');
 const { normalizeTitleForSearch, clusterBookSeries, pickSeriesRepresentative, sortByCastOrder, findRelatedItems } = require('../lib/mediaHelpers');
@@ -718,7 +721,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       allSeriesEntries = await prisma.mediaItem.findMany({
         where: { AND: seriesWhereClauses },
         include: {
-          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
           authors: { select: { id: true, name: true, slug: true }, take: 100 },
           parent:  { select: { id: true, title: true, slug: true } },
         },
@@ -746,7 +749,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
               seriesNumber: { not: null },
             },
             include: {
-              _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+              _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
               authors: { select: { id: true, name: true, slug: true }, take: 100 },
               parent:  { select: { id: true, title: true, slug: true } },
             },
@@ -901,7 +904,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const pageItemsUnordered = await prisma.mediaItem.findMany({
         where: { id: { in: pageIds } },
         include: {
-          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
           directors: { select: { id: true, name: true, slug: true }, take: 100 },
           authors:   { select: { id: true, name: true, slug: true }, take: 100 },
           cast:      { select: { id: true, name: true, slug: true }, take: 100 },
@@ -1001,7 +1004,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       const pageItemsUnordered = await prisma.mediaItem.findMany({
         where: { id: { in: pageIds } },
         include: {
-          _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+          _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
           directors: { select: { id: true, name: true, slug: true }, take: 100 },
           authors:   { select: { id: true, name: true, slug: true }, take: 100 },
           cast:      { select: { id: true, name: true, slug: true }, take: 100 },
@@ -1016,7 +1019,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
         prisma.mediaItem.findMany({
           where,
           include: {
-            _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+            _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
             directors: { select: { id: true, name: true, slug: true }, take: 100 },
             authors:   { select: { id: true, name: true, slug: true }, take: 100 },
             cast:      { select: { id: true, name: true, slug: true }, take: 100 },
@@ -1745,7 +1748,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
         directors: { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         cast:       { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
         authors:    { select: { id: true, name: true, slug: true, imageUrl: true }, take: 100 },
-        _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+        _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
         // For seasons: include parent show info and its cast
         parent: {
           include: {
@@ -1759,7 +1762,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
           select: {
             id: true, title: true, slug: true,
             seasonNumber: true, releaseYear: true, imageUrl: true,
-            _count: { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+            _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
           },
           orderBy: { seasonNumber: 'asc' },
         },
@@ -1870,7 +1873,7 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
           // seasonNumber: {not: 0} excludes series-level reviews — otherwise the
           // representative book's own count here double-counts once a series-
           // level review exists too, since both share that book's mediaItemId.
-          _count: { select: { reviews: { where: { visibility: 'PUBLIC', OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }] } } } },
+          _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC', OR: [{ seasonNumber: null }, { seasonNumber: { not: 0 } }] } } } },
         },
         orderBy: { seriesNumber: 'asc' },
       });
@@ -1946,7 +1949,11 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       const seriesReviewWhere = isBookSeries
         ? { userId: req.user.id, mediaItemId: { in: seriesClusterIds }, seasonNumber: 0 }
         : { userId: req.user.id, mediaItemId: item.id, seasonNumber: null };
-      userReview = await prisma.review.findFirst({ where: seriesReviewWhere });
+      // Draft-aware, and scoped to req.user.id so it can only ever be your
+      // own: this is what repopulates the review form when you come back to a
+      // title, and a draft you can't see is a draft you'd silently overwrite.
+      // isDraft rides along on the response so the form can label it.
+      userReview = await prismaWithDrafts.review.findFirst({ where: seriesReviewWhere });
     }
 
     // Compute average completion for TV parent shows and book series

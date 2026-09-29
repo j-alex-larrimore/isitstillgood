@@ -37,7 +37,7 @@ router.get('/', async (req, res, next) => {
         description: { not: null },
         imageUrl:    { not: null },
       },
-      select: { slug: true, updatedAt: true, mediaType: true, _count: { select: { reviews: true } } },
+      select: { slug: true, updatedAt: true, mediaType: true, _count: { select: { reviews: { where: { isDraft: false } } } } },
       orderBy: { updatedAt: 'desc' },
     });
 

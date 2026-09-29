@@ -35,7 +35,7 @@ router.get('/item/:slug', async (req, res, next) => {
         directors: { select: { id: true, name: true }, take: 10 },
         authors:   { select: { id: true, name: true }, take: 10 },
         cast:      { select: { id: true, name: true }, take: 10 },
-        _count:    { select: { reviews: { where: { visibility: 'PUBLIC' } } } },
+        _count:    { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
         // For seasons: a season row's own `cast` is only its season-specific
         // guest stars — the recurring ensemble lives on the parent show's
         // cast instead. Same split media.js's /:slug route already merges

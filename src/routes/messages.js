@@ -38,12 +38,14 @@ router.post('/', requireAuth, [
       }),
       reviewId ? prisma.review.findUnique({
         where: { id: reviewId },
-        select: { id: true, mediaItem: { select: { title: true, slug: true, mediaType: true } } },
+        // isDraft is selected so the guard below can reject an unpublished
+        // review — findUnique bypasses the client-extension draft filter.
+        select: { id: true, isDraft: true, mediaItem: { select: { title: true, slug: true, mediaType: true } } },
       }) : Promise.resolve(null),
     ]);
 
     if (!recipient) return res.status(404).json({ error: 'User not found' });
-    if (reviewId && !review) return res.status(404).json({ error: 'Review not found' });
+    if (reviewId && (!review || review.isDraft)) return res.status(404).json({ error: 'Review not found' });
 
     const message = await prisma.message.create({
       data: {

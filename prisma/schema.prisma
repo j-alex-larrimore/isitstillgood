@@ -264,6 +264,12 @@ model Review {
   spoilerText   String?          @db.Text
   verdict       String?
   visibility    ReviewVisibility @default(PUBLIC)
+  // An unpublished, work-in-progress review. Hidden from every read that goes
+  // through src/lib/prisma.js, which injects isDraft:false into review queries
+  // rather than relying on ~40 call sites to remember. Occupies the same
+  // user+item+season slot as a published review would, so an item has either a
+  // draft or a live review, never both.
+  isDraft       Boolean          @default(false)
   user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   mediaItem     MediaItem  @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
   reactions     Reaction[]
@@ -277,6 +283,8 @@ model Review {
   @@index([mediaItemId])
   @@index([visibility])
   @@index([createdAt])
+  // Fetching a user's own drafts is the one hot path that filters on isDraft.
+  @@index([userId, isDraft])
 }
 
 model Reaction {
