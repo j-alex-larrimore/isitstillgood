@@ -158,16 +158,21 @@ router.get('/item/:slug', async (req, res, next) => {
       ? `Rated ${avg.toFixed(1)}/10 from ${count} review${count !== 1 ? 's' : ''}. Is ${title} still worth your time? Read community reviews on IsItStillGood.com.`
       : `Is ${title} still worth your time? Be the first to review it on IsItStillGood.com.`;
 
-    // Person and genre links mirror item.html's own chips exactly — same
-    // /search.html?person= and ?genre= targets a user clicking through gets.
-    const personLink = n => `<a href="${BASE}/search.html?person=${encodeURIComponent(n)}">${esc(n)}</a>`;
-    const castList = (item.cast || []).slice(0, 8).map(c => personLink(c.name)).join(', ');
+    // Person and genre links mirror item.html's own chips exactly — the same
+    // browse.html targets a user clicking through gets. They pointed at
+    // /search.html, which is the de-indexed legacy page: a dead end for a
+    // reader arriving from search, and an internal link into a noindex page
+    // for a crawler. Person links carry the id, not the name, because
+    // browse filters on the id and two people can share a name.
+    const personLink = p =>
+      `<a href="${BASE}/browse.html?personId=${encodeURIComponent(p.id)}&amp;personLabel=${encodeURIComponent(p.name)}">${esc(p.name)}</a>`;
+    const castList = (item.cast || []).slice(0, 8).map(personLink).join(', ');
     const creditsHtml = [
-      ...(item.directors || []).map(d => d.name),
-      ...(item.authors   || []).map(a => a.name),
+      ...(item.directors || []),
+      ...(item.authors   || []),
     ].slice(0, 5).map(personLink).join(', ');
     const genreHtml = (item.genres || []).slice(0, 3)
-      .map(g => `<a href="${BASE}/search.html?genre=${encodeURIComponent(g)}">${esc(g)}</a>`).join(', ');
+      .map(g => `<a href="${BASE}/browse.html?genre=${encodeURIComponent(g)}">${esc(g)}</a>`).join(', ');
 
     // The sibling block. Labelled by what the relationship actually is, since
     // "Seasons" and a book series are different things to a reader.
