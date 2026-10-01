@@ -101,6 +101,17 @@ model MediaItem {
   authors         Person[]   @relation("AuthoredBy")
   seriesName      String?    // e.g. "The Dark Tower"
   seriesNumber    Float?     // e.g. 3, or 2.5 for an interstitial/companion volume
+  // ISBN-13, digits only, no hyphens. Exists so a Goodreads export can be
+  // matched exactly instead of by title+author — goodreadsId is no help
+  // there, since despite the name it holds a mix of Open Library work ids
+  // and Google Books volume ids and never an ISBN.
+  //
+  // Deliberately NOT unique: the same work legitimately appears more than
+  // once (editions, a series parent and its volumes), so this is a lookup
+  // key, not an identity. ISBN-10s are converted to their 13 form on the way
+  // in rather than stored separately, since that conversion is lossless and
+  // one column means one index and one query.
+  isbn13          String?
 
   // Video game-specific
   openCriticId2   String?    // kept for compat, use openCriticId
@@ -119,6 +130,7 @@ model MediaItem {
   @@index([normalizedTitle])
   @@index([releaseYear])
   @@index([verified])
+  @@index([isbn13])
 }
 
 model Person {
