@@ -80,6 +80,7 @@ const tokens = names => new Set(names.flatMap(n => norm(n).split(' ')).filter(t 
 
   let n = 0;
   let quotaHit = false;
+  let limitKind = '';
 
   for (const b of todo) {
     const volId = (b.imageUrl.match(/[?&]id=([^&]+)/) || [])[1];
@@ -89,7 +90,13 @@ const tokens = names => new Set(names.flatMap(n => norm(n).split(' ')).filter(t 
     let rateLimited = 0;
     try {
       let res = await fetch(`https://www.googleapis.com/books/v1/volumes/${volId}?key=${KEY}`);
-      while (res.status === 429 && rateLimited < 3) {
+      // Books has TWO quotas and the difference decides whether re-running
+      // helps: "per minute per user" clears in a minute, "per day" does not.
+      if (res.status === 429) {
+        const body = await res.clone().json().catch(() => null);
+        limitKind = (body?.error?.message || '').match(/limit '([^']+)'/)?.[1] || 'unknown';
+      }
+      while (res.status === 429 && rateLimited < 3 && !/per day/i.test(limitKind)) {
         rateLimited++;
         console.log(`  rate limited — waiting ${COOLDOWN_MS / 1000}s (attempt ${rateLimited}/3)`);
         fs.writeFileSync(CHECKPOINT, JSON.stringify([...done]));
@@ -134,7 +141,10 @@ const tokens = names => new Set(names.flatMap(n => norm(n).split(' ')).filter(t 
   fs.writeFileSync(CHECKPOINT, JSON.stringify([...done]));
   fs.writeFileSync(FINDINGS, JSON.stringify(findings, null, 1));
 
-  const state = quotaHit ? 'STOPPED — rate limited repeatedly; re-run to resume' : 'COMPLETE';
+  const state = !quotaHit ? 'COMPLETE'
+    : /per day/i.test(limitKind)
+      ? `STOPPED — daily quota (${limitKind}) exhausted; re-run tomorrow`
+      : `STOPPED — hit ${limitKind} repeatedly; re-run to resume`;
   console.log(`\nthis run: ${n} · total ${done.size}/${books.length} · ${state}`);
   console.log(`findings: ${findings.length}`);
   findings.forEach(f => console.log(`  [${f.kind}] ${f.title}\n      ${f.detail}`));
