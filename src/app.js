@@ -53,7 +53,15 @@ app.use(cors({
 }));
 
 // ─── Body & Cookie Parsing ───────────────────────────────────────────────────
-app.use(express.json());
+// /api/imports carries a whole ratings export as one JSON string, far larger
+// than anything else this API accepts. It gets its own parser (mounted with
+// the route further down) rather than a raised global limit, which would
+// widen the body-size surface on every other endpoint for one route's sake.
+// The default parser has to skip that path or it would 413 first, since it
+// runs before the route is reached.
+const jsonParser = express.json();
+app.use((req, res, next) =>
+  req.path.startsWith('/api/imports') ? next() : jsonParser(req, res, next));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -80,6 +88,8 @@ app.use('/api/auth',    require('./routes/auth'));
 app.use('/api/users',   require('./routes/users'));
 app.use('/api/media',   require('./routes/media'));
 app.use('/api/reviews', require('./routes/reviews'));
+// Own parser — see the note by the global one above.
+app.use('/api/imports', express.json({ limit: '2mb' }), require('./routes/imports'));
 app.use('/api/friends',   require('./routes/friends'));
 app.use('/api/messages',  require('./routes/messages'));
 app.use('/sitemap.xml',    require('./routes/sitemap'));
