@@ -24,11 +24,16 @@
 //     test: OL commonly stores covers on the edition, so it flags ~90 books
 //     of which almost all are fine. That approach was abandoned.
 //
-// Google Books' free quota (~1,000 calls/day) is below the number of books
-// with a Google cover, so this checkpoints and resumes. Re-run it on
-// consecutive days until it prints COMPLETE. It shares the API key with the
-// weekly sync in .github/workflows/sync-new-releases.yml, so prefer running
-// it on a day that job isn't due.
+// Google Books limits "queries per minute per user", NOT per day — an
+// earlier version of this script slept 45ms between calls, tripped that
+// limit after ~100 books, and reported it as a daily quota, which made a
+// 20-minute job look like a week of them. PACE_MS keeps it under the
+// per-minute ceiling so a single run finishes; a 429 is now waited out
+// rather than treated as the end of the road.
+//
+// It still checkpoints, so an interrupted run resumes instead of restarting.
+// Shares the API key with the weekly sync in
+// .github/workflows/sync-new-releases.yml.
 //
 // Usage: node scripts/audit-cover-mismatches.js [--reset]
 require('dotenv').config();
@@ -42,6 +47,10 @@ const CHECKPOINT = path.join(__dirname, '_cover-audit-checkpoint.json');
 const FINDINGS = path.join(__dirname, '_cover-audit-findings.json');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// ~80 requests/minute, comfortably under Google's per-minute-per-user ceiling.
+const PACE_MS = 750;
+// How long to sit out a 429 before trying the same book again.
+const COOLDOWN_MS = 65_000;
 const load = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return []; } };
 
 const norm = s => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -77,8 +86,17 @@ const tokens = names => new Set(names.flatMap(n => norm(n).split(' ')).filter(t 
     if (!volId) { done.add(b.slug); continue; }
 
     let data;
+    let rateLimited = 0;
     try {
-      const res = await fetch(`https://www.googleapis.com/books/v1/volumes/${volId}?key=${KEY}`);
+      let res = await fetch(`https://www.googleapis.com/books/v1/volumes/${volId}?key=${KEY}`);
+      while (res.status === 429 && rateLimited < 3) {
+        rateLimited++;
+        console.log(`  rate limited — waiting ${COOLDOWN_MS / 1000}s (attempt ${rateLimited}/3)`);
+        fs.writeFileSync(CHECKPOINT, JSON.stringify([...done]));
+        fs.writeFileSync(FINDINGS, JSON.stringify(findings, null, 1));
+        await sleep(COOLDOWN_MS);
+        res = await fetch(`https://www.googleapis.com/books/v1/volumes/${volId}?key=${KEY}`);
+      }
       if (res.status === 429) { quotaHit = true; break; }
       if (res.status === 404) {
         findings.push({ kind: 'volume-gone', title: b.title, slug: b.slug, detail: volId });
@@ -110,13 +128,13 @@ const tokens = names => new Set(names.flatMap(n => norm(n).split(' ')).filter(t 
       fs.writeFileSync(FINDINGS, JSON.stringify(findings, null, 1));
       console.log(`  ${n}/${todo.length} this run · ${findings.length} findings`);
     }
-    await sleep(45);
+    await sleep(PACE_MS);
   }
 
   fs.writeFileSync(CHECKPOINT, JSON.stringify([...done]));
   fs.writeFileSync(FINDINGS, JSON.stringify(findings, null, 1));
 
-  const state = quotaHit ? 'STOPPED ON QUOTA — re-run tomorrow' : 'COMPLETE';
+  const state = quotaHit ? 'STOPPED — rate limited repeatedly; re-run to resume' : 'COMPLETE';
   console.log(`\nthis run: ${n} · total ${done.size}/${books.length} · ${state}`);
   console.log(`findings: ${findings.length}`);
   findings.forEach(f => console.log(`  [${f.kind}] ${f.title}\n      ${f.detail}`));
