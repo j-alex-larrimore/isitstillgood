@@ -337,8 +337,12 @@ router.post('/letterboxd/commit', requireAuth, [
 // Same two-phase shape as Letterboxd, but the matching is better and the
 // ratings are worse.
 //
-// Better: the export carries ISBN13, which matches MediaItem.isbn13 exactly.
-// No title+year guessing for any book that has one on both sides.
+// Better: the export carries an ISBN, which matches an exact key. Note it is
+// matched against MediaItem.isbns — the full set across every edition — and
+// NOT against the single isbn13. That distinction is the whole game: a
+// Goodreads row carries the ISBN of the edition that reader shelved, and a
+// work has many (Jurassic Park: 94 editions, 73 distinct ISBN-13s), so
+// comparing one stored value to one shelved value missed almost everything.
 //
 // Worse: 1-5 whole stars, so an import lands only on even numbers. Accepted
 // deliberately — see starsToTen.
@@ -352,9 +356,12 @@ async function goodreadsCandidates(rows) {
   const titles = [...new Set(rows.map(r => normalizeTitleForSearch((r.Title || '').trim())).filter(Boolean))];
 
   const [byIsbnRows, byTitleRows] = await Promise.all([
+    // hasSome against the edition set, GIN-indexed. isbn13 stays in the OR so
+    // books the set backfill hasn't reached yet still match on their canonical
+    // value rather than silently regressing.
     isbns.length ? prisma.mediaItem.findMany({
-      where: { mediaType: 'BOOK', isbn13: { in: isbns } },
-      select: { id: true, title: true, releaseYear: true, slug: true, imageUrl: true, isbn13: true,
+      where: { mediaType: 'BOOK', OR: [{ isbns: { hasSome: isbns } }, { isbn13: { in: isbns } }] },
+      select: { id: true, title: true, releaseYear: true, slug: true, imageUrl: true, isbn13: true, isbns: true,
                 authors: { select: { name: true } } },
     }) : [],
     prisma.mediaItem.findMany({
@@ -364,7 +371,19 @@ async function goodreadsCandidates(rows) {
     }),
   ]);
 
-  const byIsbn = new Map(byIsbnRows.map(m => [m.isbn13, m]));
+  // Keyed by EVERY ISBN the book is known by, not just its canonical one —
+  // otherwise the edition-set lookup above would find the right book and then
+  // fail to retrieve it, because the reader shelved a different edition than
+  // the one we happen to store in isbn13.
+  const byIsbn = new Map();
+  for (const m of byIsbnRows) {
+    for (const key of new Set([...(m.isbns || []), m.isbn13].filter(Boolean))) {
+      // First writer wins: distinct rows legitimately share an ISBN (an
+      // omnibus and its volumes), and silently reassigning the key would make
+      // which book you get depend on query order.
+      if (!byIsbn.has(key)) byIsbn.set(key, m);
+    }
+  }
   const byTitle = new Map();
   for (const m of byTitleRows) {
     if (!byTitle.has(m.normalizedTitle)) byTitle.set(m.normalizedTitle, []);

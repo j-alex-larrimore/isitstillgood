@@ -113,6 +113,27 @@ model MediaItem {
   // one column means one index and one query.
   isbn13          String?
 
+  // EVERY ISBN-13 known for this work, across all its editions — the one to
+  // match an import against. `isbn13` above is the canonical single value kept
+  // for display and for anything that wants one id; this is the lookup set.
+  //
+  // It exists because one ISBN per book makes importing almost useless. A
+  // Goodreads or StoryGraph export carries the ISBN of the *edition that
+  // reader shelved*, and a work has many: Jurassic Park has 94 editions and 73
+  // distinct ISBN-13s. Matching one stored value against one shelved value is
+  // roughly a 1-in-73 shot on that book, so raising single-ISBN coverage would
+  // not have fixed matching — only holding the whole set does.
+  //
+  // Populated from Open Library's /works/{id}/editions.json (free, unmetered)
+  // by scripts/backfill-book-isbns.js, which always unions in isbn13 so the
+  // canonical value can never be lost. Digits only, no hyphens, ISBN-10s
+  // converted to their 13 form on the way in — same normalization as isbn13,
+  // so a caller can check both with one comparison.
+  //
+  // GIN indexed because every read is a set-overlap (`hasSome`), never an
+  // equality test. A btree would be useless here.
+  isbns           String[]
+
   // Movie / TV-show identifier only — the `tt…` id, e.g. "tt0111161".
   //
   // This is NOT a step back toward storing IMDb ratings; those stay removed
@@ -149,6 +170,7 @@ model MediaItem {
   @@index([verified])
   @@index([isbn13])
   @@index([imdbId])
+  @@index([isbns], type: Gin)
 }
 
 model Person {
