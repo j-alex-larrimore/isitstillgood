@@ -66,10 +66,27 @@ const loadCheckpoint = () => {
 const saveCheckpoint = none =>
   fs.writeFileSync(CHECKPOINT, JSON.stringify({ none: [...none] }, null, 0));
 
-async function ol(url) {
-  const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+// Retried on transport errors, not just bad statuses. A run of several
+// thousand sequential requests will hit a dropped TLS connection eventually —
+// the first full run died on ECONNRESET at 4,800 of 5,511, losing nothing
+// (progress is the database) but needing a babysitter it shouldn't need.
+async function ol(url, attempt = 0) {
+  let r;
+  try {
+    r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+  } catch (err) {
+    if (attempt >= 3) return null;
+    await sleep(2000 * (attempt + 1));
+    return ol(url, attempt + 1);
+  }
   await sleep(OL_PACE_MS);
   if (r.status === 429) return { throttled: true };
+  // 5xx is their side having a moment; 4xx means this work genuinely has no
+  // editions record and retrying would just be rude.
+  if (r.status >= 500 && attempt < 3) {
+    await sleep(2000 * (attempt + 1));
+    return ol(url, attempt + 1);
+  }
   if (!r.ok) return null;
   return r.json().catch(() => null);
 }
@@ -136,11 +153,22 @@ async function workIdFromTitleAuthor(title, author) {
 
   let pending = [], processed = 0, withSets = 0, totalIsbns = 0, newCanonical = 0, empty = 0;
 
-  const flush = async () => {
+  // Retried for the same reason the fetch is: Railway's proxy drops long-lived
+  // connections, and a run this long will meet one. The second run died on
+  // P1017 ("server has closed the connection") with the fetch path already
+  // hardened but not this one. Prisma reconnects on the next query, so a short
+  // backoff is enough.
+  const flush = async (attempt = 0) => {
     if (!pending.length || DRY) { pending = []; return; }
-    await prisma.$transaction(pending.map(u =>
-      prisma.mediaItem.update({ where: { id: u.id }, data: u.data })));
-    pending = [];
+    try {
+      await prisma.$transaction(pending.map(u =>
+        prisma.mediaItem.update({ where: { id: u.id }, data: u.data })));
+      pending = [];
+    } catch (err) {
+      if (attempt >= 2) throw err;
+      await sleep(2000 * (attempt + 1));
+      return flush(attempt + 1);
+    }
   };
 
   for (const b of queue) {
