@@ -113,6 +113,23 @@ model MediaItem {
   // one column means one index and one query.
   isbn13          String?
 
+  // Movie / TV-show identifier only — the `tt…` id, e.g. "tt0111161".
+  //
+  // This is NOT a step back toward storing IMDb ratings; those stay removed
+  // for the licensing reasons noted at tmdbId above, and nothing here fetches
+  // anything from IMDb. It exists so that a ratings CSV a user exported from
+  // their own IMDb account can be matched on an exact key instead of by
+  // title+year, which is the one part of the Letterboxd importer that
+  // occasionally attaches a rating to the wrong film.
+  //
+  // Sourced from TMDB's own `imdb_id` / `external_ids` fields, which this
+  // project is already licensed to read — see scripts/backfill-imdb-ids.js.
+  // Set on movies and on TV *parent* rows (parentId: null) only: IMDb rates a
+  // show as a whole, so a season row has no IMDb id of its own.
+  //
+  // Not unique, for the same reason isbn13 isn't — a lookup key, not identity.
+  imdbId          String?
+
   // Video game-specific
   openCriticId2   String?    // kept for compat, use openCriticId
 
@@ -131,6 +148,7 @@ model MediaItem {
   @@index([releaseYear])
   @@index([verified])
   @@index([isbn13])
+  @@index([imdbId])
 }
 
 model Person {
