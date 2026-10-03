@@ -45,6 +45,24 @@ const loadDone = () => { try { return new Set(JSON.parse(fs.readFileSync(CHECKPO
 const saveDone = d => fs.writeFileSync(CHECKPOINT, JSON.stringify({ done: [...d] }, null, 0));
 
 const coverIdOf = url => (String(url || '').match(/\/b\/id\/(\d+)-/) || [])[1] || null;
+const coverUrl = id => `https://covers.openlibrary.org/b/id/${id}-L.jpg`;
+
+// An Open Library cover id can resolve to a ~1KB stub rather than real art —
+// "Leviathan" came back at 1,043 bytes after the first pass. Checking the
+// bytes is the only reliable test: these are served chunked, so there is no
+// content-length header to read (an earlier version of this check trusted it
+// and reported 12 of 15 healthy covers as empty).
+const MIN_COVER_BYTES = 2000;
+async function isHealthyCover(id){
+  try {
+    const r = await fetch(coverUrl(id), { headers: { 'User-Agent': UA } });
+    await sleep(PACE_MS);
+    if (!r.ok) return false;
+    const buf = Buffer.from(await r.arrayBuffer());
+    // JPEG magic, so an HTML error page served with a 200 can't pass.
+    return buf.length >= MIN_COVER_BYTES && buf[0] === 0xFF && buf[1] === 0xD8;
+  } catch { return false; }
+}
 
 async function englishCovers(workId, attempt = 0){
   try {
@@ -66,7 +84,10 @@ async function englishCovers(workId, attempt = 0){
       const id = String(e.covers[0]);
       tally.set(id, (tally.get(id) || 0) + 1);
     }
-    return { all: new Set(tally.keys()), best: [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null };
+    return {
+      all: new Set(tally.keys()),
+      ranked: [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id),
+    };
   } catch (err) {
     if (attempt < 2) { await sleep(2000 * (attempt + 1)); return englishCovers(workId, attempt + 1); }
     return null;
@@ -92,17 +113,27 @@ async function englishCovers(workId, attempt = 0){
     n++;
 
     if (!res) { failed++; continue; }
-    if (current && res.all.has(current)) { alreadyEnglish++; done.add(b.id); }
-    else if (!res.best) { noEnglish++; done.add(b.id); }   // keep what we have
-    else {
-      swapped++;
-      console.log(`   ${b.title.slice(0, 44).padEnd(45)} ${current || 'none'} → ${res.best}`);
-      if (!DRY) {
-        await prisma.mediaItem.update({
-          where: { id: b.id },
-          data: { imageUrl: `https://covers.openlibrary.org/b/id/${res.best}-L.jpg` },
-        });
-        done.add(b.id);
+
+    // An English cover we already hold still has to be a real image — a run
+    // that swapped to a 1KB stub should fix itself on the next pass rather
+    // than count it as settled, which is what makes this script idempotent.
+    if (current && res.all.has(current) && await isHealthyCover(current)) {
+      alreadyEnglish++; done.add(b.id);
+    } else {
+      // Walk the English covers in popularity order until one is real art.
+      let picked = null;
+      for (const id of res.ranked) {
+        if (id === current) continue;
+        if (await isHealthyCover(id)) { picked = id; break; }
+      }
+      if (!picked) { noEnglish++; done.add(b.id); }   // keep what we have; never blank
+      else {
+        swapped++;
+        console.log(`   ${b.title.slice(0, 44).padEnd(45)} ${current || 'none'} → ${picked}`);
+        if (!DRY) {
+          await prisma.mediaItem.update({ where: { id: b.id }, data: { imageUrl: coverUrl(picked) } });
+          done.add(b.id);
+        }
       }
     }
 
