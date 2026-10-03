@@ -1,6 +1,7 @@
 // src/lib/mediaHelpers.js — shared media data helpers.
 // Used by src/routes/admin.js (the admin UI) and scripts/bulk-import.js
 // (the CLI importer) so both write identical, normalized data.
+const crypto = require('crypto');
 const prisma = require('./prisma');
 
 // ─── Book series clustering ────────────────────────────────────────────────
@@ -525,9 +526,34 @@ async function uniqueSlug(base) {
 // resolves first, which connectCast below depends on to capture billing
 // order — don't swap this for sequential awaits assuming it'd be "more
 // correct"; order preservation is exactly why Promise.all is used here.
+// A name with no ASCII letters or digits — Лев Толстой, 村田沙耶香, 夏目漱石 —
+// reduces to the empty string under the rule below. Person.slug is unique, so
+// the first such author to be inserted claimed "" and every one after it was
+// upserted onto that same row, which `update: { name }` then renamed to
+// whichever arrived last. Tolstoy, Homer, Liu Cixin, Murakami and Solzhenitsyn
+// all ended up as a single Person holding 51 books, 60 screen credits and 17
+// directing credits under one Japanese novelist's name.
+//
+// The ASCII path is deliberately byte-for-byte what it always was: tens of
+// thousands of existing Person rows are matched by these slugs, and changing
+// how "Leo Tolstoy" slugifies would orphan all of them and silently duplicate
+// every person in the catalogue. Only the previously-empty case changes.
+//
+// The fallback is a hash rather than a transliteration because it only has to
+// be stable and collision-free, not readable — Person.slug is an internal
+// upsert key and never appears in a URL (person links use personId; see
+// prerender.js and item.html). A transliteration would also have to agree with
+// itself across Cyrillic, CJK and Arabic forever to avoid re-merging people.
+function personSlugFor(name) {
+  const ascii = String(name).toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (ascii) return ascii;
+  // NFC first so the same name composed two different ways hashes the same.
+  return 'p-' + crypto.createHash('sha1').update(String(name).normalize('NFC')).digest('hex').slice(0, 16);
+}
+
 async function upsertPersonsByName(names) {
   return Promise.all(names.map(name => {
-    const personSlug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    const personSlug = personSlugFor(name);
     return prisma.person.upsert({
       where: { slug: personSlug },
       update: { name },
