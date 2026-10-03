@@ -116,20 +116,24 @@ async function editionFacts(workId, workTitle) {
     const earliestEdition = years.length ? Math.min(...years) : null;
 
     const eng = entries.filter(e => (e.languages || []).some(l => /\/eng$/.test(l.key || '')));
-    if (!eng.length) return { earliestEdition };
+    // Reported separately from `title`: a work can have English editions whose
+    // title already matches ours (so no rename is needed) and still needs to
+    // pass the English-only policy check.
+    const hasEnglishEdition = eng.length > 0;
+    if (!eng.length) return { earliestEdition, hasEnglishEdition };
 
     const counts = new Map();
     for (const e of eng) {
       const t = (e.title || '').trim();
       if (t) counts.set(t, (counts.get(t) || 0) + 1);
     }
-    if (!counts.size) return { earliestEdition };
+    if (!counts.size) return { earliestEdition, hasEnglishEdition };
 
     const want = normalizeTitleForSearch(workTitle);
     for (const t of counts.keys()) {
-      if (normalizeTitleForSearch(t) === want) return { earliestEdition }; // already English
+      if (normalizeTitleForSearch(t) === want) return { earliestEdition, hasEnglishEdition }; // already English
     }
-    return { title: [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0], earliestEdition };
+    return { title: [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0], earliestEdition, hasEnglishEdition };
   } catch { return {}; }
 }
 
@@ -203,7 +207,7 @@ function alreadyHave(idx, cand) {
   console.log(`mode: ${DRY ? 'DRY RUN (no writes)' : (QUEUE ? 'WRITE, queued for review' : 'WRITE, published')}`);
   console.log(`resuming from rank ${cp.offset}\n`);
 
-  let added = 0, scanned = 0, had = 0, skippedThin = 0, failed = 0, renamed = 0, noYear = 0, consecutiveFailures = 0;
+  let added = 0, scanned = 0, had = 0, skippedThin = 0, failed = 0, renamed = 0, noYear = 0, consecutiveFailures = 0, skippedNonEnglish = 0;
   const hadBy = {};
   let offset = cp.offset;
 
@@ -275,6 +279,17 @@ function alreadyHave(idx, cand) {
         title = facts.title;
       }
       const english = facts.title;
+
+      // Policy: this catalogue carries books written in English or the English
+      // translation of a book. A work with no English edition at all is not one
+      // of those, and importing it produced rows nobody here can use — plus a
+      // broken slug, since slugify() strips to ASCII and "Мастер и Маргарита"
+      // reduced to the empty string, leaving a row at "-1966".
+      if (!facts.hasEnglishEdition) {
+        skippedNonEnglish++;
+        if (DRY) console.log(`    ↳ skipped "${title}" — no English edition`);
+        continue;
+      }
       // Re-check now that we know the English title: the catalogue may well
       // already hold "The Alchemist" while the ranked list offered the
       // Portuguese one, and the title index was checked against the wrong name.
@@ -359,7 +374,7 @@ function alreadyHave(idx, cand) {
 
   const total = await prisma.mediaItem.count({ where: { mediaType: 'BOOK' } });
   console.log(`\nscanned ${scanned} ranked works · added ${added} · already had ${had} · thin records skipped ${skippedThin} · failed ${failed}`);
-  console.log(`retitled to their English edition: ${renamed} · implausible years dropped: ${noYear}`);
+  console.log(`retitled to their English edition: ${renamed} · skipped for having no English edition: ${skippedNonEnglish} · implausible years dropped: ${noYear}`);
   console.log(`already-had breakdown: ${JSON.stringify(hadBy)}`);
   console.log(`books in catalogue: ${total}${DRY ? ' (unchanged — dry run)' : ''}`);
   if (!DRY && added) console.log(`\nNext: node scripts/audit-cover-mismatches.js — popular works have many editions, which is where covers go wrong.`);
