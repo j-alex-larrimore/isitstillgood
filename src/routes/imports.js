@@ -166,6 +166,43 @@ async function candidatesFor(rows) {
 // confident it is. `auto` rows can be written without asking; everything else
 // goes back to the user. The tiers exist so a wrong year can never be
 // mistaken for a match.
+// Letterboxd's export is several files, and ratings.csv is only the scores.
+// Written reviews live in reviews.csv, which carries the same Name/Year/Rating
+// columns plus the text — so the same parser handles both files and a reader
+// who wrote reviews can upload either, or both.
+//
+// The column is read case-insensitively from a candidate list rather than by a
+// hard-coded name. Letterboxd does not publish its export schema, and this
+// project has already been bitten once by building a parser against a format
+// nobody documents.
+const REVIEW_KEYS = ['review', 'review text', 'reviewtext', 'text'];
+function reviewTextOf(row) {
+  for (const [k, v] of Object.entries(row)) {
+    if (!REVIEW_KEYS.includes(String(k).trim().toLowerCase())) continue;
+    const t = stripHtml(v);
+    if (t) return t;
+  }
+  return null;
+}
+
+// Letterboxd accepts HTML in a review and exports it the same way, so the raw
+// cell can contain <p>/<em>/<a> and entities. Stored as plain text: the review
+// field is rendered as text here, so markup would show as literal tags.
+function stripHtml(s) {
+  const raw = String(s ?? '').trim();
+  if (!raw) return null;
+  const text = raw
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return text || null;
+}
+
 function matchRow(row, byTitle) {
   const rating = starsToTen(row.Rating);
   const name = (row.Name || '').trim();
@@ -175,7 +212,12 @@ function matchRow(row, byTitle) {
 
   const candidates = byTitle.get(normalizeTitleForSearch(name)) || [];
 
-  const base = { name, year, rating, watchedDate: row.Date || null };
+  const base = {
+    name, year, rating,
+    // reviews.csv dates the entry with "Watched Date"; ratings.csv uses "Date".
+    watchedDate: row['Watched Date'] || row.Date || null,
+    reviewText: reviewTextOf(row),
+  };
   if (!candidates.length) return { ...base, status: 'missing', auto: false };
 
   const exact = candidates.filter(c => c.releaseYear === year);
@@ -196,25 +238,57 @@ function matchRow(row, byTitle) {
 // ─── POST /api/imports/letterboxd/preview ──────────────────────────────────
 // Parses, matches, writes nothing. Returns everything the confirmation screen
 // needs to render.
+// Accepts one CSV or several. A Letterboxd export splits a single film across
+// files — ratings.csv has the score, reviews.csv has the score AND the words —
+// so a reader who writes reviews has to hand over both to bring everything, and
+// the film then appears twice. Merging here rather than asking them to import
+// twice is the difference between one confirmation screen and two, the second
+// of which would look like it was about to duplicate everything.
+//
+// `csv` (a single string) still works unchanged, so an older client keeps
+// functioning while the frontend is deployed separately.
 router.post('/letterboxd/preview', requireAuth, [
-  body('csv').isString().notEmpty().withMessage('csv is required'),
+  body('csv').optional().isString(),
+  body('csvs').optional().isArray({ max: 4 }),
+  body('csvs.*').isString(),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
-    const { csv } = req.body;
-    if (Buffer.byteLength(csv, 'utf8') > MAX_CSV_BYTES) {
-      return res.status(413).json({ error: 'That file is larger than this importer accepts (2MB).' });
+    const files = req.body.csvs?.length ? req.body.csvs : (req.body.csv ? [req.body.csv] : []);
+    if (!files.length) return res.status(422).json({ error: 'No file received.' });
+
+    const totalBytes = files.reduce((n, c) => n + Buffer.byteLength(c, 'utf8'), 0);
+    if (totalBytes > MAX_CSV_BYTES * 2) {
+      return res.status(413).json({ error: 'Those files are larger than this importer accepts.' });
     }
 
-    const rows = parseCsv(csv);
-    if (!rows.length) return res.status(422).json({ error: 'No rows found in that file.' });
-    if (!('Name' in rows[0]) || !('Rating' in rows[0])) {
+    const parsed = files.map(parseCsv).filter(r => r.length);
+    if (!parsed.length) return res.status(422).json({ error: 'No rows found in that file.' });
+    if (!parsed.some(r => 'Name' in r[0] && 'Rating' in r[0])) {
       return res.status(422).json({
-        error: 'That does not look like a Letterboxd ratings export. Expected columns Name, Year and Rating — use ratings.csv from Letterboxd’s Export Your Data.',
+        error: 'That does not look like a Letterboxd export. Expected columns Name, Year and Rating — use ratings.csv and/or reviews.csv from Letterboxd’s Export Your Data.',
       });
     }
+
+    // One row per film. A film that was reviewed is listed in both files with
+    // the same score, so the copy carrying the written review wins — otherwise
+    // whichever file happened to be read last would decide whether the words
+    // survived.
+    const merged = new Map();
+    for (const rows of parsed) {
+      for (const row of rows) {
+        const name = (row.Name || '').trim();
+        if (!name) continue;
+        const key = `${normalizeTitleForSearch(name)}|${(row.Year || '').trim()}`;
+        const prev = merged.get(key);
+        if (!prev) { merged.set(key, row); continue; }
+        if (!reviewTextOf(prev) && reviewTextOf(row)) merged.set(key, { ...prev, ...row });
+      }
+    }
+    const rows = [...merged.values()];
+
     if (rows.length > MAX_ROWS) {
-      return res.status(413).json({ error: `That export has ${rows.length} rows; this importer handles up to ${MAX_ROWS} at once.` });
+      return res.status(413).json({ error: `That export has ${rows.length} films; this importer handles up to ${MAX_ROWS} at once.` });
     }
 
     const byTitle = await candidatesFor(rows);
@@ -255,7 +329,8 @@ router.post('/letterboxd/preview', requireAuth, [
 });
 
 // ─── POST /api/imports/letterboxd/commit ───────────────────────────────────
-// Takes back only what the user confirmed: [{ mediaItemId, rating, watchedDate }].
+// Takes back only what the user confirmed:
+// [{ mediaItemId, rating, watchedDate, reviewText }].
 // The server re-validates every field; the preview response is a suggestion,
 // not something to trust on the way back in.
 router.post('/letterboxd/commit', requireAuth, [
@@ -263,6 +338,7 @@ router.post('/letterboxd/commit', requireAuth, [
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
+  body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
@@ -295,6 +371,7 @@ router.post('/letterboxd/commit', requireAuth, [
       const verdict = ratingToVerdict(rating);
       const consumed = item.watchedDate ? new Date(item.watchedDate) : null;
       const dateConsumed = consumed && consumed.getTime() <= Date.now() ? consumed : null;
+      const reviewText = item.reviewText ? String(item.reviewText).slice(0, 5000) : null;
       const prior = existingBy[item.mediaItemId];
 
       if (prior) {
@@ -302,6 +379,11 @@ router.post('/letterboxd/commit', requireAuth, [
           where: { id: prior.id },
           data: {
             rating, verdict, dateConsumed, visibility: vis, isDraft: false,
+            // Only ever fills review text, never blanks one. Someone who
+            // imported ratings.csv first and reviews.csv second should gain
+            // their words; someone who wrote a review here and then re-imports
+            // should not lose it to a row that carries none.
+            ...(reviewText ? { reviewText } : {}),
             // A re-import that changes a score is a revisit in the same sense
             // a manual edit is.
             isRevisit: prior.isDraft ? false : (rating !== prior.rating ? true : undefined),
@@ -313,7 +395,7 @@ router.post('/letterboxd/commit', requireAuth, [
         await prisma.review.create({
           data: {
             userId: req.user.id, mediaItemId: item.mediaItemId,
-            rating, verdict, dateConsumed, visibility: vis,
+            rating, verdict, dateConsumed, visibility: vis, reviewText,
             seasonNumber: null, isRevisit: false, isDraft: false,
           },
         });
