@@ -69,13 +69,168 @@ function ratingToVerdict(r) {
 
 const ok = (req, res) => {
   const e = validationResult(req);
-  if (!e.isEmpty()) { res.status(422).json({ errors: e.array() }); return false; }
+  if (!e.isEmpty()) {
+    // `error` as well as `errors`: the upload page reads `error` and otherwise
+    // falls back to "that file could not be read as a … export", which sent a
+    // user hunting through a perfectly good CSV when the real problem was the
+    // shape of the request.
+    res.status(422).json({ error: e.array()[0]?.msg || 'That request was not valid.', errors: e.array() });
+    return false;
+  }
   return true;
 };
+
+// The upload page sends { csvs: [...] } for every source, because a Letterboxd
+// export splits one film across ratings.csv and reviews.csv. The other two
+// sources are single-file in practice but must still accept that shape — when
+// they did not, a valid IMDb export was refused before it was ever parsed.
+// Accepts the older { csv } too, so anything holding the previous contract
+// keeps working.
+const csvsFrom = req => {
+  const { csv, csvs } = req.body;
+  if (Array.isArray(csvs) && csvs.length) return csvs.filter(s => typeof s === 'string' && s.trim());
+  if (typeof csv === 'string' && csv.trim()) return [csv];
+  return [];
+};
+
+// Same validators for all three previews.
+const CSV_BODY = [
+  body('csv').optional().isString().withMessage('That file could not be read as text.'),
+  body('csvs').optional().isArray({ max: 4 }).withMessage('Please attach no more than four files at once.'),
+  body('csvs.*').isString().withMessage('One of those files could not be read as text.'),
+];
 
 // A whole library is a big paste, but not unbounded — a 5,000-film Letterboxd
 // account is roughly 300KB of CSV.
 const MAX_CSV_BYTES = 2 * 1024 * 1024;
+
+// What "you have already rated this" means for a matched row.
+//
+// This used to annotate the existing score and nothing else, and the row stayed
+// auto-importable — so importing over your own reviews replaced the score
+// silently, and when the imported row carried review text it replaced your
+// words too. Someone who wrote here first and imported second lost what they
+// had written, with no prompt and no notice.
+//
+// Now a row is only auto-imported when it cannot destroy anything:
+//
+//   conflict  the score differs, or both sides have review text and the text
+//             differs. Held back for the user to choose; the default choice is
+//             to keep what is already here, because an import should never be
+//             the thing that quietly discards your own writing.
+//   already   the import agrees with what is stored. Nothing to do, so it is
+//             reported and skipped rather than counted as an import.
+//   (auto)    the score agrees and the import adds review text where there was
+//             none. Pure gain — this is the ratings.csv-then-reviews.csv path,
+//             and it should just work.
+//
+// seasonNumber: null matters here. For books, a series-level review is stored
+// with the sentinel 0, so without this filter a Goodreads import could read a
+// whole-series review as the individual book's and report a conflict against a
+// review the commit would never have touched.
+async function annotateExisting(results, matchedIds, userId) {
+  if (!matchedIds.length) return;
+  const rows = await prismaWithDrafts.review.findMany({
+    where: { userId, mediaItemId: { in: matchedIds }, seasonNumber: null },
+    select: { mediaItemId: true, rating: true, reviewText: true, isDraft: true },
+  });
+  const by = new Map(rows.map(r => [r.mediaItemId, r]));
+
+  for (const r of results) {
+    if (!r.match) continue;
+    const prior = by.get(r.match.id);
+    if (!prior) continue;
+
+    r.existingRating = prior.rating;
+    r.existingReviewText = prior.reviewText || null;
+    r.existingIsDraft = !!prior.isDraft;
+
+    const norm = t => String(t || '').replace(/\s+/g, ' ').trim();
+    const ratingDiffers = r.rating !== null && r.rating !== prior.rating;
+    const replacesText = !!(norm(r.reviewText) && norm(prior.reviewText)
+      && norm(r.reviewText) !== norm(prior.reviewText));
+    const addsText = !!(norm(r.reviewText) && !norm(prior.reviewText));
+
+    if (ratingDiffers || replacesText) {
+      r.status = 'conflict';
+      r.auto = false;
+      r.conflict = { rating: ratingDiffers, reviewText: replacesText };
+      r.keep = 'existing';
+    } else if (addsText) {
+      r.addsReviewText = true;          // stays auto-importable
+    } else {
+      r.status = 'already';
+      r.auto = false;
+    }
+  }
+}
+
+// One item per catalogue entry, before anything is written.
+//
+// Reviews are unique on (userId, mediaItemId, seasonNumber), and the commit
+// loops read "does a review already exist" once up front — so two items
+// pointing at the same entry meant the second insert tripped that constraint
+// and failed the import *after* part of it had been saved. Letterboxd makes
+// this ordinary rather than exotic: ratings.csv and reviews.csv overlap by
+// design, so importing both sends the same film twice. Year drift can also
+// land two rows on one entry.
+//
+// Later wins on score, since that is the row the user confirmed last, but
+// review text and watch dates are only ever filled in, never blanked — the
+// whole point of handing over reviews.csv as well as ratings.csv is to gain
+// the words, and the file that carries them should not lose to one that
+// does not.
+const dedupeItems = items => {
+  const by = new Map();
+  for (const item of items || []) {
+    const prev = by.get(item.mediaItemId);
+    if (!prev) { by.set(item.mediaItemId, item); continue; }
+    by.set(item.mediaItemId, {
+      ...prev, ...item,
+      reviewText: item.reviewText || prev.reviewText,
+      watchedDate: item.watchedDate || prev.watchedDate,
+      // If either copy of this film was resolved as "keep what I already
+      // wrote", that wins. Merging must not be able to undo a protective
+      // choice the user made.
+      keep: (prev.keep === 'existing' || item.keep === 'existing')
+        ? 'existing'
+        : (item.keep || prev.keep),
+    });
+  }
+  return [...by.values()];
+};
+
+// Parse one or more files from the same source into a single row list, or
+// return the response to send instead. Headers are checked per file, so
+// dropping the wrong export alongside the right one is reported rather than
+// silently half-imported; `keyOf` dedupes across files, first file winning.
+function readCsvFiles(files, { required, label, hint, keyOf }) {
+  if (!files.length) return { bad: { status: 422, body: { error: 'No file received — pick your export and try again.' } } };
+
+  const total = files.reduce((n, s) => n + Buffer.byteLength(s, 'utf8'), 0);
+  if (total > MAX_CSV_BYTES) {
+    return { bad: { status: 413, body: { error: 'That file is larger than this importer accepts (2MB).' } } };
+  }
+
+  const rows = [];
+  const seen = new Set();
+  for (const text of files) {
+    const parsed = parseCsv(text);
+    if (!parsed.length) return { bad: { status: 422, body: { error: 'No rows found in that file.' } } };
+    if (required.some(c => !(c in parsed[0]))) {
+      return { bad: { status: 422, body: { error: `That does not look like ${label}. ${hint}` } } };
+    }
+    for (const row of parsed) {
+      const k = keyOf ? keyOf(row) : null;
+      if (k) { if (seen.has(k)) continue; seen.add(k); }
+      rows.push(row);
+    }
+  }
+  if (rows.length > MAX_ROWS) {
+    return { bad: { status: 413, body: { error: `That export has ${rows.length} rows; this importer handles up to ${MAX_ROWS} at once.` } } };
+  }
+  return { rows };
+}
 const MAX_ROWS = 5000;
 
 // Minimal RFC4180. Needed because titles contain commas:
@@ -247,11 +402,7 @@ function matchRow(row, byTitle) {
 //
 // `csv` (a single string) still works unchanged, so an older client keeps
 // functioning while the frontend is deployed separately.
-router.post('/letterboxd/preview', requireAuth, [
-  body('csv').optional().isString(),
-  body('csvs').optional().isArray({ max: 4 }),
-  body('csvs.*').isString(),
-], async (req, res, next) => {
+router.post('/letterboxd/preview', requireAuth, CSV_BODY, async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
     const files = req.body.csvs?.length ? req.body.csvs : (req.body.csv ? [req.body.csv] : []);
@@ -301,14 +452,7 @@ router.post('/letterboxd/preview', requireAuth, [
     // Flag anything already reviewed so the UI can say "this will update your
     // existing rating" rather than quietly overwriting it.
     const matchedIds = results.filter(r => r.match).map(r => r.match.id);
-    const already = matchedIds.length
-      ? await prismaWithDrafts.review.findMany({
-          where: { userId: req.user.id, mediaItemId: { in: matchedIds } },
-          select: { mediaItemId: true, rating: true },
-        })
-      : [];
-    const existingBy = Object.fromEntries(already.map(r => [r.mediaItemId, r.rating]));
-    results.forEach(r => { if (r.match && existingBy[r.match.id] !== undefined) r.existingRating = existingBy[r.match.id]; });
+    await annotateExisting(results, matchedIds, req.user.id);
 
     const by = s => results.filter(r => r.status === s).length;
     res.json({
@@ -322,6 +466,9 @@ router.post('/letterboxd/preview', requireAuth, [
         unrated: by('unrated'),
         autoImportable: results.filter(r => r.auto).length,
         alreadyReviewed: results.filter(r => r.existingRating !== undefined).length,
+        conflicts: by('conflict'),
+        unchanged: by('already'),
+        addsReviewText: results.filter(r => r.addsReviewText).length,
       },
       rows: results,
     });
@@ -337,13 +484,16 @@ router.post('/letterboxd/commit', requireAuth, [
   body('items').isArray({ min: 1, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
+  // The user's answer to a conflict. 'existing' means leave the review that is
+  // already there alone; anything else imports over it.
+  body('items.*.keep').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
-    const { items } = req.body;
+    const items = dedupeItems(req.body.items);
     const vis = req.body.visibility || req.user.defaultVisibility || 'PUBLIC';
 
     // One query instead of one per row — an import is the only place this
@@ -364,9 +514,12 @@ router.post('/letterboxd/commit', requireAuth, [
     });
     const existingBy = Object.fromEntries(existing.map(r => [r.mediaItemId, r]));
 
-    let created = 0, updated = 0, skipped = 0;
+    let created = 0, updated = 0, skipped = 0, kept = 0;
     for (const item of items) {
       if (!valid.has(item.mediaItemId)) { skipped++; continue; }
+      // A conflict the user resolved in favour of what they already wrote is
+      // not written at all — not updated, not blanked, not touched.
+      if (item.keep === 'existing') { kept++; continue; }
       const rating = parseInt(item.rating, 10);
       const verdict = ratingToVerdict(rating);
       const consumed = item.watchedDate ? new Date(item.watchedDate) : null;
@@ -411,7 +564,7 @@ router.post('/letterboxd/commit', requireAuth, [
     // films; if it should appear in the feed at all it belongs as a single
     // "imported N ratings" entry, which is a feed-model change rather than
     // something to bolt on here.
-    res.status(201).json({ created, updated, skipped, total: created + updated });
+    res.status(201).json({ created, updated, skipped, kept, total: created + updated });
   } catch (err) { next(err); }
 });
 
@@ -517,25 +670,16 @@ function matchGoodreadsRow(row, { byIsbn, byTitle }) {
 }
 
 // ─── POST /api/imports/goodreads/preview ───────────────────────────────────
-router.post('/goodreads/preview', requireAuth, [
-  body('csv').isString().notEmpty().withMessage('csv is required'),
-], async (req, res, next) => {
+router.post('/goodreads/preview', requireAuth, CSV_BODY, async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
-    const { csv } = req.body;
-    if (Buffer.byteLength(csv, 'utf8') > MAX_CSV_BYTES) {
-      return res.status(413).json({ error: 'That file is larger than this importer accepts (2MB).' });
-    }
-    const rows = parseCsv(csv);
-    if (!rows.length) return res.status(422).json({ error: 'No rows found in that file.' });
-    if (!('Title' in rows[0]) || !('My Rating' in rows[0])) {
-      return res.status(422).json({
-        error: 'That does not look like a Goodreads export. Expected columns Title, Author and My Rating — use the file from Goodreads’ My Books → Import and export.',
-      });
-    }
-    if (rows.length > MAX_ROWS) {
-      return res.status(413).json({ error: `That export has ${rows.length} rows; this importer handles up to ${MAX_ROWS} at once.` });
-    }
+    const { rows, bad } = readCsvFiles(csvsFrom(req), {
+      required: ['Title', 'My Rating'],
+      label: 'a Goodreads export',
+      hint: 'Expected columns Title, Author and My Rating — use the file from Goodreads’ My Books → Import and export.',
+      keyOf: row => (row['Book Id'] || '').trim() || null,
+    });
+    if (bad) return res.status(bad.status).json(bad.body);
 
     const maps = await goodreadsCandidates(rows);
     const results = [];
@@ -545,14 +689,7 @@ router.post('/goodreads/preview', requireAuth, [
     }
 
     const matchedIds = results.filter(r => r.match).map(r => r.match.id);
-    const already = matchedIds.length
-      ? await prismaWithDrafts.review.findMany({
-          where: { userId: req.user.id, mediaItemId: { in: matchedIds } },
-          select: { mediaItemId: true, rating: true },
-        })
-      : [];
-    const existingBy = Object.fromEntries(already.map(r => [r.mediaItemId, r.rating]));
-    results.forEach(r => { if (r.match && existingBy[r.match.id] !== undefined) r.existingRating = existingBy[r.match.id]; });
+    await annotateExisting(results, matchedIds, req.user.id);
 
     const by = s => results.filter(r => r.status === s).length;
     res.json({
@@ -566,6 +703,9 @@ router.post('/goodreads/preview', requireAuth, [
         unrated: by('unrated'),
         autoImportable: results.filter(r => r.auto).length,
         alreadyReviewed: results.filter(r => r.existingRating !== undefined).length,
+        conflicts: by('conflict'),
+        unchanged: by('already'),
+        addsReviewText: results.filter(r => r.addsReviewText).length,
       },
       rows: results,
     });
@@ -580,13 +720,16 @@ router.post('/goodreads/commit', requireAuth, [
   body('items').isArray({ min: 1, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
+  // The user's answer to a conflict. 'existing' means leave the review that is
+  // already there alone; anything else imports over it.
+  body('items.*.keep').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
-    const { items } = req.body;
+    const items = dedupeItems(req.body.items);
     const vis = req.body.visibility || req.user.defaultVisibility || 'PUBLIC';
     const ids = [...new Set(items.map(i => i.mediaItemId))];
 
@@ -602,9 +745,12 @@ router.post('/goodreads/commit', requireAuth, [
     });
     const existingBy = Object.fromEntries(existing.map(r => [r.mediaItemId, r]));
 
-    let created = 0, updated = 0, skipped = 0;
+    let created = 0, updated = 0, skipped = 0, kept = 0;
     for (const item of items) {
       if (!valid.has(item.mediaItemId)) { skipped++; continue; }
+      // A conflict the user resolved in favour of what they already wrote is
+      // not written at all — not updated, not blanked, not touched.
+      if (item.keep === 'existing') { kept++; continue; }
       const rating = parseInt(item.rating, 10);
       const verdict = ratingToVerdict(rating);
       const d = item.watchedDate ? new Date(item.watchedDate) : null;
@@ -638,7 +784,7 @@ router.post('/goodreads/commit', requireAuth, [
     }
 
     // No notifyFriends — same reasoning as the Letterboxd commit above.
-    res.status(201).json({ created, updated, skipped, total: created + updated });
+    res.status(201).json({ created, updated, skipped, kept, total: created + updated });
   } catch (err) { next(err); }
 });
 
@@ -787,25 +933,16 @@ function matchImdbRow(row, { byId, byTitle }) {
 }
 
 // ─── POST /api/imports/imdb/preview ────────────────────────────────────────
-router.post('/imdb/preview', requireAuth, [
-  body('csv').isString().notEmpty().withMessage('csv is required'),
-], async (req, res, next) => {
+router.post('/imdb/preview', requireAuth, CSV_BODY, async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
-    const { csv } = req.body;
-    if (Buffer.byteLength(csv, 'utf8') > MAX_CSV_BYTES) {
-      return res.status(413).json({ error: 'That file is larger than this importer accepts (2MB).' });
-    }
-    const rows = parseCsv(csv);
-    if (!rows.length) return res.status(422).json({ error: 'No rows found in that file.' });
-    if (!('Title' in rows[0]) || !('Your Rating' in rows[0])) {
-      return res.status(422).json({
-        error: 'That does not look like an IMDb ratings export. Expected columns Const, Title and Your Rating — use the file from the Export button on your Your Ratings page.',
-      });
-    }
-    if (rows.length > MAX_ROWS) {
-      return res.status(413).json({ error: `That export has ${rows.length} rows; this importer handles up to ${MAX_ROWS} at once.` });
-    }
+    const { rows, bad } = readCsvFiles(csvsFrom(req), {
+      required: ['Title', 'Your Rating'],
+      label: 'an IMDb ratings export',
+      hint: 'Expected columns Const, Title and Your Rating — use the file from the Export button on your Your Ratings page.',
+      keyOf: row => imdbConst(row.Const),
+    });
+    if (bad) return res.status(bad.status).json(bad.body);
 
     const maps = await imdbCandidates(rows);
     const results = [];
@@ -815,14 +952,7 @@ router.post('/imdb/preview', requireAuth, [
     }
 
     const matchedIds = results.filter(r => r.match).map(r => r.match.id);
-    const already = matchedIds.length
-      ? await prismaWithDrafts.review.findMany({
-          where: { userId: req.user.id, mediaItemId: { in: matchedIds }, seasonNumber: null },
-          select: { mediaItemId: true, rating: true },
-        })
-      : [];
-    const existingBy = Object.fromEntries(already.map(r => [r.mediaItemId, r.rating]));
-    results.forEach(r => { if (r.match && existingBy[r.match.id] !== undefined) r.existingRating = existingBy[r.match.id]; });
+    await annotateExisting(results, matchedIds, req.user.id);
 
     const by = s => results.filter(r => r.status === s).length;
     res.json({
@@ -839,6 +969,9 @@ router.post('/imdb/preview', requireAuth, [
         unsupported: by('unsupported'),
         autoImportable: results.filter(r => r.auto).length,
         alreadyReviewed: results.filter(r => r.existingRating !== undefined).length,
+        conflicts: by('conflict'),
+        unchanged: by('already'),
+        addsReviewText: results.filter(r => r.addsReviewText).length,
       },
       rows: results,
     });
@@ -851,12 +984,15 @@ router.post('/imdb/commit', requireAuth, [
   body('items').isArray({ min: 1, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
+  // The user's answer to a conflict. 'existing' means leave the review that is
+  // already there alone; anything else imports over it.
+  body('items.*.keep').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
-    const { items } = req.body;
+    const items = dedupeItems(req.body.items);
     const vis = req.body.visibility || req.user.defaultVisibility || 'PUBLIC';
     const ids = [...new Set(items.map(i => i.mediaItemId))];
 
@@ -878,9 +1014,12 @@ router.post('/imdb/commit', requireAuth, [
     });
     const existingBy = Object.fromEntries(existing.map(r => [r.mediaItemId, r]));
 
-    let created = 0, updated = 0, skipped = 0;
+    let created = 0, updated = 0, skipped = 0, kept = 0;
     for (const item of items) {
       if (!valid.has(item.mediaItemId)) { skipped++; continue; }
+      // A conflict the user resolved in favour of what they already wrote is
+      // not written at all — not updated, not blanked, not touched.
+      if (item.keep === 'existing') { kept++; continue; }
       const rating = parseInt(item.rating, 10);
       const verdict = ratingToVerdict(rating);
       const d = item.watchedDate ? new Date(item.watchedDate) : null;
@@ -910,7 +1049,7 @@ router.post('/imdb/commit', requireAuth, [
     }
 
     // No notifyFriends — same reasoning as the Letterboxd commit above.
-    res.status(201).json({ created, updated, skipped, total: created + updated });
+    res.status(201).json({ created, updated, skipped, kept, total: created + updated });
   } catch (err) { next(err); }
 });
 
@@ -922,4 +1061,5 @@ module.exports = router;
 // until a real file hit it — this is how a new export file gets checked.
 module.exports._internals = {
   parseCsv, imdbTypeKey, IMDB_TITLE_TYPES, imdbRating, matchImdbRow,
+  CSV_BODY, ok, csvsFrom, readCsvFiles, imdbConst, dedupeItems,
 };
