@@ -217,6 +217,67 @@ function updateDataFor(item, prior, { rating, verdict, dateConsumed, reviewText 
   return data;
 }
 
+// ─── Rows the catalogue could not match ──────────────────────────────────────
+//
+// Kept rather than dropped. The reader has already exported their library; the
+// only thing between them and their rating is a title we do not hold yet, and
+// throwing the rating away makes that permanent. scripts/resolve-pending-
+// imports.js looks these up later and writes them.
+//
+// The key is what makes re-importing the same library safe: it updates the row
+// that is waiting instead of stacking up copies of it.
+const pendingKeyFor = (source, row) => {
+  const t = normalizeTitleForSearch(row.title || '');
+  if (source === 'IMDB') return imdbConst(row.imdbId) || `t:${t}|${row.year || ''}`;
+  if (source === 'GOODREADS') return normalizeIsbn(row.isbn) || `t:${t}|${normalizeTitleForSearch(row.author || '')}`;
+  return `t:${t}|${row.year || ''}`;
+};
+
+async function savePendingImports(rows, { userId, source, mediaType, visibility }) {
+  let stored = 0;
+  for (const row of (rows || []).slice(0, MAX_ROWS)) {
+    const title = String(row.title || '').trim();
+    const rating = parseInt(row.rating, 10);
+    if (!title || !Number.isInteger(rating) || rating < 1 || rating > 10) continue;
+
+    const externalKey = pendingKeyFor(source, { ...row, title });
+    const where = { userId_source_externalKey: { userId, source, externalKey } };
+    const prior = await prisma.pendingImport.findUnique({ where, select: { id: true, status: true } });
+    // Anything already dealt with stays dealt with. A re-import must not drag a
+    // resolved rating, a question the reader already answered, or one they
+    // dismissed back into the queue.
+    if (prior && prior.status !== 'PENDING' && prior.status !== 'UNRESOLVABLE') continue;
+
+    const d = row.watchedDate ? new Date(row.watchedDate) : null;
+    const data = {
+      mediaType: row.mediaType || mediaType,
+      title,
+      year: Number.isFinite(Number(row.year)) ? Number(row.year) : null,
+      author: row.author ? String(row.author).slice(0, 200) : null,
+      isbn: normalizeIsbn(row.isbn) || null,
+      imdbId: imdbConst(row.imdbId) || null,
+      rating,
+      reviewText: row.reviewText ? String(row.reviewText).slice(0, 5000) : null,
+      dateConsumed: d && !isNaN(d) && d.getTime() <= Date.now() ? d : null,
+      visibility,
+    };
+
+    // A newer import of the same title is a newer statement of the same
+    // opinion, so it replaces what is waiting — and resets the retry counter,
+    // since the reader has just told us they still care about it.
+    if (prior) {
+      await prisma.pendingImport.update({
+        where: { id: prior.id },
+        data: { ...data, status: 'PENDING', attempts: 0, lastTriedAt: null },
+      });
+    } else {
+      await prisma.pendingImport.create({ data: { ...data, userId, source, externalKey } });
+    }
+    stored++;
+  }
+  return stored;
+}
+
 // One item per catalogue entry, before anything is written.
 //
 // Reviews are unique on (userId, mediaItemId, seasonNumber), and the commit
@@ -547,6 +608,11 @@ router.post('/letterboxd/commit', requireAuth, [
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
+  // Rows the catalogue could not match, kept for the scheduled resolver
+  // rather than discarded with the rest of the preview.
+  body('pending').optional().isArray({ max: MAX_ROWS }),
+  body('pending.*.title').optional().isString(),
+  body('pending.*.rating').optional().isInt({ min: 1, max: 10 }),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
@@ -609,7 +675,11 @@ router.post('/letterboxd/commit', requireAuth, [
     // films; if it should appear in the feed at all it belongs as a single
     // "imported N ratings" entry, which is a feed-model change rather than
     // something to bolt on here.
-    res.status(201).json({ created, updated, skipped, kept, total: created + updated });
+    const pending = await savePendingImports(req.body.pending, {
+      userId: req.user.id, source: 'LETTERBOXD', mediaType: 'MOVIE', visibility: vis,
+    });
+
+    res.status(201).json({ created, updated, skipped, kept, pending, total: created + updated });
   } catch (err) { next(err); }
 });
 
@@ -805,6 +875,11 @@ router.post('/goodreads/commit', requireAuth, [
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
+  // Rows the catalogue could not match, kept for the scheduled resolver
+  // rather than discarded with the rest of the preview.
+  body('pending').optional().isArray({ max: MAX_ROWS }),
+  body('pending.*.title').optional().isString(),
+  body('pending.*.rating').optional().isInt({ min: 1, max: 10 }),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
@@ -855,7 +930,11 @@ router.post('/goodreads/commit', requireAuth, [
     }
 
     // No notifyFriends — same reasoning as the Letterboxd commit above.
-    res.status(201).json({ created, updated, skipped, kept, total: created + updated });
+    const pending = await savePendingImports(req.body.pending, {
+      userId: req.user.id, source: 'GOODREADS', mediaType: 'BOOK', visibility: vis,
+    });
+
+    res.status(201).json({ created, updated, skipped, kept, pending, total: created + updated });
   } catch (err) { next(err); }
 });
 
@@ -1063,6 +1142,11 @@ router.post('/imdb/commit', requireAuth, [
   body('items.*.keepReview').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
+  // Rows the catalogue could not match, kept for the scheduled resolver
+  // rather than discarded with the rest of the preview.
+  body('pending').optional().isArray({ max: MAX_ROWS }),
+  body('pending.*.title').optional().isString(),
+  body('pending.*.rating').optional().isInt({ min: 1, max: 10 }),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   try {
@@ -1118,7 +1202,110 @@ router.post('/imdb/commit', requireAuth, [
     }
 
     // No notifyFriends — same reasoning as the Letterboxd commit above.
-    res.status(201).json({ created, updated, skipped, kept, total: created + updated });
+    const pending = await savePendingImports(req.body.pending, {
+      userId: req.user.id, source: 'IMDB', mediaType: 'MOVIE', visibility: vis,
+    });
+
+    res.status(201).json({ created, updated, skipped, kept, pending, total: created + updated });
+  } catch (err) { next(err); }
+});
+
+// ═══ Ratings that arrived late ═════════════════════════════════════════════
+// The reader's side of scripts/resolve-pending-imports.js: what is still
+// waiting, and the answer to a conflict it could not settle on its own.
+
+// ─── GET /api/imports/pending ──────────────────────────────────────────────
+router.get('/pending', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await prisma.pendingImport.findMany({
+      where: { userId: req.user.id, status: { in: ['PENDING', 'CONFLICT'] } },
+      orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
+      take: 500,
+      include: { mediaItem: { select: { title: true, slug: true, imageUrl: true, releaseYear: true } } },
+    });
+    const conflicts = rows.filter(r => r.status === 'CONFLICT');
+    res.json({
+      waiting: rows.filter(r => r.status === 'PENDING').length,
+      conflicts: conflicts.length,
+      rows: rows.map(r => ({
+        id: r.id, status: r.status, source: r.source, mediaType: r.mediaType,
+        title: r.title, year: r.year, author: r.author,
+        rating: r.rating, reviewText: r.reviewText,
+        existingRating: r.conflictRating, existingReviewText: r.conflictReviewText,
+        // Which fields actually disagree — the same shape the import page's
+        // conflict card already knows how to render.
+        conflict: r.status === 'CONFLICT' ? {
+          rating: r.conflictRating !== null && r.conflictRating !== r.rating,
+          reviewText: !!(r.reviewText && r.conflictReviewText
+            && r.reviewText.trim() !== r.conflictReviewText.trim()),
+        } : null,
+        match: r.mediaItem || null,
+        createdAt: r.createdAt,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── POST /api/imports/pending/:id/resolve ─────────────────────────────────
+// Answered per field, exactly like a conflict at import time — the decision is
+// the same one, only asked later.
+router.post('/pending/:id/resolve', requireAuth, [
+  body('keepRating').optional().isIn(['existing', 'imported']),
+  body('keepReview').optional().isIn(['existing', 'imported']),
+  body('dismiss').optional().isBoolean(),
+], async (req, res, next) => {
+  if (!ok(req, res)) return;
+  try {
+    const p = await prisma.pendingImport.findFirst({
+      where: { id: req.params.id, userId: req.user.id },
+    });
+    if (!p) return res.status(404).json({ error: 'Not found.' });
+
+    if (req.body.dismiss) {
+      await prisma.pendingImport.update({ where: { id: p.id }, data: { status: 'DISMISSED' } });
+      return res.json({ status: 'DISMISSED' });
+    }
+    if (p.status !== 'CONFLICT' || !p.mediaItemId) {
+      return res.status(409).json({ error: 'That one is still waiting for its title to be added.' });
+    }
+
+    const prior = await prisma.review.findFirst({
+      where: { userId: req.user.id, mediaItemId: p.mediaItemId, seasonNumber: null },
+      select: { id: true, rating: true, reviewText: true, isDraft: true },
+    });
+    // The review was deleted between the conflict being raised and answered, so
+    // there is nothing to protect any more — write the import as it stands.
+    if (!prior) {
+      const review = await prisma.review.create({
+        data: {
+          userId: req.user.id, mediaItemId: p.mediaItemId,
+          rating: p.rating, verdict: ratingToVerdict(p.rating),
+          reviewText: p.reviewText || null, dateConsumed: p.dateConsumed || null,
+          visibility: p.visibility, seasonNumber: null, isRevisit: false, isDraft: false,
+        },
+      });
+      await prisma.pendingImport.update({
+        where: { id: p.id },
+        data: { status: 'RESOLVED', reviewId: review.id, resolvedAt: new Date() },
+      });
+      return res.json({ status: 'RESOLVED', created: true });
+    }
+
+    const item = {
+      keepRating: req.body.keepRating, keepReview: req.body.keepReview,
+      rating: p.rating, reviewText: p.reviewText,
+    };
+    const data = updateDataFor(item, prior, {
+      rating: p.rating, verdict: ratingToVerdict(p.rating),
+      dateConsumed: p.dateConsumed, reviewText: p.reviewText,
+    });
+    if (Object.keys(data).length) await prisma.review.update({ where: { id: prior.id }, data });
+
+    await prisma.pendingImport.update({
+      where: { id: p.id },
+      data: { status: 'RESOLVED', reviewId: prior.id, resolvedAt: new Date() },
+    });
+    res.json({ status: 'RESOLVED', changed: Object.keys(data) });
   } catch (err) { next(err); }
 });
 

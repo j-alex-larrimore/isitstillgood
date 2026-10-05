@@ -159,6 +159,7 @@ model MediaItem {
 
   reviews         Review[]
   listItems       ListItem[]
+  pendingImports  PendingImport[]
 
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
@@ -257,6 +258,7 @@ model User {
   sentListShares     ListShare[] @relation("ListShareSender")
   receivedListShares ListShare[] @relation("ListShareRecipient")
   emailVerificationTokens EmailVerificationToken[]
+  pendingImports  PendingImport[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   @@index([email])
@@ -500,4 +502,79 @@ model ShareLink {
   code      String   @id
   path      String   @db.Text
   createdAt DateTime @default(now())
+}
+
+// ─── Imported ratings with nowhere to go yet ─────────────────────────────────
+//
+// An import used to drop every row it could not match. The reader had already
+// done the work of exporting their library, and the only thing standing between
+// them and their rating was a title this catalogue did not happen to hold yet —
+// so the rating was discarded and they were told, accurately and uselessly,
+// that it was not in the catalogue.
+//
+// These rows keep it instead. A scheduled pass looks each one up against the
+// same providers the admin UI uses, adds what it finds, writes the review, and
+// tells the reader it happened. Nothing here is shown publicly: until it
+// resolves, a PendingImport is a note about a rating, not a rating.
+enum ImportSource {
+  LETTERBOXD
+  GOODREADS
+  IMDB
+}
+
+enum PendingImportStatus {
+  PENDING       // still looking for the title
+  RESOLVED      // the review has been written
+  CONFLICT      // the title exists now, but a review is already here and disagrees
+  UNRESOLVABLE  // looked for it enough times; a human would have to add it
+  DISMISSED     // the reader said to drop it
+}
+
+model PendingImport {
+  id           String   @id @default(cuid())
+  userId       String
+  source       ImportSource
+  mediaType    MediaType
+
+  // What the export said, which is all we have to search with — and all we can
+  // show the reader when asking them about it months later.
+  title        String
+  year         Int?
+  author       String?
+  isbn         String?
+  imdbId       String?
+
+  // The identity this row was deduped on, so re-importing the same library does
+  // not stack up copies of the same waiting rating.
+  externalKey  String
+
+  rating       Int
+  reviewText   String?  @db.Text
+  dateConsumed DateTime?
+  visibility   ReviewVisibility @default(PUBLIC)
+
+  status       PendingImportStatus @default(PENDING)
+  // Lookups cost provider quota, so a row that keeps missing is retried less
+  // often and eventually left alone rather than searched for forever.
+  attempts     Int      @default(0)
+  lastTriedAt  DateTime?
+  resolvedAt   DateTime?
+  // Set once the title exists, whether the review was written or is waiting on
+  // the reader to settle a conflict.
+  mediaItemId  String?
+  reviewId     String?
+  // The rating and words already here, captured when the conflict was found, so
+  // the question still makes sense if the reader answers it a week later.
+  conflictRating     Int?
+  conflictReviewText String?  @db.Text
+
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaItem    MediaItem? @relation(fields: [mediaItemId], references: [id], onDelete: SetNull)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, source, externalKey])
+  @@index([status, lastTriedAt])
+  @@index([userId, status])
 }

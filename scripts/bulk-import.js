@@ -439,6 +439,18 @@ async function main() {
   }
 }
 
-main()
-  .catch(e => { console.error(e); process.exit(1); })
-  .finally(() => prisma.$disconnect());
+// Only run when invoked directly. scripts/resolve-pending-imports.js reuses the
+// lookup logic below rather than growing a second copy of it — the matching
+// here carries hard-won guards (the numbered-volume check in pickBestMatch, the
+// author/page-count scoring in scoreBookCandidate) that a reimplementation
+// would quietly lose.
+if (require.main === module) {
+  main()
+    .catch(e => { console.error(e); process.exit(1); })
+    .finally(() => prisma.$disconnect());
+}
+
+module.exports = {
+  lookupMovieOrTv, lookupBook, lookupGame,
+  pickBestMatch, normalizeTitleForMatch, scoreBookCandidate,
+};
