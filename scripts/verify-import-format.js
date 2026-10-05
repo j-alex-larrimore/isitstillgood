@@ -16,9 +16,10 @@
 // and the importer looked like it had rejected the file. Nothing about the
 // file was wrong, and no amount of staring at the CSV would show it.
 //
-// A healthy IMDb export reports zero unsupported rows. Anything above zero is
-// either a type this catalogue really does not take (podcasts) or a vocabulary
-// change to fold into IMDB_TITLE_TYPES.
+// The failure signature to watch for is *every* row unsupported, which is what
+// a re-cased vocabulary looks like. A handful of unsupported rows is normal and
+// correct — this catalogue genuinely does not take podcasts — so those are
+// listed as a warning, not a failure.
 
 const fs = require('fs');
 const path = require('path');
@@ -79,10 +80,24 @@ for (const [s, n] of [...statuses].sort((a, b) => b[1] - a[1])) {
 }
 
 const unsupported = statuses.get('unsupported') || 0;
+const unmapped = [...types].filter(([, v]) => v.mapped === 'UNSUPPORTED').map(([k]) => k);
+
 console.log(`\nRatings read: ${rated}/${rows.length}`);
 console.log(`Unsupported:  ${unsupported}`);
-console.log(unsupported === 0
-  ? '\nPASS — every row\'s type is understood; importing depends only on catalogue coverage.\n'
-  : `\nFAIL — ${unsupported} row(s) have a Title Type this importer does not map. Add them to IMDB_TITLE_TYPES (keys are lowercase-alphanumeric).\n`);
 
-process.exit(unsupported === 0 ? 0 : 1);
+// Every row unsupported is the format-break signature: a provider re-cased or
+// renamed the column and nothing matches any more. A few unsupported rows just
+// means the user rated something outside this catalogue's remit.
+const broken = rows.length > 0 && unsupported === rows.length;
+
+if (unmapped.length && !broken) {
+  console.log(`\nNote: ${unsupported} row(s) in types this importer does not take — ${unmapped.join(', ')}.`);
+  console.log('      Expected for podcasts and the like. Those rows are reported to the');
+  console.log('      user and skipped; the rest of the file imports normally.');
+}
+
+console.log(broken
+  ? `\nFAIL — every row is unsupported. The Title Type vocabulary has changed (${unmapped.join(', ')}). Add these to IMDB_TITLE_TYPES; keys are lowercase-alphanumeric.\n`
+  : '\nPASS — the file parses and its types are understood; importing depends only on catalogue coverage.\n');
+
+process.exit(broken ? 1 : 0);

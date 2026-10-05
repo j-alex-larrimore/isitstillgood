@@ -64,3 +64,19 @@ jobs:
           IGDB_CLIENT_ID: ${{ secrets.IGDB_CLIENT_ID }}
           IGDB_CLIENT_SECRET: ${{ secrets.IGDB_CLIENT_SECRET }}
         run: node scripts/sync-new-games.js
+
+      # Deliberately last. Every step above adds titles, and the first thing
+      # this one does for each waiting rating is look in the catalogue again —
+      # so anything the sync just brought in resolves here for free, with no
+      # provider call at all. Running it first would send those same rows out
+      # to TMDB and Google Books to be told what we had just finished storing.
+      #
+      # Readers' own ratings, so a failure here should not fail the catalogue
+      # sync that already succeeded.
+      - name: Resolve pending imports
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          GOOGLE_BOOKS_API_KEY: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
+        run: node scripts/resolve-pending-imports.js --limit 300

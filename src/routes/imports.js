@@ -596,7 +596,9 @@ router.post('/letterboxd/preview', requireAuth, CSV_BODY, async (req, res, next)
 // The server re-validates every field; the preview response is a suggestion,
 // not something to trust on the way back in.
 router.post('/letterboxd/commit', requireAuth, [
-  body('items').isArray({ min: 1, max: MAX_ROWS }),
+  // May legitimately be empty: an import where nothing matched still has
+  // something to say, and `pending` below is the whole point of that case.
+  body('items').isArray({ min: 0, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
   // The user's answers to a conflict, decided per field: 'existing' leaves what
@@ -617,6 +619,9 @@ router.post('/letterboxd/commit', requireAuth, [
   if (!ok(req, res)) return;
   try {
     const items = dedupeItems(req.body.items);
+    if (!items.length && !(req.body.pending || []).length) {
+      return res.status(422).json({ error: 'Nothing to import.' });
+    }
     const vis = req.body.visibility || req.user.defaultVisibility || 'PUBLIC';
 
     // One query instead of one per row — an import is the only place this
@@ -863,7 +868,9 @@ router.post('/goodreads/preview', requireAuth, CSV_BODY, async (req, res, next) 
 // of the behaviour (draft-aware upsert, no friend notifications, server-side
 // revalidation) is deliberately identical.
 router.post('/goodreads/commit', requireAuth, [
-  body('items').isArray({ min: 1, max: MAX_ROWS }),
+  // May legitimately be empty: an import where nothing matched still has
+  // something to say, and `pending` below is the whole point of that case.
+  body('items').isArray({ min: 0, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
   // The user's answers to a conflict, decided per field: 'existing' leaves what
@@ -884,6 +891,9 @@ router.post('/goodreads/commit', requireAuth, [
   if (!ok(req, res)) return;
   try {
     const items = dedupeItems(req.body.items);
+    if (!items.length && !(req.body.pending || []).length) {
+      return res.status(422).json({ error: 'Nothing to import.' });
+    }
     const vis = req.body.visibility || req.user.defaultVisibility || 'PUBLIC';
     const ids = [...new Set(items.map(i => i.mediaItemId))];
 
@@ -1131,7 +1141,9 @@ router.post('/imdb/preview', requireAuth, CSV_BODY, async (req, res, next) => {
 // ─── POST /api/imports/imdb/commit ─────────────────────────────────────────
 // Movies and TV parent rows. Otherwise identical to the two commits above.
 router.post('/imdb/commit', requireAuth, [
-  body('items').isArray({ min: 1, max: MAX_ROWS }),
+  // May legitimately be empty: an import where nothing matched still has
+  // something to say, and `pending` below is the whole point of that case.
+  body('items').isArray({ min: 0, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
   // The user's answers to a conflict, decided per field: 'existing' leaves what
@@ -1151,6 +1163,9 @@ router.post('/imdb/commit', requireAuth, [
   if (!ok(req, res)) return;
   try {
     const items = dedupeItems(req.body.items);
+    if (!items.length && !(req.body.pending || []).length) {
+      return res.status(422).json({ error: 'Nothing to import.' });
+    }
     const vis = req.body.visibility || req.user.defaultVisibility || 'PUBLIC';
     const ids = [...new Set(items.map(i => i.mediaItemId))];
 
