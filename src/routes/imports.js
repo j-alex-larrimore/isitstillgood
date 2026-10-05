@@ -155,7 +155,12 @@ async function annotateExisting(results, matchedIds, userId) {
       r.status = 'conflict';
       r.auto = false;
       r.conflict = { rating: ratingDiffers, reviewText: replacesText };
-      r.keep = 'existing';
+      // Default each field to keeping what is already here, but only where
+      // there is actually a disagreement — a field that agrees is not a
+      // decision, and review text the import adds where there was none is a
+      // gain that should not need approving.
+      r.keepRating = ratingDiffers ? 'existing' : 'imported';
+      r.keepReview = replacesText ? 'existing' : 'imported';
     } else if (addsText) {
       r.addsReviewText = true;          // stays auto-importable
     } else {
@@ -163,6 +168,53 @@ async function annotateExisting(results, matchedIds, userId) {
       r.auto = false;
     }
   }
+}
+
+// "Import this one" is two questions, not one. Someone can want the score they
+// just re-rated on Letterboxd AND the review they wrote here, and a single
+// switch cannot express that — so the score and the words are decided
+// separately. `keep` (the older single answer) still works and means both.
+const choiceOf = (item, field) => {
+  if (item.keep === 'existing') return 'existing';
+  const v = field === 'rating' ? item.keepRating : item.keepReview;
+  return v === 'existing' ? 'existing' : 'imported';
+};
+const keepsEverything = item =>
+  choiceOf(item, 'rating') === 'existing' && choiceOf(item, 'review') === 'existing';
+
+// What to write over a review that already exists, given those decisions.
+// Returns {} when the answer is "change nothing", which the caller treats as a
+// row to leave alone rather than a no-op write.
+//
+// Two things are deliberately never written here:
+//
+//   dateConsumed  only set when the import actually carries a date. It used to
+//                 be written unconditionally, so importing a file without watch
+//                 dates silently erased the dates already stored. An export
+//                 that is silent about a date is not asserting there wasn't one.
+//   visibility    an existing review keeps the visibility its author chose. The
+//                 picker on the import page applies to the reviews being
+//                 created, not to ones already here — otherwise a public import
+//                 would quietly republish something saved as private.
+function updateDataFor(item, prior, { rating, verdict, dateConsumed, reviewText }) {
+  const data = {};
+
+  if (choiceOf(item, 'rating') === 'imported') {
+    data.rating = rating;
+    data.verdict = verdict;
+    data.isDraft = false;
+    if (dateConsumed) data.dateConsumed = dateConsumed;
+    // A re-import that changes a score is a revisit in the same sense a manual
+    // edit is.
+    data.isRevisit = prior.isDraft ? false : (rating !== prior.rating ? true : undefined);
+    data.previousRating = prior.isDraft ? null : (rating !== prior.rating ? prior.rating : undefined);
+  }
+
+  // Only ever fills review text, never blanks one: an imported row carrying no
+  // words does not outrank words the user wrote here.
+  if (choiceOf(item, 'review') === 'imported' && reviewText) data.reviewText = reviewText;
+
+  return data;
 }
 
 // One item per catalogue entry, before anything is written.
@@ -189,12 +241,14 @@ const dedupeItems = items => {
       ...prev, ...item,
       reviewText: item.reviewText || prev.reviewText,
       watchedDate: item.watchedDate || prev.watchedDate,
-      // If either copy of this film was resolved as "keep what I already
-      // wrote", that wins. Merging must not be able to undo a protective
-      // choice the user made.
-      keep: (prev.keep === 'existing' || item.keep === 'existing')
-        ? 'existing'
-        : (item.keep || prev.keep),
+      // If either copy of this film was resolved as "keep what I already have",
+      // that wins, field by field. Merging must not be able to undo a
+      // protective choice the user made.
+      keep: (prev.keep === 'existing' || item.keep === 'existing') ? 'existing' : (item.keep || prev.keep),
+      keepRating: (choiceOf(prev, 'rating') === 'existing' || choiceOf(item, 'rating') === 'existing')
+        ? 'existing' : 'imported',
+      keepReview: (choiceOf(prev, 'review') === 'existing' || choiceOf(item, 'review') === 'existing')
+        ? 'existing' : 'imported',
     });
   }
   return [...by.values()];
@@ -484,9 +538,12 @@ router.post('/letterboxd/commit', requireAuth, [
   body('items').isArray({ min: 1, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
-  // The user's answer to a conflict. 'existing' means leave the review that is
-  // already there alone; anything else imports over it.
+  // The user's answers to a conflict, decided per field: 'existing' leaves what
+  // is already stored alone, anything else imports over it. `keep` is the older
+  // single answer and still means both.
   body('items.*.keep').optional().isIn(['existing', 'imported']),
+  body('items.*.keepRating').optional().isIn(['existing', 'imported']),
+  body('items.*.keepReview').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
@@ -517,9 +574,9 @@ router.post('/letterboxd/commit', requireAuth, [
     let created = 0, updated = 0, skipped = 0, kept = 0;
     for (const item of items) {
       if (!valid.has(item.mediaItemId)) { skipped++; continue; }
-      // A conflict the user resolved in favour of what they already wrote is
-      // not written at all — not updated, not blanked, not touched.
-      if (item.keep === 'existing') { kept++; continue; }
+      // A conflict the user resolved entirely in favour of what they already
+      // have is not written at all — not updated, not blanked, not touched.
+      if (keepsEverything(item)) { kept++; continue; }
       const rating = parseInt(item.rating, 10);
       const verdict = ratingToVerdict(rating);
       const consumed = item.watchedDate ? new Date(item.watchedDate) : null;
@@ -528,21 +585,9 @@ router.post('/letterboxd/commit', requireAuth, [
       const prior = existingBy[item.mediaItemId];
 
       if (prior) {
-        await prisma.review.update({
-          where: { id: prior.id },
-          data: {
-            rating, verdict, dateConsumed, visibility: vis, isDraft: false,
-            // Only ever fills review text, never blanks one. Someone who
-            // imported ratings.csv first and reviews.csv second should gain
-            // their words; someone who wrote a review here and then re-imports
-            // should not lose it to a row that carries none.
-            ...(reviewText ? { reviewText } : {}),
-            // A re-import that changes a score is a revisit in the same sense
-            // a manual edit is.
-            isRevisit: prior.isDraft ? false : (rating !== prior.rating ? true : undefined),
-            previousRating: prior.isDraft ? null : (rating !== prior.rating ? prior.rating : undefined),
-          },
-        });
+        const data = updateDataFor(item, prior, { rating, verdict, dateConsumed, reviewText });
+        if (!Object.keys(data).length) { kept++; continue; }
+        await prisma.review.update({ where: { id: prior.id }, data });
         updated++;
       } else {
         await prisma.review.create({
@@ -720,9 +765,12 @@ router.post('/goodreads/commit', requireAuth, [
   body('items').isArray({ min: 1, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
-  // The user's answer to a conflict. 'existing' means leave the review that is
-  // already there alone; anything else imports over it.
+  // The user's answers to a conflict, decided per field: 'existing' leaves what
+  // is already stored alone, anything else imports over it. `keep` is the older
+  // single answer and still means both.
   body('items.*.keep').optional().isIn(['existing', 'imported']),
+  body('items.*.keepRating').optional().isIn(['existing', 'imported']),
+  body('items.*.keepReview').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('items.*.reviewText').optional({ nullable: true }).isString().isLength({ max: 5000 }),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
@@ -748,9 +796,9 @@ router.post('/goodreads/commit', requireAuth, [
     let created = 0, updated = 0, skipped = 0, kept = 0;
     for (const item of items) {
       if (!valid.has(item.mediaItemId)) { skipped++; continue; }
-      // A conflict the user resolved in favour of what they already wrote is
-      // not written at all — not updated, not blanked, not touched.
-      if (item.keep === 'existing') { kept++; continue; }
+      // A conflict the user resolved entirely in favour of what they already
+      // have is not written at all — not updated, not blanked, not touched.
+      if (keepsEverything(item)) { kept++; continue; }
       const rating = parseInt(item.rating, 10);
       const verdict = ratingToVerdict(rating);
       const d = item.watchedDate ? new Date(item.watchedDate) : null;
@@ -759,17 +807,9 @@ router.post('/goodreads/commit', requireAuth, [
       const prior = existingBy[item.mediaItemId];
 
       if (prior) {
-        await prisma.review.update({
-          where: { id: prior.id },
-          data: {
-            rating, verdict, dateConsumed, visibility: vis, isDraft: false,
-            // Only fill review text, never blank one the reader already wrote
-            // here — their own words outrank an imported blank.
-            ...(reviewText ? { reviewText } : {}),
-            isRevisit: prior.isDraft ? false : (rating !== prior.rating ? true : undefined),
-            previousRating: prior.isDraft ? null : (rating !== prior.rating ? prior.rating : undefined),
-          },
-        });
+        const data = updateDataFor(item, prior, { rating, verdict, dateConsumed, reviewText });
+        if (!Object.keys(data).length) { kept++; continue; }
+        await prisma.review.update({ where: { id: prior.id }, data });
         updated++;
       } else {
         await prisma.review.create({
@@ -984,9 +1024,12 @@ router.post('/imdb/commit', requireAuth, [
   body('items').isArray({ min: 1, max: MAX_ROWS }),
   body('items.*.mediaItemId').isString().notEmpty(),
   body('items.*.rating').isInt({ min: 1, max: 10 }),
-  // The user's answer to a conflict. 'existing' means leave the review that is
-  // already there alone; anything else imports over it.
+  // The user's answers to a conflict, decided per field: 'existing' leaves what
+  // is already stored alone, anything else imports over it. `keep` is the older
+  // single answer and still means both.
   body('items.*.keep').optional().isIn(['existing', 'imported']),
+  body('items.*.keepRating').optional().isIn(['existing', 'imported']),
+  body('items.*.keepReview').optional().isIn(['existing', 'imported']),
   body('items.*.watchedDate').optional({ nullable: true }).isISO8601(),
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
 ], async (req, res, next) => {
@@ -1017,9 +1060,9 @@ router.post('/imdb/commit', requireAuth, [
     let created = 0, updated = 0, skipped = 0, kept = 0;
     for (const item of items) {
       if (!valid.has(item.mediaItemId)) { skipped++; continue; }
-      // A conflict the user resolved in favour of what they already wrote is
-      // not written at all — not updated, not blanked, not touched.
-      if (item.keep === 'existing') { kept++; continue; }
+      // A conflict the user resolved entirely in favour of what they already
+      // have is not written at all — not updated, not blanked, not touched.
+      if (keepsEverything(item)) { kept++; continue; }
       const rating = parseInt(item.rating, 10);
       const verdict = ratingToVerdict(rating);
       const d = item.watchedDate ? new Date(item.watchedDate) : null;
@@ -1027,14 +1070,9 @@ router.post('/imdb/commit', requireAuth, [
       const prior = existingBy[item.mediaItemId];
 
       if (prior) {
-        await prisma.review.update({
-          where: { id: prior.id },
-          data: {
-            rating, verdict, dateConsumed, visibility: vis, isDraft: false,
-            isRevisit: prior.isDraft ? false : (rating !== prior.rating ? true : undefined),
-            previousRating: prior.isDraft ? null : (rating !== prior.rating ? prior.rating : undefined),
-          },
-        });
+        const data = updateDataFor(item, prior, { rating, verdict, dateConsumed });
+        if (!Object.keys(data).length) { kept++; continue; }
+        await prisma.review.update({ where: { id: prior.id }, data });
         updated++;
       } else {
         await prisma.review.create({
@@ -1062,4 +1100,5 @@ module.exports = router;
 module.exports._internals = {
   parseCsv, imdbTypeKey, IMDB_TITLE_TYPES, imdbRating, matchImdbRow,
   CSV_BODY, ok, csvsFrom, readCsvFiles, imdbConst, dedupeItems,
+  choiceOf, keepsEverything, updateDataFor, annotateExisting,
 };
