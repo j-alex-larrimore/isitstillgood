@@ -666,10 +666,18 @@ router.post('/goodreads/commit', requireAuth, [
 
 // IMDb's Title Type vocabulary, mapped onto this catalogue. Anything absent
 // here is surfaced to the user as unsupported instead of being guessed at.
+//
+// IMDb ships this column in two spellings, and a real export was rejected
+// because of it: the classic API casing (`tvMiniSeries`) and the display
+// casing the current export writes (`TV Mini Series`). Keys here are
+// lowercase-alphanumeric so one table covers both spellings and any future
+// re-casing — the collapse is done by imdbTypeKey below, never by hand.
+const imdbTypeKey = v => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
 const IMDB_TITLE_TYPES = {
-  movie: 'MOVIE', tvMovie: 'MOVIE', short: 'MOVIE', tvShort: 'MOVIE',
-  video: 'MOVIE', tvSpecial: 'MOVIE',
-  tvSeries: 'TV_SHOW', tvMiniSeries: 'TV_SHOW',
+  movie: 'MOVIE', tvmovie: 'MOVIE', short: 'MOVIE', tvshort: 'MOVIE',
+  video: 'MOVIE', tvspecial: 'MOVIE',
+  tvseries: 'TV_SHOW', tvminiseries: 'TV_SHOW',
 };
 
 const imdbConst = v => {
@@ -691,7 +699,15 @@ const imdbRating = v => {
 // for whatever has no id on either side.
 async function imdbCandidates(rows) {
   const ids = [...new Set(rows.map(r => imdbConst(r.Const)).filter(Boolean))];
-  const titles = [...new Set(rows.map(r => normalizeTitleForSearch((r.Title || '').trim())).filter(Boolean))];
+  // Both title columns. The current export carries Original Title alongside
+  // Title and they genuinely differ — "Birds of Prey and the Fantabulous
+  // Emancipation of One Harley Quinn" vs the parenthesised original — so
+  // whichever one this catalogue happens to store should still match.
+  const titles = [...new Set(
+    rows.flatMap(r => [r.Title, r['Original Title']])
+      .map(t => normalizeTitleForSearch((t || '').trim()))
+      .filter(Boolean)
+  )];
 
   // Only movies and TV parent rows are ever eligible, which is also exactly
   // the set the backfill populates — so an imdbId hit is already the right row.
@@ -733,9 +749,10 @@ function matchImdbRow(row, { byId, byTitle }) {
   if (rating === null) return { ...base, status: 'unrated' };
 
   // Episodes before type mapping, so the message can be specific about why.
-  if (rawType === 'tvEpisode') return { ...base, status: 'episode', auto: false };
+  const typeKey = imdbTypeKey(rawType);
+  if (typeKey === 'tvepisode') return { ...base, status: 'episode', auto: false };
 
-  const mediaType = IMDB_TITLE_TYPES[rawType];
+  const mediaType = IMDB_TITLE_TYPES[typeKey];
   if (!mediaType) return { ...base, status: 'unsupported', auto: false };
   base.mediaType = mediaType;
 
@@ -746,8 +763,17 @@ function matchImdbRow(row, { byId, byTitle }) {
   if (id && byId.has(id)) return { ...base, status: 'imdb_id', auto: true, match: byId.get(id) };
 
   // Fallback, only for rows with no id on one side or the other. Same tiers as
-  // Letterboxd, for the same reason.
-  const candidates = byTitle.get(`${mediaType}:${normalizeTitleForSearch(title)}`) || [];
+  // Letterboxd, for the same reason. Title first, Original Title second —
+  // deduped by row id, since a title that differs only in punctuation
+  // normalizes to the same key and would otherwise appear twice and read as
+  // ambiguous.
+  const original = (row['Original Title'] || '').trim();
+  const seen = new Set();
+  const candidates = [title, original]
+    .map(t => normalizeTitleForSearch(t))
+    .filter(Boolean)
+    .flatMap(key => byTitle.get(`${mediaType}:${key}`) || [])
+    .filter(c => !seen.has(c.id) && seen.add(c.id));
   if (!candidates.length) return { ...base, status: 'missing', auto: false };
 
   const exact = candidates.filter(c => c.releaseYear === year);
@@ -889,3 +915,11 @@ router.post('/imdb/commit', requireAuth, [
 });
 
 module.exports = router;
+
+// Exported only for scripts/verify-import-format.js, which replays real export
+// files through the actual matchers with no database and no session. The IMDb
+// format change that broke this importer was a pure parsing bug, invisible
+// until a real file hit it — this is how a new export file gets checked.
+module.exports._internals = {
+  parseCsv, imdbTypeKey, IMDB_TITLE_TYPES, imdbRating, matchImdbRow,
+};
