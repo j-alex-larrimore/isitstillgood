@@ -259,10 +259,34 @@ model User {
   receivedListShares ListShare[] @relation("ListShareRecipient")
   emailVerificationTokens EmailVerificationToken[]
   pendingImports  PendingImport[]
+
+  // ─── Where this account came from ──────────────────────────────────────
+  // Captured first-touch in the browser by analytics.js and sent once, right
+  // after the account is created. Written only while still empty, so it
+  // records the visit that started the relationship rather than the most
+  // recent one.
+  //
+  // This exists because the ad platforms' own dashboards were the only other
+  // answer, and when one of them shows nothing there is no way to tell a
+  // reporting problem from a delivery problem. A signup should be able to say
+  // where it came from without having to ask Reddit.
+  attrSource        String?   // utm_source, or 'direct' when the visit carried nothing
+  attrMedium        String?
+  attrCampaign      String?
+  attrContent       String?
+  attrTerm          String?
+  attrRedditClickId String?   // rdt_cid — what Reddit matches a conversion on
+  attrMetaClickId   String?   // fbclid
+  attrReferrer      String?   // all an organic visit has to go on
+  attrLandedOn      String?   // the path that first visit started on
+  attrLandedAt      DateTime? // when it happened, which can long predate signup
+  attrCapturedAt    DateTime? // when this was recorded; also the "already set" flag
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   @@index([email])
   @@index([username])
+  @@index([attrSource])
+  @@index([attrCampaign])
 }
 
 // ─── EMAIL VERIFICATION TOKENS ─────────────────────────────────────────────

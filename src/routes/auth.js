@@ -268,6 +268,88 @@ router.post('/logout-all', requireAuth, async (req, res, next) => {
 // ─── GET /api/auth/me ────────────────────────────────────────────────────────
 router.get('/me', requireAuth, (req, res) => res.json({ user: req.user }));
 
+// ─── POST /api/auth/attribution ────────────────────────────────────────────
+// Where an account came from, recorded once.
+//
+// This exists because the ad platforms' own dashboards were the only answer we
+// had, and when one of them shows nothing there is no way to tell a reporting
+// problem from a delivery problem — or to tell whether a signup that appeared
+// out of nowhere came from an ad at all. analytics.js has always captured the
+// campaign parameters a visit arrived with; it just never told us. Now it does.
+//
+// First touch wins and is never overwritten: the visit that started the
+// relationship is the one worth knowing about, not whichever happened to be
+// most recent. attrCapturedAt doubles as the "already answered" flag.
+//
+// Bounded to accounts created recently as well, because localStorage outlives
+// everything — a user of two years whose browser still holds a stale blob
+// should not suddenly acquire an origin story, and a blob that old is not
+// evidence of anything anyway.
+//
+// Everything here arrives from the browser, so it is a claim rather than a
+// fact: clamped to length, stored, and used only for your own reporting. It
+// grants nothing and is never interpolated anywhere.
+const ATTR_WINDOW_DAYS = 30;
+
+router.post('/attribution', requireAuth, [
+  body('utm_source').optional().isString(),
+  body('utm_medium').optional().isString(),
+  body('utm_campaign').optional().isString(),
+  body('utm_content').optional().isString(),
+  body('utm_term').optional().isString(),
+  body('rdt_cid').optional().isString(),
+  body('fbclid').optional().isString(),
+  body('referrer').optional().isString(),
+  body('landed_on').optional().isString(),
+  body('landed_at').optional().isString(),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+  try {
+    const me = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { attrCapturedAt: true, createdAt: true },
+    });
+    if (!me) return res.status(404).json({ error: 'Not found' });
+    if (me.attrCapturedAt) return res.json({ recorded: false, reason: 'already_recorded' });
+    if (Date.now() - me.createdAt.getTime() > ATTR_WINDOW_DAYS * 864e5) {
+      return res.json({ recorded: false, reason: 'outside_window' });
+    }
+
+    const a = req.body || {};
+    const str = (v, n) => {
+      const s = String(v ?? '').trim().slice(0, n);
+      return s || null;
+    };
+    const landedAt = a.landed_at ? new Date(a.landed_at) : null;
+    const referrer = str(a.referrer, 500);
+
+    // A visit that carried no campaign parameters still has an answer worth
+    // storing — "a link from somewhere" and "typed it in" are different
+    // things, and both are more use than null.
+    const source = str(a.utm_source, 120) || (referrer ? 'referral' : 'direct');
+
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        attrSource:        source,
+        attrMedium:        str(a.utm_medium, 120),
+        attrCampaign:      str(a.utm_campaign, 200),
+        attrContent:       str(a.utm_content, 200),
+        attrTerm:          str(a.utm_term, 200),
+        attrRedditClickId: str(a.rdt_cid, 255),
+        attrMetaClickId:   str(a.fbclid, 255),
+        attrReferrer:      referrer,
+        attrLandedOn:      str(a.landed_on, 300),
+        attrLandedAt:      landedAt && !isNaN(landedAt) && landedAt.getTime() <= Date.now() ? landedAt : null,
+        attrCapturedAt:    new Date(),
+      },
+    });
+    res.json({ recorded: true, source });
+  } catch (err) { next(err); }
+});
+
 // ─── GET /api/auth/google ──── Redirect to Google ────────────────────────────
 router.get('/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
