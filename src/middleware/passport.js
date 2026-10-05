@@ -54,26 +54,54 @@ passport.use(new GoogleStrategy(
       const avatar   = profile.photos?.[0]?.value;
       const name     = profile.displayName;
 
+      // Cancellation used to be a dead end. The row keeps the email and the
+      // username forever, so afterwards Google sign-in was refused here, local
+      // login was refused (passwordHash is cleared), and registering again
+      // returned "Email already registered" — the same person could never come
+      // back under their own address by any route, and the only feedback was a
+      // redirect to a page that does not exist.
+      //
+      // Reactivating is safe precisely because of what cancellation does and
+      // does not do: see the comment on DELETE /api/users/:username. Star
+      // ratings are NEVER hidden — they stay visible and keep counting toward
+      // community scores the entire time an account is canceled. So letting the
+      // owner back in exposes nothing that was not already public. Review text
+      // was wiped at cancellation and does not come back.
+      //
+      // Google has just proved ownership of the address, which is a stronger
+      // check than the password this account no longer has.
+      const reactivate = async (where) => prisma.user.update({
+        where,
+        data: {
+          canceledAt: null, googleId, googleEmail: email,
+          avatarUrl: avatar || undefined, isVerified: true,
+        },
+      });
+
       // 1. Already linked via Google ID
       let user = await prisma.user.findUnique({ where: { googleId } });
       if (user) {
-        if (user.canceledAt) return done(null, false, { message: 'This account has been canceled' });
+        if (user.canceledAt) {
+          user = await reactivate({ id: user.id });
+          user.justReactivated = true;
+        }
         return done(null, user);
       }
 
       // 2. Email exists — link Google to existing account
       user = await prisma.user.findUnique({ where: { email } });
       if (user) {
-        // A canceled account's googleId was cleared at cancellation time — don't
-        // let a fresh Google sign-in silently re-link and reactivate it.
-        if (user.canceledAt) return done(null, false, { message: 'This account has been canceled' });
-        user = await prisma.user.update({
-          where: { email },
-          // Google itself just proved ownership of this address, so an
-          // existing-but-unverified local account gets verified here too —
-          // no reason to make them click a separate email link as well.
-          data: { googleId, googleEmail: email, avatarUrl: user.avatarUrl || avatar, isVerified: true },
-        });
+        const wasCanceled = !!user.canceledAt;
+        user = wasCanceled
+          ? await reactivate({ id: user.id })
+          : await prisma.user.update({
+              where: { email },
+              // Google itself just proved ownership of this address, so an
+              // existing-but-unverified local account gets verified here too —
+              // no reason to make them click a separate email link as well.
+              data: { googleId, googleEmail: email, avatarUrl: user.avatarUrl || avatar, isVerified: true },
+            });
+        if (wasCanceled) user.justReactivated = true;
         return done(null, user);
       }
 

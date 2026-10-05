@@ -106,6 +106,18 @@ router.post('/register', registerLimiter, [
       where: { OR: [{ email: email.toLowerCase() }, { username }] },
     });
     if (exists) {
+      // A canceled account keeps its email and username forever, so the generic
+      // "Email already registered" was telling someone trying to come back that
+      // the address was taken — by themselves — with no hint of what to do. The
+      // row is reactivated by signing in rather than by registering again, so
+      // say that. No extra disclosure: the old message already revealed the
+      // address was in use.
+      if (exists.canceledAt && exists.email === email.toLowerCase()) {
+        return res.status(409).json({
+          error: 'That email belongs to a canceled account. Sign in with Google to reactivate it.',
+          code: 'ACCOUNT_CANCELED',
+        });
+      }
       return res.status(409).json({ error: exists.email === email.toLowerCase() ? 'Email already registered' : 'Username taken' });
     }
 
@@ -263,14 +275,19 @@ router.get('/google',
 
 // ─── GET /api/auth/google/callback ───────────────────────────────────────────
 router.get('/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: `${process.env.CLIENT_URL}/login?error=google_failed` }),
+  // /login is not a page on this site — signing in is a modal on index.html,
+  // and every other redirect in this file already targets /index.html. This one
+  // sent failures to a URL that returned a bare "Not Found", so a user whose
+  // sign-in failed got no explanation and no way back.
+  passport.authenticate('google', { session: false, failureRedirect: `${CLIENT_URL}/index.html?error=google_failed` }),
   async (req, res, next) => {
     try {
       const accessToken  = signAccessToken(req.user.id);
       const refreshToken = await issueRefreshToken(req.user.id);
       setAuthCookies(res, accessToken, refreshToken);
       // Redirect to frontend — it will read the cookie
-      res.redirect(`${process.env.CLIENT_URL}/index.html?google=true&token=${accessToken}&refresh=${encodeURIComponent(refreshToken)}`);
+      const back = req.user.justReactivated ? '&reactivated=1' : '';
+      res.redirect(`${CLIENT_URL}/index.html?google=true&token=${accessToken}&refresh=${encodeURIComponent(refreshToken)}${back}`);
     } catch (err) { next(err); }
   }
 );
