@@ -630,10 +630,34 @@ router.post('/letterboxd/commit', requireAuth, [
 // The export also includes shelved-but-unread books with "My Rating" of 0;
 // those are skipped rather than imported as a rating of nothing.
 
+// Goodreads writes the series into the title — "The Name of the Wind (The
+// Kingkiller Chronicle, #1)", "The Slow Regard of Silent Things (The Kingkiller
+// Chronicle, #2.5)" — while this catalogue stores the bare title and keeps the
+// series in seriesName/seriesNumber. So the title fallback missed every book in
+// a series, which for anyone importing a Goodreads shelf is most of it. Books
+// with an ISBN on file hid the bug by matching before the fallback ran.
+//
+// A trailing parenthetical is only treated as a series marker when it contains
+// a #, which is Goodreads' own notation, so a title that genuinely ends in
+// parentheses is left intact. The bare "(Series)" form is tried too, but only
+// after the full title, so a stripped guess can never beat an exact match.
+function goodreadsTitleKeys(title) {
+  const keys = [];
+  const push = t => {
+    const k = normalizeTitleForSearch(String(t || '').trim());
+    if (k && !keys.includes(k)) keys.push(k);
+  };
+  push(title);
+  const noSeries = String(title || '').replace(/\s*\([^()]*#[^()]*\)\s*$/, '');
+  push(noSeries);
+  push(noSeries.replace(/\s*\([^()]*\)\s*$/, ''));
+  return keys;
+}
+
 // One query for ISBNs, one for titles, rather than two per row.
 async function goodreadsCandidates(rows) {
   const isbns = [...new Set(rows.map(r => normalizeIsbn(unwrapGoodreadsCell(r.ISBN13) || unwrapGoodreadsCell(r.ISBN))).filter(Boolean))];
-  const titles = [...new Set(rows.map(r => normalizeTitleForSearch((r.Title || '').trim())).filter(Boolean))];
+  const titles = [...new Set(rows.flatMap(r => goodreadsTitleKeys(r.Title)))];
 
   const [byIsbnRows, byTitleRows] = await Promise.all([
     // hasSome against the edition set, GIN-indexed. isbn13 stays in the OR so
@@ -695,7 +719,14 @@ function matchGoodreadsRow(row, { byIsbn, byTitle }) {
   // ISBN is an exact key — if it hits, nothing else needs checking.
   if (isbn && byIsbn.has(isbn)) return { ...base, status: 'isbn', auto: true, match: byIsbn.get(isbn) };
 
-  const candidates = byTitle.get(normalizeTitleForSearch(title)) || [];
+  // Most specific key first: the full title as shelved, then with the series
+  // suffix removed. The first key that hits anything wins, so stripping can
+  // only ever rescue a row that would otherwise have found nothing.
+  let candidates = [];
+  for (const key of goodreadsTitleKeys(title)) {
+    candidates = byTitle.get(key) || [];
+    if (candidates.length) break;
+  }
   if (!candidates.length) return { ...base, status: 'missing', auto: false };
 
   // Falling back to title, the author has to agree — a title alone is how
@@ -1100,5 +1131,5 @@ module.exports = router;
 module.exports._internals = {
   parseCsv, imdbTypeKey, IMDB_TITLE_TYPES, imdbRating, matchImdbRow,
   CSV_BODY, ok, csvsFrom, readCsvFiles, imdbConst, dedupeItems,
-  choiceOf, keepsEverything, updateDataFor, annotateExisting,
+  choiceOf, keepsEverything, updateDataFor, annotateExisting, goodreadsTitleKeys,
 };
