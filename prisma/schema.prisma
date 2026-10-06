@@ -357,11 +357,16 @@ model Review {
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   // Unique per user + media item + season (null season = overall)
-  // True when this was the first published review of its media item. Decided
-  // once, at the moment it is written, and never recomputed: being first is a
-  // fact about when someone showed up, and deleting a later review should not
-  // retroactively hand the credit to someone else.
+  // Two separate facts about when this review showed up, both decided once at
+  // write time and never recomputed: being early is a fact about when someone
+  // turned up, and deleting a later review should not retroactively hand the
+  // credit to somebody else.
+  //
+  // isFirstReview is the stronger claim and is kept distinct because "first
+  // review of this title" is worth saying on a card in a way that "one of the
+  // first ten" is not. isEarlyReview is what the Pathfinder badge counts.
   isFirstReview Boolean @default(false)
+  isEarlyReview Boolean @default(false)
 
   @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])

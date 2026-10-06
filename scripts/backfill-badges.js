@@ -25,7 +25,7 @@
 // Safe to re-run. Nothing is revoked and nothing is renumbered.
 
 const prisma = require('../src/lib/prisma');
-const { syncBadges, presentBadge, PIONEER_LIMIT } = require('../src/lib/badges');
+const { syncBadges, presentBadge, PIONEER_LIMIT, EARLY_REVIEW_LIMIT } = require('../src/lib/badges');
 
 const dryRun = process.argv.includes('--dry-run');
 
@@ -35,30 +35,42 @@ const dryRun = process.argv.includes('--dry-run');
   // ─── Pass 1: who was first on each title ─────────────────────────────────
   const published = await prisma.review.findMany({
     where: { isDraft: false, visibility: 'PUBLIC' },
-    select: { id: true, mediaItemId: true, userId: true, createdAt: true, isFirstReview: true },
+    select: { id: true, mediaItemId: true, userId: true, createdAt: true, isFirstReview: true, isEarlyReview: true },
     orderBy: { createdAt: 'asc' },
   });
 
-  const firstSeen = new Map();
+  // Position within each title's review list, oldest first. Two flags fall out
+  // of it: the very first review, and the first EARLY_REVIEW_LIMIT of them.
+  const seenPerTitle = new Map();
+  const toMarkFirst = [];
+  const toMarkEarly = [];
   for (const r of published) {
-    if (!firstSeen.has(r.mediaItemId)) firstSeen.set(r.mediaItemId, r);
+    const n = seenPerTitle.get(r.mediaItemId) || 0;
+    seenPerTitle.set(r.mediaItemId, n + 1);
+    if (n === 0 && !r.isFirstReview) toMarkFirst.push(r);
+    if (n < EARLY_REVIEW_LIMIT && !r.isEarlyReview) toMarkEarly.push(r);
   }
-  const toMark = [...firstSeen.values()].filter(r => !r.isFirstReview);
 
-  console.log(`Published public reviews: ${published.length} across ${firstSeen.size} titles`);
-  console.log(`First-review flags to set: ${toMark.length}`);
-  if (toMark.length && !dryRun) {
-    // Chunked rather than one statement per row — this is a few hundred rows
-    // today but runs against the same volume-constrained database that a
-    // 23,000-row update once filled.
-    for (let i = 0; i < toMark.length; i += 200) {
-      const chunk = toMark.slice(i, i + 200);
+  const deepest = Math.max(0, ...seenPerTitle.values());
+  console.log(`Published public reviews: ${published.length} across ${seenPerTitle.size} titles`);
+  console.log(`Most reviews on any one title: ${deepest}`);
+  console.log(`First-review flags to set: ${toMarkFirst.length}`);
+  console.log(`Early-review flags to set:  ${toMarkEarly.length}`);
+
+  // Chunked rather than one statement per row — a few hundred rows today, but
+  // this runs against the same volume-constrained database that a 23,000-row
+  // update once filled.
+  const markAll = async (rows, data) => {
+    for (let i = 0; i < rows.length; i += 200) {
       await prisma.review.updateMany({
-        where: { id: { in: chunk.map(r => r.id) } },
-        data: { isFirstReview: true },
+        where: { id: { in: rows.slice(i, i + 200).map(r => r.id) } },
+        data,
       });
     }
-    console.log(`  set on ${toMark.length} reviews`);
+  };
+  if (!dryRun) {
+    if (toMarkFirst.length) await markAll(toMarkFirst, { isFirstReview: true });
+    if (toMarkEarly.length) await markAll(toMarkEarly, { isEarlyReview: true });
   }
 
   // ─── Pass 2: user badges ─────────────────────────────────────────────────

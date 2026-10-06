@@ -20,9 +20,16 @@ const PIONEER_LIMIT = 100;
 // Tiered badges keep one row whose tier climbs, rather than one row per tier.
 const CRITIC_TIERS   = [10, 50, 100];
 const WORDSMITH_MIN  = 10;
-// Pathfinder is tiered rather than a single award because there are ~69,700
-// titles with no review at all: being first once is a nice accident, being
-// first a hundred times is the behaviour the catalogue actually needs.
+// How deep into a title's review list still counts as having turned up early.
+// Being the very first is still recorded separately (Review.isFirstReview) and
+// is worth saying on a card; this is the wider net the badge counts, so that
+// arriving second or seventh to an empty title is recognised rather than
+// treated the same as arriving hundredth.
+const EARLY_REVIEW_LIMIT = 10;
+
+// Tiered rather than a single award because there are ~69,700 titles with no
+// review at all: turning up early once is a nice accident, doing it a hundred
+// times is the behaviour the catalogue actually needs.
 const PATHFINDER_TIERS = [1, 25, 100];
 const MEDIA_TYPES    = ['MOVIE', 'TV_SHOW', 'BOOK', 'VIDEO_GAME'];
 
@@ -53,12 +60,12 @@ const BADGES = {
     blurb: t => {
       const n = PATHFINDER_TIERS[(t || 1) - 1];
       return n === 1
-        ? 'First to review something nobody had reviewed'
-        : `First to review ${n} titles nobody had reviewed`;
+        ? `Among the first ${EARLY_REVIEW_LIMIT} to review a title`
+        : `Among the first ${EARLY_REVIEW_LIMIT} to review ${n} different titles`;
     },
     earned: s => {
       let tier = 0;
-      PATHFINDER_TIERS.forEach((n, i) => { if (s.firstReviews >= n) tier = i + 1; });
+      PATHFINDER_TIERS.forEach((n, i) => { if (s.earlyReviews >= n) tier = i + 1; });
       return tier ? { tier } : null;
     },
   },
@@ -85,11 +92,12 @@ const BADGES = {
 async function statsFor(prisma, userId) {
   const visible = { userId, isDraft: false, visibility: 'PUBLIC' };
 
-  const [publishedReviews, writtenReviews, firstReviews, types] = await Promise.all([
+  const [publishedReviews, writtenReviews, earlyReviews, firstReviews, types] = await Promise.all([
     prisma.review.count({ where: visible }),
     prisma.review.count({ where: { ...visible, reviewText: { not: null } } }),
-    // Counted from the flag on the review rather than recomputed, so the
-    // account badge and the marker on the review can never disagree.
+    // Counted from the flags on the reviews rather than recomputed, so the
+    // account badge and the markers on the reviews can never disagree.
+    prisma.review.count({ where: { ...visible, isEarlyReview: true } }),
     prisma.review.count({ where: { ...visible, isFirstReview: true } }),
     prisma.review.findMany({
       where: visible,
@@ -101,6 +109,7 @@ async function statsFor(prisma, userId) {
   return {
     publishedReviews,
     writtenReviews,
+    earlyReviews,
     firstReviews,
     typesReviewed: new Set(types.map(r => r.mediaItem.mediaType)),
   };
@@ -181,6 +190,6 @@ function presentBadge(row) {
 }
 
 module.exports = {
-  BADGES, PIONEER_LIMIT, CRITIC_TIERS, WORDSMITH_MIN, PATHFINDER_TIERS,
+  BADGES, PIONEER_LIMIT, CRITIC_TIERS, WORDSMITH_MIN, PATHFINDER_TIERS, EARLY_REVIEW_LIMIT,
   statsFor, nextPioneerNumber, syncBadges, presentBadge,
 };

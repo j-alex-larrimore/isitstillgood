@@ -2,7 +2,7 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const prisma = require('../lib/prisma');
-const { syncBadges } = require('../lib/badges');
+const { syncBadges, EARLY_REVIEW_LIMIT } = require('../lib/badges');
 // Reads through `prisma` can't see drafts (see src/lib/prisma.js). This route
 // is the one place that legitimately needs to — an author saving over, reading
 // back, or publishing their own unpublished review.
@@ -179,12 +179,12 @@ router.post('/', requireAuth, [
     // yet, and a private one is not one anybody else can see. Their own prior
     // review is excluded so editing it does not make them compete with
     // themselves for the credit.
-    let isFirstReview = false;
-    if (existing && existing.isFirstReview) {
-      // Already earned. Never taken away by a later edit, a visibility change
-      // or saving over it as a draft.
-      isFirstReview = true;
-    } else if (!saveAsDraft && vis === 'PUBLIC') {
+    let isFirstReview = !!(existing && existing.isFirstReview);
+    let isEarlyReview = !!(existing && existing.isEarlyReview);
+
+    // Only worked out once. Already earned means already earned — never taken
+    // away by a later edit, a visibility change, or saving over it as a draft.
+    if (!isFirstReview && !isEarlyReview && !saveAsDraft && vis === 'PUBLIC') {
       const priorPublic = await prisma.review.count({
         where: {
           mediaItemId, isDraft: false, visibility: 'PUBLIC',
@@ -192,7 +192,10 @@ router.post('/', requireAuth, [
         },
       });
       isFirstReview = priorPublic === 0;
+      isEarlyReview = priorPublic < EARLY_REVIEW_LIMIT;
     }
+    // The stronger claim always implies the weaker one.
+    if (isFirstReview) isEarlyReview = true;
 
     let review;
     if (existing) {
