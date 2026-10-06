@@ -4,6 +4,7 @@ const { query } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { buildSeriesRepMap } = require('../lib/mediaHelpers');
+const { START_HERE } = require('../lib/startHere');
 
 // ─── GET /api/feed ─── Friend activity + timeframe support ──────────────
 // optionalAuth (not requireAuth) — logged-out visitors can load mode=all/
@@ -292,6 +293,49 @@ router.post('/notifications/read-all', requireAuth, async (req, res, next) => {
       data: { read: true },
     });
     res.json({ message: 'All notifications marked read' });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/feed/start-here ──────────────────────────────────────────────
+// Films picked to be argued about, for the homepage slot that used to hold
+// Trending. See src/lib/startHere.js for why the list is curated rather than
+// ranked.
+//
+// Trending could not do this job yet: the most-reviewed title in the whole
+// catalogue has three reviews, so a box claiming to show what is popular was
+// advertising the one thing the site does not have. This asks for an opinion
+// instead, which is something a brand-new visitor can actually supply.
+//
+// Deliberately unauthenticated — the visitor it exists for has no account.
+router.get('/start-here', async (req, res, next) => {
+  try {
+    const items = await prisma.mediaItem.findMany({
+      where: {
+        mediaType: 'MOVIE', verified: true, parentId: null,
+        OR: START_HERE.map(e => ({ title: e.title, releaseYear: e.year })),
+      },
+      select: {
+        id: true, title: true, slug: true, imageUrl: true,
+        releaseYear: true, mediaType: true,
+        // Only what an anonymous visitor could see anyway. A private or draft
+        // review is not this page's business to disclose the existence of.
+        _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
+      },
+    });
+
+    // Shuffled per request, so a returning visitor does not meet the same
+    // twenty in the same order and nothing at the back of the list is
+    // permanently buried.
+    for (let i = items.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [items[i], items[j]] = [items[j], items[i]];
+    }
+
+    res.json(items.slice(0, 20).map(m => ({
+      id: m.id, title: m.title, slug: m.slug, imageUrl: m.imageUrl,
+      releaseYear: m.releaseYear, mediaType: m.mediaType,
+      reviewCount: m._count.reviews,
+    })));
   } catch (err) { next(err); }
 });
 
