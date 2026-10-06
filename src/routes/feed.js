@@ -311,29 +311,55 @@ router.get('/start-here', async (req, res, next) => {
   try {
     const items = await prisma.mediaItem.findMany({
       where: {
-        mediaType: 'MOVIE', verified: true, parentId: null,
-        OR: START_HERE.map(e => ({ title: e.title, releaseYear: e.year })),
+        verified: true,
+        OR: START_HERE.map(e => ({
+          mediaType: e.type, title: e.title, releaseYear: e.year,
+          // A show's opinion belongs on the parent row — a season is a
+          // narrower argument. Books have no parent/child relation at all, so
+          // constraining them on it would match nothing.
+          ...(e.type === 'BOOK' ? {} : { parentId: null }),
+        })),
       },
       select: {
         id: true, title: true, slug: true, imageUrl: true,
-        releaseYear: true, mediaType: true,
+        releaseYear: true, mediaType: true, seriesName: true,
         // Only what an anonymous visitor could see anyway. A private or draft
         // review is not this page's business to disclose the existence of.
         _count: { select: { reviews: { where: { isDraft: false, visibility: 'PUBLIC' } } } },
       },
     });
 
-    // Shuffled per request, so a returning visitor does not meet the same
-    // twenty in the same order and nothing at the back of the list is
-    // permanently buried.
-    for (let i = items.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [items[i], items[j]] = [items[j], items[i]];
+    const shuffle = a => {
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    };
+
+    // Picked per type rather than from one pool. The list is 44 films, 24
+    // shows and a single book, so a straight shuffle would carry the book
+    // about a third of the time and under-represent television badly — and
+    // the whole point of including them is that this catalogue is not only
+    // films. Quotas are filled in order of scarcity and anything short is
+    // backfilled from what is left, so the slot is always full.
+    const QUOTA = [['BOOK', 1], ['TV_SHOW', 6], ['MOVIE', 13]];
+    const byType = new Map(QUOTA.map(([t]) => [t, shuffle(items.filter(m => m.mediaType === t))]));
+
+    const picked = [];
+    for (const [type, n] of QUOTA) picked.push(...byType.get(type).splice(0, n));
+    if (picked.length < 20) {
+      const rest = shuffle([...byType.values()].flat());
+      picked.push(...rest.slice(0, 20 - picked.length));
     }
 
-    res.json(items.slice(0, 20).map(m => ({
+    // Interleaved, so it reads as a mixed shelf rather than three blocks.
+    res.json(shuffle(picked).slice(0, 20).map(m => ({
       id: m.id, title: m.title, slug: m.slug, imageUrl: m.imageUrl,
       releaseYear: m.releaseYear, mediaType: m.mediaType,
+      // The frontend needs this to link a series book to its own page rather
+      // than to the series rollup — see the ?book=1 param on item.html.
+      inSeries: !!m.seriesName,
       reviewCount: m._count.reviews,
     })));
   } catch (err) { next(err); }
