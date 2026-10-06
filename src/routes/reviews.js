@@ -2,6 +2,7 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const prisma = require('../lib/prisma');
+const { syncBadges } = require('../lib/badges');
 // Reads through `prisma` can't see drafts (see src/lib/prisma.js). This route
 // is the one place that legitimately needs to — an author saving over, reading
 // back, or publishing their own unpublished review.
@@ -171,6 +172,28 @@ router.post('/', requireAuth, [
       });
     }
 
+    // Is this the first time anyone has publicly reviewed this item?
+    //
+    // Decided here, before the write, and only when the review is actually
+    // going to be visible — a draft is not a contribution to the catalogue
+    // yet, and a private one is not one anybody else can see. Their own prior
+    // review is excluded so editing it does not make them compete with
+    // themselves for the credit.
+    let isFirstReview = false;
+    if (existing && existing.isFirstReview) {
+      // Already earned. Never taken away by a later edit, a visibility change
+      // or saving over it as a draft.
+      isFirstReview = true;
+    } else if (!saveAsDraft && vis === 'PUBLIC') {
+      const priorPublic = await prisma.review.count({
+        where: {
+          mediaItemId, isDraft: false, visibility: 'PUBLIC',
+          NOT: { userId: req.user.id },
+        },
+      });
+      isFirstReview = priorPublic === 0;
+    }
+
     let review;
     if (existing) {
       // Only mark as revisit if the rating actually changed
@@ -192,6 +215,7 @@ router.post('/', requireAuth, [
           // changed my mind about something I'd already published".
           isRevisit: existing.isDraft ? false : (ratingChanged ? true : existing.isRevisit),
           previousRating: existing.isDraft ? null : (ratingChanged ? existing.rating : existing.previousRating),
+          isFirstReview,
         },
         include: reviewInclude,
       });
@@ -211,6 +235,7 @@ router.post('/', requireAuth, [
           dateConsumed: consumed,        // store when they consumed it
           reviewText, spoilerText, visibility: vis, verdict, isRevisit: false,
           isDraft: saveAsDraft,
+          isFirstReview,
         },
         include: reviewInclude,
       });
@@ -220,7 +245,15 @@ router.post('/', requireAuth, [
       }
     }
 
-    res.status(existing ? 200 : 201).json(review);
+    // Badges are recognition, not bookkeeping: a failure here must never cost
+    // someone the review they just wrote, so it is awaited (the response should
+    // reflect what they earned) but never allowed to reject.
+    const earned = await syncBadges(prisma, req.user.id).catch(err => {
+      console.error('badge sync failed', err);
+      return [];
+    });
+
+    res.status(existing ? 200 : 201).json(earned.length ? { ...review, earnedBadges: earned } : review);
   } catch (err) { next(err); }
 });
 

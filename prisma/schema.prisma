@@ -259,6 +259,7 @@ model User {
   receivedListShares ListShare[] @relation("ListShareRecipient")
   emailVerificationTokens EmailVerificationToken[]
   pendingImports  PendingImport[]
+  badges          UserBadge[]
 
   // ─── Where this account came from ──────────────────────────────────────
   // Captured first-touch in the browser by analytics.js and sent once, right
@@ -356,6 +357,12 @@ model Review {
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   // Unique per user + media item + season (null season = overall)
+  // True when this was the first published review of its media item. Decided
+  // once, at the moment it is written, and never recomputed: being first is a
+  // fact about when someone showed up, and deleting a later review should not
+  // retroactively hand the credit to someone else.
+  isFirstReview Boolean @default(false)
+
   @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])
   @@index([mediaItemId])
@@ -601,4 +608,35 @@ model PendingImport {
   @@unique([userId, source, externalKey])
   @@index([status, lastTriedAt])
   @@index([userId, status])
+}
+
+// ─── Badges ──────────────────────────────────────────────────────────────────
+//
+// Recognition for the people writing reviews before there is any reason to.
+// A catalogue of 70,719 titles carrying 1,064 reviews does not look like a
+// quiet room to a new visitor, it looks like an empty one — and the people
+// fixing that are doing it with nothing in return. This is the something.
+//
+// Definitions, thresholds and labels live in src/lib/badges.js, not here: a
+// badge is a product decision that will be tuned often, and nothing about
+// adding one should require a migration. This table only records that a given
+// user has earned a given code.
+model UserBadge {
+  id       String   @id @default(cuid())
+  userId   String
+  // Matches a key in src/lib/badges.js. Stored as a string rather than an enum
+  // precisely so a new badge is a code change and not a schema change.
+  code     String
+  // For tiered badges (Critic I/II/III) the row is updated in place rather
+  // than duplicated, so a user has one Critic badge whose tier climbs.
+  tier     Int?
+  // Pioneer is numbered — #7 means something #92 does not, and the number has
+  // to survive even if an earlier pioneer later deletes their reviews.
+  number   Int?
+  earnedAt DateTime @default(now())
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, code])
+  @@index([userId])
+  @@index([code])
 }
