@@ -664,6 +664,9 @@ router.post('/letterboxd/commit', requireAuth, [
         await prisma.review.create({
           data: {
             userId: req.user.id, mediaItemId: item.mediaItemId,
+            // Not an event — see Review.isImported. Set on create only, so an
+            // import that updates a hand-written review leaves it visible.
+            isImported: true,
             rating, verdict, dateConsumed, visibility: vis, reviewText,
             seasonNumber: null, isRevisit: false, isDraft: false,
           },
@@ -931,6 +934,9 @@ router.post('/goodreads/commit', requireAuth, [
         await prisma.review.create({
           data: {
             userId: req.user.id, mediaItemId: item.mediaItemId,
+            // Not an event — see Review.isImported. Set on create only, so an
+            // import that updates a hand-written review leaves it visible.
+            isImported: true,
             rating, verdict, dateConsumed, visibility: vis, reviewText,
             seasonNumber: null, isRevisit: false, isDraft: false,
           },
@@ -1208,6 +1214,9 @@ router.post('/imdb/commit', requireAuth, [
         await prisma.review.create({
           data: {
             userId: req.user.id, mediaItemId: item.mediaItemId,
+            // Not an event — see Review.isImported. Set on create only, so an
+            // import that updates a hand-written review leaves it visible.
+            isImported: true,
             rating, verdict, dateConsumed, visibility: vis,
             seasonNumber: null, isRevisit: false, isDraft: false,
           },

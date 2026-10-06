@@ -86,6 +86,15 @@ router.get('/', optionalAuth, [
         ...(req.query.mediaType && { mediaType: req.query.mediaType }),
       },
       ...(since && { updatedAt: { gte: since } }),
+      // Imports are not activity. Somebody moving ten years of Letterboxd
+      // history across did not watch 900 films this afternoon, and a feed
+      // saying they did buries every other person's actual review — which is
+      // the whole reason this route exists.
+      //
+      // Only the feed hides them. They still count toward a title's rating,
+      // still appear on the author's profile and on the item page, and still
+      // earn badges: the opinion is real, the broadcast is not.
+      isImported: false,
     };
 
     // Sort by most recently created or edited — edits always bubble to the top

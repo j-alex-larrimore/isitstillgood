@@ -368,6 +368,19 @@ model Review {
   isFirstReview Boolean @default(false)
   isEarlyReview Boolean @default(false)
 
+  // Written by an importer rather than typed here. The opinion is just as
+  // real — it counts toward ratings, badges, the profile and the taste
+  // profile — but it is not an *event*. Somebody transferring ten years of
+  // Letterboxd history did not watch 900 films this afternoon, and a feed
+  // that says they did buries everyone else.
+  //
+  // src/routes/imports.js already refuses to notify friends about these, for
+  // exactly this reason ("an import is one event about a person, not N events
+  // about N films"); the feed simply never applied the same rule. Set on
+  // creation only — an import that updates a review somebody wrote by hand
+  // must not retroactively hide their own writing from the feed.
+  isImported    Boolean @default(false)
+
   @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])
   @@index([mediaItemId])
