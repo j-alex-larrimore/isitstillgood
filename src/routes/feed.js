@@ -5,6 +5,7 @@ const prisma = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { buildSeriesRepMap } = require('../lib/mediaHelpers');
 const { START_HERE } = require('../lib/startHere');
+const { PIONEER_LIMIT } = require('../lib/badges');
 
 // ─── GET /api/feed ─── Friend activity + timeframe support ──────────────
 // optionalAuth (not requireAuth) — logged-out visitors can load mode=all/
@@ -362,6 +363,23 @@ router.get('/start-here', async (req, res, next) => {
       inSeries: !!m.seriesName,
       reviewCount: m._count.reviews,
     })));
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/feed/badge-stats ─────────────────────────────────────────────
+// Public, tiny, and for the logged-out landing page: how many Pioneer places
+// are left. Scarcity only works as an invitation if the number is real and
+// visible before signing up, so this is deliberately unauthenticated.
+router.get('/badge-stats', async (req, res, next) => {
+  try {
+    const claimed = await prisma.userBadge.count({ where: { code: 'PIONEER' } });
+    res.json({
+      pioneer: {
+        limit: PIONEER_LIMIT,
+        claimed,
+        remaining: Math.max(0, PIONEER_LIMIT - claimed),
+      },
+    });
   } catch (err) { next(err); }
 });
 

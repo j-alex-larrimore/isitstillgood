@@ -189,7 +189,56 @@ function presentBadge(row) {
   };
 }
 
+// What someone is closest to earning next.
+//
+// This exists because the badge itself is the smaller half of the motivation:
+// "4 more reviews to Critic I" is a reason to write tonight in a way that a
+// badge already earned is not. Returned only for the person it belongs to —
+// nobody else needs to see how close a stranger is to something.
+//
+// Ordered by how close it is, so the page can show the nearest target first
+// without knowing anything about the rules here.
+function progressFor(stats, held) {
+  const heldBy = new Map((held || []).map(b => [b.code, b]));
+  const out = [];
+
+  const tiered = (code, tiers, have, unit) => {
+    const tier = heldBy.get(code)?.tier || 0;
+    if (tier >= tiers.length) return;                 // nothing left to earn
+    const need = tiers[tier];
+    out.push({
+      code,
+      label: `${BADGES[code].label} ${['', 'I', 'II', 'III', 'IV', 'V'][tier + 1]}`,
+      have, need, remaining: Math.max(0, need - have), unit,
+    });
+  };
+
+  tiered('CRITIC', CRITIC_TIERS, stats.publishedReviews, 'review');
+  tiered('PATHFINDER', PATHFINDER_TIERS, stats.earlyReviews, 'early review');
+
+  if (!heldBy.has('WORDSMITH')) {
+    out.push({
+      code: 'WORDSMITH', label: 'Wordsmith',
+      have: stats.writtenReviews, need: WORDSMITH_MIN,
+      remaining: Math.max(0, WORDSMITH_MIN - stats.writtenReviews),
+      unit: 'written review',
+    });
+  }
+
+  if (!heldBy.has('OMNIVORE')) {
+    const missing = MEDIA_TYPES.filter(t => !stats.typesReviewed.has(t));
+    out.push({
+      code: 'OMNIVORE', label: 'Omnivore',
+      have: MEDIA_TYPES.length - missing.length, need: MEDIA_TYPES.length,
+      remaining: missing.length, unit: 'media type',
+      missingTypes: missing,
+    });
+  }
+
+  return out.sort((a, b) => a.remaining - b.remaining);
+}
+
 module.exports = {
   BADGES, PIONEER_LIMIT, CRITIC_TIERS, WORDSMITH_MIN, PATHFINDER_TIERS, EARLY_REVIEW_LIMIT,
-  statsFor, nextPioneerNumber, syncBadges, presentBadge,
+  statsFor, nextPioneerNumber, syncBadges, presentBadge, progressFor,
 };

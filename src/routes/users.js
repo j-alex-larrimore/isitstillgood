@@ -4,6 +4,7 @@ const { body, param, query, validationResult } = require('express-validator');
 const prisma  = require('../lib/prisma');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { pickSeriesRepresentative, buildSeriesRepMap } = require('../lib/mediaHelpers');
+const { presentBadge, progressFor, statsFor } = require('../lib/badges');
 
 function ok(req, res) {
   const e = validationResult(req);
@@ -283,7 +284,22 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
     });
     const ratingCounts = Object.fromEntries(ratingGroups.map(g => [g.rating, g._count.rating]));
 
+    // Badges, and — for the owner only — what they are closest to earning.
+    // Nobody else needs to see how near a stranger is to something; shown to
+    // the owner because "4 more reviews to Critic I" is the half of this that
+    // actually gets a review written tonight.
+    const badgeRows = await prisma.userBadge.findMany({
+      where: { userId: target.id },
+      orderBy: { earnedAt: 'asc' },
+    });
+    const badges = badgeRows.map(presentBadge).filter(Boolean);
+    const badgeProgress = isSelf
+      ? progressFor(await statsFor(prisma, target.id), badgeRows)
+      : undefined;
+
     res.json({
+      badges,
+      badgeProgress,
       user: {
         ...target,
         email: isSelf ? target.email : undefined,
