@@ -2,7 +2,7 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const prisma = require('../lib/prisma');
-const { syncBadges, EARLY_REVIEW_LIMIT } = require('../lib/badges');
+const { syncBadges, presentBadge, EARLY_REVIEW_LIMIT } = require('../lib/badges');
 // Reads through `prisma` can't see drafts (see src/lib/prisma.js). This route
 // is the one place that legitimately needs to — an author saving over, reading
 // back, or publishing their own unpublished review.
@@ -256,7 +256,18 @@ router.post('/', requireAuth, [
       return [];
     });
 
-    res.status(existing ? 200 : 201).json(earned.length ? { ...review, earnedBadges: earned } : review);
+    // Returned ready to display — label, blurb and all. The page celebrating
+    // this should not have to re-derive "Pathfinder II" from a code and a
+    // tier, because then the rules would live in two places and drift.
+    let earnedBadges;
+    if (earned.length) {
+      const rows = await prisma.userBadge.findMany({
+        where: { userId: req.user.id, code: { in: earned.map(e => e.code) } },
+      });
+      earnedBadges = rows.map(presentBadge).filter(Boolean);
+    }
+
+    res.status(existing ? 200 : 201).json(earnedBadges?.length ? { ...review, earnedBadges } : review);
   } catch (err) { next(err); }
 });
 
