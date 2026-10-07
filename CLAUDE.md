@@ -5,6 +5,34 @@ Backend for isitstillgood.com — a social review site combining Goodreads
 activity feed. This repo is the API only; the frontend is static HTML hosted
 separately on DreamHost and is not version-controlled here.
 
+## What the product actually is
+
+The name is a name. "Is it still good?" — whether something holds up over
+time — is **not** the main draw, and copy that leads on it is selling the
+wrong thing. The draw is these five, roughly in order:
+
+1. **All four media types in one place.** Films, TV, books and games under
+   one profile and one taste graph. Letterboxd does films, Goodreads does
+   books; nothing does the lot. This is the differentiator most worth
+   leading on, and the thing `Omnivore` (see `src/lib/badges.js`) exists to
+   encourage.
+2. **Reviews among friends**, not a public firehose. The feed is built
+   around people you have actually added.
+3. **Only positive interactions, by design.** Upvotes and private messages
+   — there are no downvotes and no public comment threads. This is a
+   deliberate product stance, not a missing feature: do not add public
+   commenting or any negative-signal reaction without asking first.
+4. **Heavy stat tracking.** Taste profiles, favourite actor/director/author
+   /decade, rating distributions, verdict breakdowns.
+5. **Shareable cards** summarising a user's ratings — the stat work made
+   into something a person wants to post.
+
+The cards are the hook in practice. The Reddit ads lead with them (the
+"Damon vs Affleck" comparison card is the one that catches the eye), so the
+thing bringing people to the site is a personalised stat card — which means
+the landing page needs to deliver on cards and stats, not on friends or on
+whether a film holds up.
+
 ## Stack
 
 - Node.js 20, Express 5
