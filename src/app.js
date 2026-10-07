@@ -95,6 +95,9 @@ app.use('/api/messages',  require('./routes/messages'));
 app.use('/sitemap.xml',    require('./routes/sitemap'));
 app.use('/render',         require('./routes/prerender'));
 app.use('/api/feed',    require('./routes/feed'));
+// First-party record of arrivals. Unauthenticated and rate-limited; stores
+// nothing that identifies a person — see src/routes/visits.js.
+app.use('/api/visits',  require('./routes/visits'));
 app.use('/api/lists',   require('./routes/lists'));
 app.use('/api/admin',   require('./routes/admin'));
 app.use('/api/requests',require('./routes/requests'));

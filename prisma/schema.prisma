@@ -688,3 +688,50 @@ model ImportEvent {
   @@index([userId])
   @@index([createdAt])
 }
+
+// ─── Who actually showed up ──────────────────────────────────────────────────
+//
+// 311 ad clicks produced no signups and no way to find out why: attribution is
+// only written when somebody registers, so a visitor who leaves is invisible.
+// The only other source was the ad platform's own numbers, which is exactly the
+// thing that needed checking.
+//
+// Deliberately stores nothing that identifies a person:
+//
+//   no IP address        not stored, not hashed, not derived from
+//   no user agent        only a coarse device bucket and a bot flag
+//   no full referrer     only the host, so "google.com" not the query someone
+//                        searched for
+//   no account link      a signed-in visitor is recorded exactly like anyone
+//                        else; this answers "how many people", never "which
+//                        person"
+//
+// sessionId is a random value the browser generates per tab and forgets when
+// the tab closes. It exists only to tell six pages viewed by one person from
+// six people viewing one page each, and it is omitted entirely when the
+// visitor has not consented to storage — those rows still count as views.
+model VisitLog {
+  id           String   @id @default(cuid())
+  path         String
+  // Campaign parameters exactly as the URL carried them.
+  source       String?
+  medium       String?
+  campaign     String?
+  content      String?
+  // The ad networks' click identifiers. Kept because counting distinct values
+  // is the only honest way to check a platform's click number against arrivals
+  // — it identifies a click, not a person.
+  clickId      String?
+  clickNetwork String?  // reddit | meta
+  referrerHost String?
+  country      String?  // two-letter, from Cloudflare's edge header
+  device       String?  // mobile | tablet | desktop
+  bot          Boolean  @default(false)
+  sessionId    String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([source])
+  @@index([sessionId])
+  @@index([bot, createdAt])
+}
