@@ -207,3 +207,40 @@ Three ways, all going through the same lookup/normalization logic
   this helper too, not raw Prisma calls.
 - Slugs are generated once via `slugify` + `uniqueSlug` and never
   regenerated on update — treat existing slugs as stable IDs for URLs.
+
+## Checking a layout
+
+The frontend is static HTML in the separate, un-versioned folder; there is no
+build and no test suite, so layout is only ever as correct as the last time
+somebody looked at it. Two habits catch nearly everything.
+
+**Check every state a component has, not just the one it loads in.** Expanded
+and collapsed, empty and full, one item and twenty, signed in and signed out.
+A taste card shipped looking fine and ran 280px off the side of a phone the
+moment it was expanded — collapsed it was 161px wide, expanded its contents
+needed 305px. Testing it collapsed proved nothing, twice.
+
+**Check at phone width, with real data.** 375px is the common case; 360px and
+320px still exist. Real data is the point: seeded or sample content is short
+and tidy, and the thing that breaks a layout is a title nobody expected to be
+that long.
+
+Two failure modes worth knowing, because both have already happened here:
+
+- **Grid blowout.** `grid-template-columns: 1fr` means `minmax(auto, 1fr)`,
+  and `auto` will not shrink an item below its min-content width. One wide
+  item therefore widens its own track and pushes the rest off screen — the
+  card above went from `1fr 1fr` to an actual `313.5px 307px` inside a 335px
+  box. Use `minmax(0, 1fr)` on the tracks and `min-width: 0` on the items.
+  Child elements already having `text-overflow: ellipsis` does not help; they
+  never get the chance, because the container is what overflowed.
+- **Hiding with transforms.** Hiding something with `translateY(140%)` depends
+  on its own height, so it stops working when the content changes size. The
+  badge popup parked itself flush against the bottom of every page this way,
+  showing an unclosable sliver. Hide with `opacity` / `visibility` /
+  `pointer-events`, which cannot drift.
+
+And when a fix appears to do nothing, check the rule actually wins: a later
+rule at equal specificity beats an earlier one, so a new `@media` block added
+near the top of the file is silently overridden by an existing one further
+down.
