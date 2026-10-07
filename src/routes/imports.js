@@ -687,6 +687,17 @@ router.post('/letterboxd/commit', requireAuth, [
       userId: req.user.id, source: 'LETTERBOXD', mediaType: 'MOVIE', visibility: vis,
     });
 
+    // One entry in the feed for the whole import, since the reviews
+    // themselves are hidden from it (Review.isImported). Recorded only
+    // when something actually landed — an import that changed nothing is
+    // not news. Best-effort: this is feed furniture, and failing to write
+    // it must not fail an import that already succeeded.
+    if (created || updated || pending) {
+      await prisma.importEvent.create({
+        data: { userId: req.user.id, source: 'LETTERBOXD', created, updated, pending },
+      }).catch(err => console.error('import event not recorded', err));
+    }
+
     res.status(201).json({ created, updated, skipped, kept, pending, total: created + updated });
   } catch (err) { next(err); }
 });
@@ -949,6 +960,17 @@ router.post('/goodreads/commit', requireAuth, [
     const pending = await savePendingImports(req.body.pending, {
       userId: req.user.id, source: 'GOODREADS', mediaType: 'BOOK', visibility: vis,
     });
+
+    // One entry in the feed for the whole import, since the reviews
+    // themselves are hidden from it (Review.isImported). Recorded only
+    // when something actually landed — an import that changed nothing is
+    // not news. Best-effort: this is feed furniture, and failing to write
+    // it must not fail an import that already succeeded.
+    if (created || updated || pending) {
+      await prisma.importEvent.create({
+        data: { userId: req.user.id, source: 'GOODREADS', created, updated, pending },
+      }).catch(err => console.error('import event not recorded', err));
+    }
 
     res.status(201).json({ created, updated, skipped, kept, pending, total: created + updated });
   } catch (err) { next(err); }
@@ -1229,6 +1251,17 @@ router.post('/imdb/commit', requireAuth, [
     const pending = await savePendingImports(req.body.pending, {
       userId: req.user.id, source: 'IMDB', mediaType: 'MOVIE', visibility: vis,
     });
+
+    // One entry in the feed for the whole import, since the reviews
+    // themselves are hidden from it (Review.isImported). Recorded only
+    // when something actually landed — an import that changed nothing is
+    // not news. Best-effort: this is feed furniture, and failing to write
+    // it must not fail an import that already succeeded.
+    if (created || updated || pending) {
+      await prisma.importEvent.create({
+        data: { userId: req.user.id, source: 'IMDB', created, updated, pending },
+      }).catch(err => console.error('import event not recorded', err));
+    }
 
     res.status(201).json({ created, updated, skipped, kept, pending, total: created + updated });
   } catch (err) { next(err); }

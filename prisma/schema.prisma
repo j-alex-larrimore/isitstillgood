@@ -260,6 +260,7 @@ model User {
   emailVerificationTokens EmailVerificationToken[]
   pendingImports  PendingImport[]
   badges          UserBadge[]
+  importEvents    ImportEvent[]
 
   // ─── Where this account came from ──────────────────────────────────────
   // Captured first-touch in the browser by analytics.js and sent once, right
@@ -657,4 +658,33 @@ model UserBadge {
   @@unique([userId, code])
   @@index([userId])
   @@index([code])
+}
+
+// ─── An import, as one thing that happened ───────────────────────────────────
+//
+// The counterpart to Review.isImported. Hiding 900 imported ratings from the
+// feed stops them burying everyone else, but it also means somebody who just
+// brought a decade of history across appears to have done nothing at all.
+// This is the one entry that says they did.
+//
+// Recorded as its own event rather than derived from the reviews, because the
+// reviews cannot answer it: there is no column saying which import a row came
+// from, and inferring it from timestamps is the guesswork that
+// scripts/mark-imported-reviews.js has to do for old data precisely because
+// this did not exist.
+model ImportEvent {
+  id        String       @id @default(cuid())
+  userId    String
+  source    ImportSource
+  // Split, because they are different claims: `created` is new opinions,
+  // `updated` is ones already here that the import changed, and `pending` is
+  // ratings held for titles the catalogue does not have yet.
+  created   Int          @default(0)
+  updated   Int          @default(0)
+  pending   Int          @default(0)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime     @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
 }

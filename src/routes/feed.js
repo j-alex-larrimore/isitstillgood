@@ -202,9 +202,71 @@ router.get('/', optionalAuth, [
     // Get admin timeframe setting for client
     const setting = await prisma.adminSetting.findUnique({ where: { key: 'feedTimeframeDays' } });
 
+    // ── Import entries ───────────────────────────────────────────────────
+    // The reviews from an import are hidden (Review.isImported), so without
+    // this somebody who just moved a decade of history across would appear to
+    // have done nothing. One entry says what happened.
+    //
+    // Slotted into the page whose time window contains it, rather than always
+    // pinned to the top: page 1 takes everything newer than its newest review,
+    // the last page everything older than its oldest, and each middle page the
+    // span between. That way an event belongs to exactly one page and
+    // "load more" can neither duplicate nor skip it.
+    const pages = Math.ceil(total / take);
+    const newest = enriched[0]?.updatedAt;
+    const oldest = enriched[enriched.length - 1]?.updatedAt;
+    const window = {};
+    if (page > 1 && newest) window.lte = newest;
+    if (page < pages && oldest) window.gte = oldest;
+
+    // Same visibility rules as the reviews themselves: in Friends mode only
+    // friends, otherwise only people whose profile the viewer could open.
+    const eventAuthor = authorIds
+      ? { userId: { in: authorIds } }
+      : {
+          OR: [
+            { user: { profilePublic: true } },
+            ...(req.user ? [{ userId: req.user.id }, { userId: { in: friendIds } }] : []),
+          ],
+        };
+
+    // One createdAt filter, not two spread over each other — the page window
+    // and the timeframe are both lower bounds, so the tighter of the two wins
+    // rather than the later spread silently replacing the earlier.
+    const createdAt = { ...window };
+    if (since && (!createdAt.gte || since > createdAt.gte)) createdAt.gte = since;
+
+    const events = await prisma.importEvent.findMany({
+      where: {
+        ...eventAuthor,
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
+      },
+      include: { user: { select: { id: true, username: true, displayName: true, avatarUrl: true, avatarEmoji: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+
+    // Merged by time so the feed reads chronologically. `kind` is what the
+    // client branches on — a review has no kind, which keeps every existing
+    // caller working untouched.
+    const items = [
+      ...enriched,
+      ...events.map(e => ({
+        kind: 'import',
+        id: `import-${e.id}`,
+        user: e.user,
+        source: e.source,
+        created: e.created,
+        updated: e.updated,
+        pending: e.pending,
+        createdAt: e.createdAt,
+        updatedAt: e.createdAt,
+      })),
+    ].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
     res.json({
-      reviews: enriched, total, page,
-      pages: Math.ceil(total / take),
+      reviews: items, total, page,
+      pages,
       friendCount: friendIds.length,
       adminTimeframeDays: setting ? parseInt(setting.value) : null,
     });
