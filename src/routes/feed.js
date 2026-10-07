@@ -415,18 +415,28 @@ router.get('/start-here', async (req, res, next) => {
     // the whole point of including them is that this catalogue is not only
     // films. Quotas are filled in order of scarcity and anything short is
     // backfilled from what is left, so the slot is always full.
-    const QUOTA = [['BOOK', 1], ['TV_SHOW', 6], ['MOVIE', 13]];
+    // Six, not twenty. At twenty this card rendered 1,347px tall on a phone —
+    // more than a screen and a half of things to go and do, stacked between an
+    // arriving visitor and the first real review on the page. The list is
+    // shuffled per request, so a short one still varies between visits.
+    const QUOTA = [['BOOK', 1], ['TV_SHOW', 2], ['MOVIE', 3]];
     const byType = new Map(QUOTA.map(([t]) => [t, shuffle(items.filter(m => m.mediaType === t))]));
+
+    // One number, derived from the quota, so changing the size cannot leave
+    // the backfill padding to a different target and silently flattening the
+    // mix — which is exactly what happened when this said 20 and the quota
+    // said 6: the single book was padded out and then sliced away.
+    const WANT = QUOTA.reduce((a, [, n]) => a + n, 0);
 
     const picked = [];
     for (const [type, n] of QUOTA) picked.push(...byType.get(type).splice(0, n));
-    if (picked.length < 20) {
+    if (picked.length < WANT) {
       const rest = shuffle([...byType.values()].flat());
-      picked.push(...rest.slice(0, 20 - picked.length));
+      picked.push(...rest.slice(0, WANT - picked.length));
     }
 
     // Interleaved, so it reads as a mixed shelf rather than three blocks.
-    res.json(shuffle(picked).slice(0, 20).map(m => ({
+    res.json(shuffle(picked).slice(0, WANT).map(m => ({
       id: m.id, title: m.title, slug: m.slug, imageUrl: m.imageUrl,
       releaseYear: m.releaseYear, mediaType: m.mediaType,
       // The frontend needs this to link a series book to its own page rather
@@ -451,6 +461,80 @@ router.get('/badge-stats', async (req, res, next) => {
         remaining: Math.max(0, PIONEER_LIMIT - claimed),
       },
     });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/feed/sample-card ─────────────────────────────────────────────
+// A real taste card for the logged-out landing page.
+//
+// The ads lead with a shareable stat card (see CLAUDE.md) and the homepage
+// showed nothing of the kind — people were clicking a card and arriving at a
+// sign-up form. Cards are per-user and need an account, so this serves a real
+// one from a public profile as the worked example.
+//
+// Deliberately NOT /users/:username/taste-profile, which the page could call
+// directly: that response is 13.6 MB and takes ~1.4s, because it carries every
+// favourite with full item lists. Unacceptable anywhere, and indefensible as
+// the first thing a visitor on mobile data downloads. This returns about a
+// kilobyte.
+const SAMPLE_CARD_USER = 'rufiohhhhh';
+const SAMPLE_CARD_TTL  = 30 * 60 * 1000;
+// At least this many titles before a name is worth printing on a card. Below
+// it the "favourite actor" is whoever appeared twice in something rated 10,
+// which is noise dressed as insight.
+const SAMPLE_CARD_MIN_TITLES = 5;
+let sampleCardCache = { at: 0, data: null };
+
+router.get('/sample-card', async (req, res, next) => {
+  try {
+    if (sampleCardCache.data && Date.now() - sampleCardCache.at < SAMPLE_CARD_TTL) {
+      return res.json(sampleCardCache.data);
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { username: SAMPLE_CARD_USER },
+      select: { id: true, username: true, profilePublic: true, canceledAt: true },
+    });
+    // Never leak a profile that has since been made private or closed.
+    if (!user || user.canceledAt || !user.profilePublic) return res.status(404).json({ error: 'No sample available' });
+
+    const byType = await prisma.$queryRawUnsafe(`
+      SELECT m."mediaType", COUNT(*)::int n
+      FROM "Review" r JOIN "MediaItem" m ON m.id = r."mediaItemId"
+      WHERE r."userId" = $1 AND r."isDraft" = false AND r.visibility = 'PUBLIC'
+      GROUP BY 1`, user.id);
+
+    // The headline: the actor they rate highest across enough titles to mean
+    // something. One query rather than the whole taste profile.
+    const [top] = await prisma.$queryRawUnsafe(`
+      SELECT p.name, COUNT(DISTINCT m.id)::int AS titles, ROUND(AVG(r.rating)::numeric, 1)::float AS avg
+      FROM "Review" r
+      JOIN "MediaItem" m ON m.id = r."mediaItemId"
+      JOIN "_AppearedIn" a ON a."A" = m.id
+      JOIN "Person" p ON p.id = a."B"
+      WHERE r."userId" = $1 AND r."isDraft" = false AND r.visibility = 'PUBLIC'
+      GROUP BY p.id, p.name
+      HAVING COUNT(DISTINCT m.id) >= $2
+      ORDER BY AVG(r.rating) DESC, COUNT(DISTINCT m.id) DESC
+      LIMIT 1`, user.id, SAMPLE_CARD_MIN_TITLES);
+
+    const covers = top ? await prisma.$queryRawUnsafe(`
+      SELECT DISTINCT m."imageUrl", m.title
+      FROM "Review" r
+      JOIN "MediaItem" m ON m.id = r."mediaItemId"
+      JOIN "_AppearedIn" a ON a."A" = m.id
+      JOIN "Person" p ON p.id = a."B"
+      WHERE r."userId" = $1 AND p.name = $2 AND m."imageUrl" IS NOT NULL
+      LIMIT 3`, user.id, top.name) : [];
+
+    const data = {
+      username: user.username,
+      totalReviews: byType.reduce((a, r) => a + r.n, 0),
+      byType: Object.fromEntries(byType.map(r => [r.mediaType, r.n])),
+      highlight: top ? { kind: 'actor', name: top.name, titles: top.titles, avgRating: top.avg, covers } : null,
+    };
+    sampleCardCache = { at: Date.now(), data };
+    res.json(data);
   } catch (err) { next(err); }
 });
 
