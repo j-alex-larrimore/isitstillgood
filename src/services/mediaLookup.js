@@ -245,13 +245,18 @@ async function getWatchProvidersByRegion(id, mediaKind = 'movie', regions = ['US
   const data = await res.json();
   const mapProviders = list => (list || []).map(p => ({ id: p.provider_id, name: p.provider_name, logoPath: p.logo_path }));
 
+  // Every requested country gets an entry, empty or not.
+  //
+  // Skipping the ones TMDB has nothing for seemed tidier and was wrong: an
+  // item with no US availability then had no US key, and the page fell
+  // through to "we have never checked" and rendered nothing — losing the
+  // "not available to stream, rent or buy in the US" answer, which is a real
+  // answer and often the one someone is looking for. Whether the item was
+  // checked at all is what streamingUpdatedAt records; it is not this
+  // function's job to encode it by omission.
   const out = {};
   for (const region of regions) {
-    const r = data.results?.[region];
-    // Countries TMDB knows nothing about for this title are left out rather
-    // than stored empty, so "no entry" and "checked, nothing available" stay
-    // distinguishable.
-    if (!r) continue;
+    const r = data.results?.[region] || {};
     out[region] = {
       link: r.link || null,
       flatrate: mapProviders(r.flatrate),
