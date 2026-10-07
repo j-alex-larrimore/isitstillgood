@@ -382,6 +382,24 @@ model Review {
   // must not retroactively hide their own writing from the feed.
   isImported    Boolean @default(false)
 
+  // Chosen by the reviewer, where isImported above is a fact about origin.
+  // Both keep a review out of the activity feed, but they are not the same
+  // thing and must not be merged: an import can later be unhidden and still
+  // be an import.
+  //
+  // This is NOT visibility. A PRIVATE review is hidden from everyone
+  // everywhere. A hidden one is fully public — it still counts toward the
+  // title's score and still appears on the title's own page — it just is not
+  // broadcast. The case is reviewing something obscure, or something bad,
+  // without pushing it at every friend you have.
+  hiddenFromFeed    Boolean @default(false)
+  // Goes further: also kept off the author's public profile list. Still on
+  // the title's page, still counted. Implies hiddenFromFeed — the API
+  // enforces that, since being absent from a profile but present in the feed
+  // would be incoherent. The owner always sees their own, marked as hidden,
+  // or they could never find it again to change it back.
+  hiddenFromProfile Boolean @default(false)
+
   @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])
   @@index([mediaItemId])

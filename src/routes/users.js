@@ -83,6 +83,10 @@ router.get('/:username/reviews', optionalAuth, [
     const where = {
       userId: target.id,
       visibility: visibilityFilter,
+      // Same rule as the profile page itself: a review the author kept off
+      // their profile is hidden from everyone but them. It still counts
+      // toward the title's score and still appears on that title's page.
+      ...(isSelf ? {} : { hiddenFromProfile: false }),
       ...(req.query.rating && { rating: parseInt(req.query.rating) }),
       ...(typeFilter && { mediaItem: { is: { mediaType: typeFilter } } }),
       // seasonNumber: 0 is the book-series sentinel — passed explicitly by
@@ -220,6 +224,11 @@ router.get('/:username', optionalAuth, async (req, res, next) => {
         userId: target.id,
         // Self can see all; others only see public/friends reviews
         visibility: isSelf ? undefined : { in: ['PUBLIC', 'FRIENDS_ONLY'] },
+        // A review the author chose to keep off their profile. Still public,
+        // still counted, still on the title's own page — just not part of the
+        // list they present as theirs. The owner always sees it, flagged, or
+        // they could never find it again to change their mind.
+        ...(isSelf ? {} : { hiddenFromProfile: false }),
       },
       include: {
         mediaItem: {

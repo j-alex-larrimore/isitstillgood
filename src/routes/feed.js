@@ -95,6 +95,9 @@ router.get('/', optionalAuth, [
       // still appear on the author's profile and on the item page, and still
       // earn badges: the opinion is real, the broadcast is not.
       isImported: false,
+      // Chosen by the reviewer: reviewed, counted, on the title's page, but
+      // deliberately not broadcast. See Review.hiddenFromFeed.
+      hiddenFromFeed: false,
     };
 
     // Sort by most recently created or edited — edits always bubble to the top

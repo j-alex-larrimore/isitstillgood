@@ -109,6 +109,12 @@ router.post('/', requireAuth, [
   body('visibility').optional().isIn(['PUBLIC', 'FRIENDS_ONLY', 'PRIVATE']),
   body('isRevisit').optional().isBoolean(),
   body('isDraft').optional().isBoolean(),
+  // Keep this review out of the activity feed. Not the same as visibility:
+  // it stays public, still counts toward the title's score and still appears
+  // on the title's own page — it is simply not broadcast.
+  body('hiddenFromFeed').optional().isBoolean(),
+  // Also keep it off the author's public profile list.
+  body('hiddenFromProfile').optional().isBoolean(),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
   const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit, isDraft } = req.body;
@@ -179,6 +185,16 @@ router.post('/', requireAuth, [
     // yet, and a private one is not one anybody else can see. Their own prior
     // review is excluded so editing it does not make them compete with
     // themselves for the credit.
+    // hiddenFromProfile implies hiddenFromFeed — absent from a profile but
+    // present in the feed would be incoherent, so the stronger choice wins
+    // rather than the client being trusted to send both.
+    const hiddenFromProfile = req.body.hiddenFromProfile === undefined
+      ? (existing ? existing.hiddenFromProfile : false)
+      : !!req.body.hiddenFromProfile;
+    const hiddenFromFeed = hiddenFromProfile || (req.body.hiddenFromFeed === undefined
+      ? (existing ? existing.hiddenFromFeed : false)
+      : !!req.body.hiddenFromFeed);
+
     let isFirstReview = !!(existing && existing.isFirstReview);
     let isEarlyReview = !!(existing && existing.isEarlyReview);
 
@@ -219,6 +235,7 @@ router.post('/', requireAuth, [
           isRevisit: existing.isDraft ? false : (ratingChanged ? true : existing.isRevisit),
           previousRating: existing.isDraft ? null : (ratingChanged ? existing.rating : existing.previousRating),
           isFirstReview,
+          hiddenFromFeed, hiddenFromProfile,
         },
         include: reviewInclude,
       });
@@ -239,6 +256,7 @@ router.post('/', requireAuth, [
           reviewText, spoilerText, visibility: vis, verdict, isRevisit: false,
           isDraft: saveAsDraft,
           isFirstReview,
+          hiddenFromFeed, hiddenFromProfile,
         },
         include: reviewInclude,
       });
