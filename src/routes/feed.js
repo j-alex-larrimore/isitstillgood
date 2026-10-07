@@ -485,7 +485,14 @@ const SAMPLE_CARD_TTL  = 30 * 60 * 1000;
 // At least this many titles before a name is worth printing on a card. Below
 // it the "favourite actor" is whoever appeared twice in something rated 10,
 // which is noise dressed as insight.
-const SAMPLE_CARD_MIN_TITLES = 5;
+//
+// Seven rather than five: at five the top slot went to somebody with exactly
+// five appearances and a high average, which is a coincidence rather than a
+// pattern. Seven also guarantees more than the five covers the card shows,
+// so the strip is never short.
+const SAMPLE_CARD_MIN_TITLES = 7;
+// Covers shown beside the headline name.
+const SAMPLE_CARD_COVERS = 5;
 let sampleCardCache = { at: 0, data: null };
 
 router.get('/sample-card', async (req, res, next) => {
@@ -528,7 +535,7 @@ router.get('/sample-card', async (req, res, next) => {
       JOIN "_AppearedIn" a ON a."A" = m.id
       JOIN "Person" p ON p.id = a."B"
       WHERE r."userId" = $1 AND p.name = $2 AND m."imageUrl" IS NOT NULL
-      LIMIT 3`, user.id, top.name) : [];
+      LIMIT $3`, user.id, top.name, SAMPLE_CARD_COVERS) : [];
 
     const data = {
       username: user.username,
