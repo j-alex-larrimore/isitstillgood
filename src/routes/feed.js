@@ -528,13 +528,30 @@ router.get('/sample-card', async (req, res, next) => {
       ORDER BY AVG(r.rating) DESC, COUNT(DISTINCT m.id) DESC
       LIMIT 1`, user.id, SAMPLE_CARD_MIN_TITLES);
 
+    // Highest-rated first. Without an ORDER BY this took whatever five rows
+    // Postgres happened to return, so the card showed an arbitrary handful
+    // rather than the top titles it implies — the one thing a reader checks.
+    //
+    // The isDraft/visibility filters match the two queries above. They were
+    // missing here, which both let a private or unpublished review put a
+    // cover on the public landing page and let the strip disagree with the
+    // average printed next to it.
+    //
+    // DISTINCT ON collapses a title that joins twice (a show and its seasons
+    // both credit the person) to its best-rated row before the final sort.
     const covers = top ? await prisma.$queryRawUnsafe(`
-      SELECT DISTINCT m."imageUrl", m.title
-      FROM "Review" r
-      JOIN "MediaItem" m ON m.id = r."mediaItemId"
-      JOIN "_AppearedIn" a ON a."A" = m.id
-      JOIN "Person" p ON p.id = a."B"
-      WHERE r."userId" = $1 AND p.name = $2 AND m."imageUrl" IS NOT NULL
+      SELECT "imageUrl", title, rating FROM (
+        SELECT DISTINCT ON (m.id) m.id, m."imageUrl", m.title, r.rating
+        FROM "Review" r
+        JOIN "MediaItem" m ON m.id = r."mediaItemId"
+        JOIN "_AppearedIn" a ON a."A" = m.id
+        JOIN "Person" p ON p.id = a."B"
+        WHERE r."userId" = $1 AND p.name = $2
+          AND m."imageUrl" IS NOT NULL
+          AND r."isDraft" = false AND r.visibility = 'PUBLIC'
+        ORDER BY m.id, r.rating DESC
+      ) t
+      ORDER BY rating DESC, title ASC
       LIMIT $3`, user.id, top.name, SAMPLE_CARD_COVERS) : [];
 
     const data = {
