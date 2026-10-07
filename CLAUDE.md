@@ -208,11 +208,52 @@ Three ways, all going through the same lookup/normalization logic
 - Slugs are generated once via `slugify` + `uniqueSlug` and never
   regenerated on update — treat existing slugs as stable IDs for URLs.
 
-## Checking a layout
+## Checking a frontend change
 
 The frontend is static HTML in the separate, un-versioned folder; there is no
-build and no test suite, so layout is only ever as correct as the last time
-somebody looked at it. Two habits catch nearly everything.
+build and no test suite, so a page is only ever as correct as the last time
+somebody loaded it. Nothing below is optional before handing over a file —
+every failure mode listed has already shipped to the live site at least once.
+
+### Load the page before handing it over
+
+Each page is one big inline `<script>`, so a single error anywhere in it kills
+*every* function on that page — rating, submitting, popups, all of it. The
+symptom is not "this feature misbehaves", it is "the page is dead". Treat any
+console error on load as a release blocker.
+
+To check a page without uploading it, serve the folder and open it:
+
+```bash
+python -m http.server 5500 --directory "C:\Users\jalex\Documents\Programming\isitstillgood"
+```
+
+Then load `http://127.0.0.1:5500/<page>.html` and read the console. Notes:
+
+- **CORS errors against `api.isitstillgood.com` are expected locally and are
+  the only acceptable errors.** Anything else — especially `SyntaxError` or
+  `ReferenceError` — is a real bug. Script-level errors fire before any fetch,
+  so they still show up despite the API being unreachable.
+- Pages need their real query params or they redirect to the landing page and
+  you end up checking the wrong file: `item.html?slug=…`,
+  `profile.html?username=…` (it is `username`, not `u`).
+- Confirm the script ran to the end, not just that the page rendered:
+  `typeof someFunctionDefinedNearTheBottom` should be `"function"`.
+- Port 5500, never 3000 — 3000 is the dev server. Stop it afterwards by its
+  exact PID (`Get-NetTCPConnection -LocalPort 5500`), never by matching on
+  process name.
+
+**Parsing the file is not sufficient**, and believing otherwise has already
+cost a round trip. `async` alone on a line followed by `function` on the next
+is *valid syntax* — ASI makes it the statement `async;` — and fails only at
+runtime with `async is not defined`. A parse check cleared that file. Loading
+it caught it immediately. Parse checks are a useful first pass for finding an
+unescaped apostrophe in a `'…'` string (another one that has shipped), but
+they are a pre-filter, not the test.
+
+### Check the layout
+
+Two further habits catch nearly everything.
 
 **Check every state a component has, not just the one it loads in.** Expanded
 and collapsed, empty and full, one item and twenty, signed in and signed out.
