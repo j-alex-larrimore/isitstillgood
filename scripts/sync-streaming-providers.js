@@ -6,12 +6,16 @@
 // Full-catalog sweep every run (~27,000+ items after the historical
 // backfill) — same shape as sync-new-seasons.js's full sweep, one
 // lightweight call per item, no way to ask TMDB for "just what changed".
-// US region only (see getWatchProviders in mediaLookup.js). TV seasons are
-// skipped — TMDB's watch/providers endpoint is show-level, not per-season,
-// so only parent rows (parentId: null) are queried.
+// Stores every country in src/lib/streamingRegions.js REGIONS, which costs
+// nothing extra: TMDB returns all countries in one response and the old code
+// kept only the US block, which is why the catalogue told Australian visitors
+// about American services. TV seasons are skipped — TMDB's watch/providers
+// endpoint is show-level, not per-season, so only parent rows (parentId: null)
+// are queried.
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { getWatchProviders } = require('../src/services/mediaLookup');
+const { getWatchProvidersByRegion } = require('../src/services/mediaLookup');
+const { REGIONS } = require('../src/lib/streamingRegions');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -53,12 +57,13 @@ async function main() {
   for (const item of items) {
     try {
       const mediaKind = item.mediaType === 'TV_SHOW' ? 'tv' : 'movie';
-      const providers = await getWatchProviders(item.tmdbId, mediaKind);
-      const hasAny = providers && (providers.flatrate.length || providers.rent.length || providers.buy.length);
+      const providers = await getWatchProvidersByRegion(item.tmdbId, mediaKind, REGIONS);
+      const hasAny = providers && Object.values(providers).some(
+        r => r.flatrate.length || r.rent.length || r.buy.length);
       if (hasAny) withProviders++;
 
       // providers is only ever null when the TMDB fetch itself failed (see
-      // getWatchProviders) — a successful check always writes a real
+      // getWatchProvidersByRegion) — a successful check always writes a real
       // object, even an empty one, so item.html can tell "checked, nothing
       // available" apart from "never checked".
       if (!dryRun && providers) {

@@ -231,6 +231,37 @@ async function getWatchProviders(id, mediaKind = 'movie', region = 'US', token =
   };
 }
 
+// Every requested country from the SAME response.
+//
+// TMDB returns data.results keyed by country — the whole world arrives in one
+// call, and getWatchProviders above throws all but one away. That was fine
+// while every visitor was American; it is why the catalogue held US-only
+// availability. Fetching four countries therefore costs exactly what fetching
+// one did: no extra calls, no extra quota, no slower sweep.
+async function getWatchProvidersByRegion(id, mediaKind = 'movie', regions = ['US'], token = process.env.TMDB_READ_ACCESS_TOKEN) {
+  if (!token) throw new Error('TMDB_READ_ACCESS_TOKEN not configured');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/${mediaKind}/${id}/watch/providers`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const mapProviders = list => (list || []).map(p => ({ id: p.provider_id, name: p.provider_name, logoPath: p.logo_path }));
+
+  const out = {};
+  for (const region of regions) {
+    const r = data.results?.[region];
+    // Countries TMDB knows nothing about for this title are left out rather
+    // than stored empty, so "no entry" and "checked, nothing available" stay
+    // distinguishable.
+    if (!r) continue;
+    out[region] = {
+      link: r.link || null,
+      flatrate: mapProviders(r.flatrate),
+      rent: mapProviders(r.rent),
+      buy: mapProviders(r.buy),
+    };
+  }
+  return out;
+}
+
 // ─── Google Books ──────────────────────────────────────────────────────────────
 async function searchGoogleBooks(q, author, year, apiKey = process.env.GOOGLE_BOOKS_API_KEY, langRestrict = null) {
   if (!apiKey) throw new Error('GOOGLE_BOOKS_API_KEY not configured');
@@ -680,4 +711,5 @@ module.exports = {
   getTvKeywords,
   getMovieKeywords,
   getWatchProviders,
+  getWatchProvidersByRegion,
 };

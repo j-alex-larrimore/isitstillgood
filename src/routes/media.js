@@ -3,6 +3,16 @@ const router = require('express').Router();
 const { query } = require('express-validator');
 const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
+const { providersFor, REGIONS } = require('../lib/streamingRegions');
+
+// Which country the "available on Netflix/Disney+/…" browse filter searches.
+// streamingProviders is keyed by country now, so this path has to name one.
+// US because that is where the catalogue's own curation points — new releases
+// are discovered from US studios and networks — so it is the region with the
+// most complete data to filter against. Per-viewer filtering would mean the
+// same filter returning different catalogues to different people, which is a
+// bigger change than this is.
+const PLATFORM_FILTER_REGION = 'US';
 // Reads through `prisma` hide drafts by design (see src/lib/prisma.js). The one
 // exception in this file is loading YOUR OWN review back into the form.
 const { prismaWithDrafts } = require('../lib/prisma');
@@ -565,7 +575,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       if (!names.length) return [];
       const rows = await prisma.$queryRaw`
         SELECT DISTINCT "MediaItem".id
-        FROM "MediaItem", jsonb_array_elements(COALESCE("streamingProviders"->'flatrate', '[]'::jsonb)) AS p
+        FROM "MediaItem", jsonb_array_elements(
+               COALESCE("streamingProviders"->${PLATFORM_FILTER_REGION}->'flatrate', '[]'::jsonb)) AS p
         WHERE p->>'name' ILIKE ANY(${names.map(n => `%${n}%`)})
       `;
       return rows.map(r => r.id);
@@ -1639,7 +1650,8 @@ router.get('/search-suggestions', async (req, res, next) => {
       ? Promise.resolve([])
       : prisma.$queryRaw`
           SELECT DISTINCT p->>'name' AS val
-          FROM "MediaItem", jsonb_array_elements(COALESCE("streamingProviders"->'flatrate', '[]'::jsonb)) AS p
+          FROM "MediaItem", jsonb_array_elements(
+                 COALESCE("streamingProviders"->${PLATFORM_FILTER_REGION}->'flatrate', '[]'::jsonb)) AS p
           WHERE p->>'name' ILIKE ${like} ${typeFilterSql}
           ORDER BY val LIMIT 5`;
 
@@ -2030,8 +2042,29 @@ router.get('/:slug', optionalAuth, async (req, res, next) => {
       ? []
       : await findRelatedItems(prisma, item, 8);
 
+    // Availability for the country the request came from, not whichever one
+    // happened to be fetched first. Cloudflare stamps cf-ipcountry at the
+    // edge — the same header geo.php reads — and providersFor falls back to
+    // US when we hold nothing for them, flagging it so the page can say which
+    // country it is describing rather than implying it is theirs.
+    const {
+      providers: regionProviders,
+      regionUsed: streamingRegion,
+      exact: streamingRegionExact,
+    } = providersFor(item.streamingProviders, req.get('cf-ipcountry'));
+
     res.json({
       ...item,
+      // Replaced with the single country's block, so item.html keeps reading
+      // the same shape it always has.
+      streamingProviders: regionProviders,
+      streamingRegion,
+      streamingRegionExact,
+      // What we actually hold, so the page can offer another country rather
+      // than pretending none exists.
+      streamingRegionsAvailable: item.streamingProviders && !Array.isArray(item.streamingProviders)
+        ? Object.keys(item.streamingProviders).filter(k => /^[A-Z]{2}$/.test(k))
+        : [],
       isTvParent,
       isBookSeries,
       isSeriesParent,

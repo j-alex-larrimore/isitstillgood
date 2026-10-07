@@ -4,6 +4,7 @@
 
 const express = require('express');
 const prisma  = require('../lib/prisma');
+const { providersFor } = require('../lib/streamingRegions');
 const { sortByCastOrder, findRelatedItems } = require('../lib/mediaHelpers');
 const router  = express.Router();
 
@@ -224,7 +225,11 @@ router.get('/item/:slug', async (req, res, next) => {
     // shown (see CLAUDE.md / item.html) — don't drop that attribution.
     let streamingHtml = '';
     let streamingSummary = '';
-    const sp = item.streamingProviders;
+    // streamingProviders is keyed by country now. Prerender output is for
+    // crawlers and link unfurls rather than a located visitor, so it states
+    // the US explicitly — which the copy below already does ("Streaming in
+    // the US on"), making it honest rather than merely a default.
+    const { providers: sp } = providersFor(item.streamingProviders, 'US');
     if ((item.mediaType === 'MOVIE' || item.mediaType === 'TV_SHOW') && sp) {
       const flatrate = sp.flatrate || [];
       const rentBuy = [...(sp.rent || []), ...(sp.buy || [])]
