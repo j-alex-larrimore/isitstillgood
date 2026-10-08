@@ -13,9 +13,13 @@ wrong thing. The draw is these five, roughly in order:
 
 1. **All four media types in one place.** Films, TV, books and games under
    one profile and one taste graph. Letterboxd does films, Goodreads does
-   books; nothing does the lot. This is the differentiator most worth
-   leading on, and the thing `Omnivore` (see `src/lib/badges.js`) exists to
-   encourage.
+   books. It is **not** true that nothing else does all four — Wecult,
+   JoyHob, Sequel, Yamtrack and the self-hosted MediaTracker all do, and
+   Listal has for years. The landing page claimed "the only site that
+   tracks all four" until October 2026; do not restate it, in copy or in
+   ads. The honest version is that keeping everything in one place is
+   useful, not unique. `Omnivore` (see `src/lib/badges.js`) exists to
+   encourage it.
 2. **Reviews among friends**, not a public firehose. The feed is built
    around people you have actually added.
 3. **Only positive interactions, by design.** Upvotes and private messages
