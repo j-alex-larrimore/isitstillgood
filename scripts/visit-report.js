@@ -96,10 +96,20 @@ const lpad = (s, n) => String(s).padStart(n);
   console.log(`   a large shortfall means you are paying for clicks that never arrive)`);
 
   const signups = await prisma.user.count({ where: { createdAt: { gte: since } } });
+  // Only an account whose attribution was captured inside the window can be
+  // explained by the visits above. One created in the window with nothing
+  // attached predates tracking, or arrived by some route this never saw —
+  // counting it as a conversion credits the ads with somebody else's signup,
+  // which this report read as "2 accounts, 1.29% of sessions" on a day when
+  // not one of the 144 ad arrivals registered.
+  const attributed = await prisma.user.count({
+    where: { createdAt: { gte: since }, attrCapturedAt: { gte: since } },
+  });
   console.log(`\n── Outcome ───────────────────────────────────────────────────`);
-  console.log(`  accounts created      ${signups}`);
-  console.log(`  of human page views   ${pct(signups, human)}`);
-  if (bySession.size) console.log(`  of sessions           ${pct(signups, bySession.size)}`);
+  console.log(`  accounts created      ${signups}  (any route, including ones predating tracking)`);
+  console.log(`  traceable to a visit  ${attributed}`);
+  console.log(`  of human page views   ${pct(attributed, human)}`);
+  if (bySession.size) console.log(`  of sessions           ${pct(attributed, bySession.size)}`);
   console.log();
 
   await prisma.$disconnect();
