@@ -24,8 +24,15 @@ const pct = (a, b) => (b ? ((a / b) * 100).toFixed(2) + '%' : '—');
 const pad = (s, n) => String(s).padEnd(n);
 const lpad = (s, n) => String(s).padStart(n);
 
+// In-page steps (opening the signup panel, submitting it) ride in on the
+// same table, because `path` takes any string and that avoided a migration.
+// They are not page views, so every count below excludes them; they get
+// their own section instead.
+const STEP = { path: { startsWith: 'step:' } };
+const NOT_STEP = { NOT: STEP };
+
 (async () => {
-  const total = await prisma.visitLog.count({ where: { createdAt: { gte: since } } });
+  const total = await prisma.visitLog.count({ where: { createdAt: { gte: since }, ...NOT_STEP } });
   if (!total) {
     console.log(`\nNo visits logged in the last ${days} days.`);
     console.log('If the site is live, check that analytics.js is uploaded and POSTing /api/visits.\n');
@@ -33,9 +40,9 @@ const lpad = (s, n) => String(s).padStart(n);
     return;
   }
 
-  const bots = await prisma.visitLog.count({ where: { createdAt: { gte: since }, bot: true } });
+  const bots = await prisma.visitLog.count({ where: { createdAt: { gte: since }, bot: true, ...NOT_STEP } });
   const human = total - bots;
-  const where = { createdAt: { gte: since }, ...(showBots ? {} : { bot: false }) };
+  const where = { createdAt: { gte: since }, ...NOT_STEP, ...(showBots ? {} : { bot: false }) };
 
   console.log(`\n── Last ${days} days ──────────────────────────────────────────`);
   console.log(`  page views logged     ${total}`);
@@ -94,6 +101,37 @@ const lpad = (s, n) => String(s).padStart(n);
   console.log(`  distinct click ids               ${distinctClicks.size}`);
   console.log(`  (compare this with the click count the ad platform bills you for —`);
   console.log(`   a large shortfall means you are paying for clicks that never arrive)`);
+
+  // ── The join funnel ────────────────────────────────────────────────
+  // "Join for Free" opens a modal instead of navigating, so until these
+  // steps existed the log went straight from "landed" to "account created"
+  // with nothing in between — no way to tell somebody who never pressed the
+  // button from somebody who pressed it and gave up on the form.
+  const steps = await prisma.visitLog.findMany({
+    where: { createdAt: { gte: since }, bot: false, ...STEP },
+    select: { path: true, sessionId: true },
+  });
+  const sessionsWith = (prefix) =>
+    new Set(steps.filter(e => e.path.startsWith('step:' + prefix) && e.sessionId)
+                 .map(e => e.sessionId)).size;
+
+  console.log(`\n── Join funnel ───────────────────────────────────────────────`);
+  if (!steps.length) {
+    console.log('  no step events yet — needs analytics.js v20261009a or later uploaded');
+  } else {
+    const opened = sessionsWith('join-open');
+    console.log(`  opened the signup panel  ${opened}  (${pct(opened, bySession.size)} of sessions)`);
+    const byOrigin = {};
+    for (const e of steps.filter(e => e.path.startsWith('step:join-open'))) {
+      const k = e.path.split(':')[2] || 'unlabelled';
+      (byOrigin[k] ??= new Set()).add(e.sessionId);
+    }
+    for (const [k, v] of Object.entries(byOrigin).sort((a, b) => b[1].size - a[1].size)) {
+      console.log(`    from ${pad(k, 18)} ${v.size}`);
+    }
+    console.log(`  submitted the form       ${sessionsWith('join-submit')}`);
+    console.log(`  server rejected it       ${sessionsWith('join-rejected')}`);
+  }
 
   const signups = await prisma.user.count({ where: { createdAt: { gte: since } } });
   // Only an account whose attribution was captured inside the window can be
