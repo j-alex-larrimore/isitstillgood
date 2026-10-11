@@ -27,6 +27,7 @@
  */
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
+const { normalizeTitleForSearch } = require('../src/lib/mediaHelpers');
 
 const APPLY = process.argv.includes('--apply');
 
@@ -43,27 +44,58 @@ const APPLY = process.argv.includes('--apply');
 // the work it contains ("Billy Budd and Other Prose Pieces"), an omnibus
 // ("Works (… Of Mice and Men …)"), and sequels whose titles extend the
 // first ("The Perfect Run II") all look identical to this test.
+// Open Library part-files: one physical volume of a long novel imported as
+// its own book, titled "[3/5]" and so on. The whole work is already in the
+// catalogue in every case but one, which is renamed rather than deleted.
+const VOLUME_SPLITS = [
+  { loser: 'david-copperfield-12-1850',   winner: 'david-copperfield-1850' },
+  { loser: 'emma-23-1816',                winner: 'emma-1816' },
+  { loser: 'little-dorrit-12-1857',       winner: 'little-dorrit-1857' },
+  { loser: 'madame-bovary-22-1857',       winner: 'madame-bovary-1857' },
+  { loser: 'martin-chuzzlewit-22-1844',   winner: 'martin-chuzzlewit-1844' },
+  { loser: 'nicholas-nickleby-1-1839',    winner: 'nicholas-nickleby-1839' },
+  { loser: 'oliver-twist-33-1838',        winner: 'oliver-twist-1838' },
+  { loser: 'the-marble-faun-12-1860',     winner: 'the-marble-faun-1860' },
+  { loser: 'the-pickwick-papers-35-1837', winner: 'the-pickwick-papers-1837' },
+  { loser: 'wuthering-heights-22-1847',   winner: 'wuthering-heights-1847' },
+];
+// No whole-work record exists for this one, so deleting it would drop the
+// book from the catalogue entirely. It gets its split marker stripped.
+const RENAMES = [
+  { slug: 'our-mutual-friend-12-1865', title: 'Our Mutual Friend' },
+];
+
+// One ISBN on two different works. Each was resolved by asking Open Library
+// what the ISBN actually is; the record it names keeps it and the other is
+// cleared. Two of them turned out to be box-set ISBNs belonging to neither
+// individual book, so both sides are cleared.
+const ISBN_CLEARS = [
+  { slug: 'magnolia-table-2018',                        was: '9780062820181', real: 'Magnolia Table Vol 2' },
+  { slug: 'the-blood-sugar-solution-2012',              was: '9780316338813', real: 'The blood sugar solution 10-day detox diet cookbook' },
+  { slug: 'crown-of-stars-2006',                        was: '9780886777715', real: "King's Dragon (Crown of Stars, Vol. 1)" },
+  { slug: 'of-dawn-and-darkness-2015',                  was: '9780989671743', real: 'Of Darkness and Dawn' },
+  { slug: 'of-shadow-and-sea-2015',                     was: '9780999851159', real: 'Of Sea and Shadow' },
+  { slug: 'grey-2015',                                  was: '9781523849918', real: 'Fifty Shades of Grey' },
+  { slug: 'the-disinherited-prince-2016',               was: '9781548052232', real: 'The Misplaced Prince (Volume 6)' },
+  { slug: 'harry-potter-and-the-philosophers-stone-1997', was: '9781551927282', real: 'Harry Potter and the Chamber of Secrets' },
+  // 560 pages, Top Shelf — the collected trilogy, not the 2013 first volume.
+  { slug: 'march-book-one-2013',                        was: '9781603093958', real: 'March (collected, 560pp)' },
+  { slug: 'the-walking-dead-compendium-2012',           was: '9781607060765', real: 'The Walking Dead, Compendium One (2009)' },
+  { slug: 'of-kings-and-killers-2020',                  was: '9781734958102', real: 'Of Killers and Kings' },
+  { slug: 'the-20-2014',                                was: '9781939457318', real: 'The 20/20 Diet' },
+  { slug: 'fantastic-beasts-where-to-find-them-2015',   was: '9798855115468', real: 'Fantastic Beasts and Where to Find Them (2001 record)' },
+  // Box sets — the ISBN is the collection's, not either book's.
+  { slug: 'the-bone-ships-wake-2021',                   was: '9781637995907', real: 'Tide Child Trilogy 3-book set' },
+  { slug: 'call-of-the-bone-ships-2020',                was: '9781637995907', real: 'Tide Child Trilogy 3-book set' },
+  { slug: 'diary-of-a-wimpy-kid-the-meltdown-2020',     was: '9781637996959', real: 'Wimpy Kid 11-19 9-book set' },
+  { slug: 'hot-mess-diary-of-a-wimpy-kid-book-19-2024', was: '9781637996959', real: 'Wimpy Kid 11-19 9-book set' },
+];
+
 const MEDIA_MERGES = [
-  // Series volumes carrying the series name, against a bare-title import.
-  // The keeper has the series metadata; the loser has the ISBN.
-  { loser: 'the-waste-lands-1991',        winner: 'the-dark-tower-iii-the-waste-lands-1991' },
-  { loser: 'wizard-and-glass-1997',       winner: 'the-dark-tower-iv-wizard-and-glass-1997' },
-  { loser: 'siege-and-storm-2013',        winner: 'shadow-and-bone-siege-and-storm-2013' },
-  { loser: 'the-well-of-ascension-2007',  winner: 'mistborn-the-well-of-ascension-2007' },
-  // A long or original-language title against the common one.
-  { loser: 'elementa-philosophica-de-cive-1647', winner: 'de-cive-1647' },
-  { loser: 'the-reasonableness-of-christianity-as-delivered-in-the-scriptures-1695', winner: 'the-reasonableness-of-christianity-1695' },
-  { loser: 'el-ingenioso-hidalgo-don-quixote-de-la-mancha-1605', winner: 'don-quixote-1605' },
-  { loser: 'the-innocents-abroad-or-the-new-pilgrims-progress-1869', winner: 'the-innocents-abroad-1869' },
-  { loser: 'confessions-of-felix-krull-confidence-man-1954', winner: 'confessions-of-felix-krull-1954' },
-  { loser: 'nesnesiteln-lehkost-byt-the-unbearable-lightness-of-being-sonzai-no-taerarenai-karusa-japanese-edition-1984', winner: 'the-unbearable-lightness-of-being-1984' },
-  // An edition or printing label that was imported as part of the title.
-  { loser: 'fallen-angels-with-connections-1988', winner: 'fallen-angels-1988' },
-  { loser: 'the-beautiful-and-the-damned-early-printing-1922', winner: 'the-beautiful-and-damned-1922' },
-  { loser: 'tender-is-the-night-a-romance-1934', winner: 'tender-is-the-night-1934' },
-  { loser: 'one-hundred-years-of-solitude-tie-in-edition-1967', winner: 'one-hundred-years-of-solitude-1967' },
-  // Title truncated mid-parenthesis by the importer.
-  { loser: 'what-would-joey-do-joey-pigza-books-2003', winner: 'what-would-joey-do-2003' },
+  // Same book twice, found via a shared ISBN rather than a similar title.
+  { loser: 'taken-robert-crais-2012', winner: 'taken-2012' },
+  { loser: 'a-spy-among-friends-2014', winner: 'a-spy-among-friends-kim-philby-and-the-great-betrayal-2015' },
+  { loser: 'freakonomics-2009', winner: 'freakonomics-2005' },
 ];
 // stray person name -> the record they should have been
 const PERSON_MERGES = [];
@@ -129,10 +161,38 @@ async function mergePerson({ from, into }) {
   console.log('    merged and removed the stray record');
 }
 
+async function renameItem({ slug, title }) {
+  const m = await prisma.mediaItem.findFirst({ where: { slug }, select: { id: true, title: true } });
+  if (!m) return console.log(`  skip — no such item: ${slug}`);
+  if (m.title === title) return console.log(`  already named "${title}"`);
+  console.log(`  "${m.title}"  ->  "${title}"  [${slug}]`);
+  if (!APPLY) return;
+  // normalizedTitle is only kept in sync on the app's own write paths, so a
+  // direct update has to maintain it or the item drops out of search.
+  await prisma.$executeRawUnsafe(
+    'UPDATE "MediaItem" SET title = $1, "normalizedTitle" = $2 WHERE id = $3',
+    title, normalizeTitleForSearch(title), m.id);
+}
+
+async function clearIsbn({ slug, was, real }) {
+  const m = await prisma.mediaItem.findFirst({ where: { slug }, select: { id: true, title: true, isbn13: true } });
+  if (!m) return console.log(`  skip — no such item: ${slug}`);
+  if (m.isbn13 !== was) return console.log(`  skip — "${m.title}" no longer holds ${was} (has ${m.isbn13 || 'none'})`);
+  console.log(`  "${m.title}" loses ${was} — that ISBN is ${real}`);
+  if (!APPLY) return;
+  await prisma.$executeRawUnsafe('UPDATE "MediaItem" SET isbn13 = NULL WHERE id = $1', m.id);
+}
+
 (async () => {
   console.log(APPLY ? 'APPLYING\n' : 'DRY RUN — nothing is written\n');
   console.log('Duplicate media items:');
   for (const m of MEDIA_MERGES) await mergeMedia(m);
+  console.log('\nVolume splits folded into the whole work:');
+  for (const m of VOLUME_SPLITS) await mergeMedia(m);
+  console.log('\nRenames:');
+  for (const r of RENAMES) await renameItem(r);
+  console.log('\nISBNs on the wrong record:');
+  for (const c of ISBN_CLEARS) await clearIsbn(c);
   console.log('\nDuplicate people:');
   for (const p of PERSON_MERGES) await mergePerson(p);
   console.log(APPLY ? '\nDone.' : '\nRe-run with --apply to write.');
