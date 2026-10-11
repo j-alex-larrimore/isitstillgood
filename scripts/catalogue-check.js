@@ -132,8 +132,11 @@ async function media() {
   line('One title is the other plus extra words (same creator and year)');
   const STOP = new Set(['the','a','an','and','of','or','in','on','to','for',
                         'book','vol','volume','part','one','two','three','series']);
-  const toks = (t) => new Set((t || '').split(' ')
-    .filter(w => w && !STOP.has(w) && !/^\d+$/.test(w)));
+  // Digits are kept. Dropping them as noise collapsed "Henry VI, Part 2"
+  // and "Henry VI, Part 3" to the same {henry, vi} and reported two
+  // different plays as one work. A number is often the only thing telling
+  // two titles apart, which makes it the last token to throw away.
+  const toks = (t) => new Set((t || '').split(' ').filter(w => w && !STOP.has(w)));
   const subset = await prisma.$queryRawUnsafe(`
     WITH c AS (SELECT "A" mid,"B" pid FROM "_AuthoredBy"
                UNION ALL SELECT "A","B" FROM "_DirectedBy")

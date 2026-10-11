@@ -30,19 +30,47 @@ const prisma = require('../src/lib/prisma');
 
 const APPLY = process.argv.includes('--apply');
 
-// loser slug -> winner slug. The winner keeps its own title, year and ISBN.
+// loser slug -> winner slug. The winner keeps its own title and year; the
+// loser's description and ISBN move across when the winner is missing them.
+//
+// Batch applied 2026-10-09 and removed from this list once done: the typo'd
+// "The Lighting Thief", the "Level 4" graded reader, and the two stray
+// Orwell Person records.
+//
+// This batch came out of catalogue-check.js's "one title is the other plus
+// extra words" report: 37 candidates, 15 of them the same work under two
+// titles. The other 22 are left alone on purpose — a collection named for
+// the work it contains ("Billy Budd and Other Prose Pieces"), an omnibus
+// ("Works (… Of Mice and Men …)"), and sequels whose titles extend the
+// first ("The Perfect Run II") all look identical to this test.
 const MEDIA_MERGES = [
-  { loser: 'the-lighting-thief-2022', winner: 'the-lightning-thief-2006' },
-  { loser: 'level-4-2003', winner: 'nineteen-eighty-four-1949' },
+  // Series volumes carrying the series name, against a bare-title import.
+  // The keeper has the series metadata; the loser has the ISBN.
+  { loser: 'the-waste-lands-1991',        winner: 'the-dark-tower-iii-the-waste-lands-1991' },
+  { loser: 'wizard-and-glass-1997',       winner: 'the-dark-tower-iv-wizard-and-glass-1997' },
+  { loser: 'siege-and-storm-2013',        winner: 'shadow-and-bone-siege-and-storm-2013' },
+  { loser: 'the-well-of-ascension-2007',  winner: 'mistborn-the-well-of-ascension-2007' },
+  // A long or original-language title against the common one.
+  { loser: 'elementa-philosophica-de-cive-1647', winner: 'de-cive-1647' },
+  { loser: 'the-reasonableness-of-christianity-as-delivered-in-the-scriptures-1695', winner: 'the-reasonableness-of-christianity-1695' },
+  { loser: 'el-ingenioso-hidalgo-don-quixote-de-la-mancha-1605', winner: 'don-quixote-1605' },
+  { loser: 'the-innocents-abroad-or-the-new-pilgrims-progress-1869', winner: 'the-innocents-abroad-1869' },
+  { loser: 'confessions-of-felix-krull-confidence-man-1954', winner: 'confessions-of-felix-krull-1954' },
+  { loser: 'nesnesiteln-lehkost-byt-the-unbearable-lightness-of-being-sonzai-no-taerarenai-karusa-japanese-edition-1984', winner: 'the-unbearable-lightness-of-being-1984' },
+  // An edition or printing label that was imported as part of the title.
+  { loser: 'fallen-angels-with-connections-1988', winner: 'fallen-angels-1988' },
+  { loser: 'the-beautiful-and-the-damned-early-printing-1922', winner: 'the-beautiful-and-damned-1922' },
+  { loser: 'tender-is-the-night-a-romance-1934', winner: 'tender-is-the-night-1934' },
+  { loser: 'one-hundred-years-of-solitude-tie-in-edition-1967', winner: 'one-hundred-years-of-solitude-1967' },
+  // Title truncated mid-parenthesis by the importer.
+  { loser: 'what-would-joey-do-joey-pigza-books-2003', winner: 'what-would-joey-do-2003' },
 ];
 // stray person name -> the record they should have been
-const PERSON_MERGES = [
-  { from: 'G Orwell', into: 'George Orwell' },
-  { from: 'George Orwel', into: 'George Orwell' },
-];
+const PERSON_MERGES = [];
 
 const SELECT = {
-  id: true, title: true, slug: true, description: true,
+  id: true, title: true, slug: true, description: true, isbn13: true,
+  seriesName: true, seriesNumber: true,
   _count: { select: { reviews: true, listItems: true, pendingImports: true, seasonEntries: true } },
 };
 
@@ -59,16 +87,25 @@ async function mergeMedia({ loser, winner }) {
   if (blocked) return console.log('    REFUSED — something points at it; merge those by hand first');
 
   // Keep the better description. "Better" here only ever means longer: the
-  // short one in both cases is a stub that restates the title.
+  // short one is reliably a stub that restates the title.
   const takeDesc = (l.description || '').length > (w.description || '').length * 1.5;
+  // Carry the ISBN when only the loser has one. A bare-title import often
+  // holds the ISBN while the record with the series metadata does not, and
+  // deleting it outright would lose the catalogue's only copy of it.
+  const takeIsbn = !w.isbn13 && !!l.isbn13;
   console.log(`    description: ${(w.description || '').length} chars`
-    + (takeDesc ? ` -> ${(l.description || '').length} (taken from the loser)` : ' (kept)'));
+    + (takeDesc ? ` -> ${(l.description || '').length} (from the loser)` : ' (kept)'));
+  console.log(`    isbn: ${w.isbn13 || 'none'}`
+    + (takeIsbn ? ` -> ${l.isbn13} (from the loser)` : ' (kept)'));
 
   if (!APPLY) return;
-  if (takeDesc) {
+  const sets = [], vals = [];
+  if (takeDesc) { sets.push(`description = $${sets.length + 1}`); vals.push(l.description); }
+  if (takeIsbn) { sets.push(`isbn13 = $${sets.length + 1}`); vals.push(l.isbn13); }
+  if (sets.length) {
     // Raw SQL so the winner's @updatedAt is not restamped.
     await prisma.$executeRawUnsafe(
-      'UPDATE "MediaItem" SET description = $1 WHERE id = $2', l.description, w.id);
+      `UPDATE "MediaItem" SET ${sets.join(', ')} WHERE id = $${sets.length + 1}`, ...vals, w.id);
   }
   await prisma.mediaItem.delete({ where: { id: l.id } });
   console.log('    deleted the loser');
