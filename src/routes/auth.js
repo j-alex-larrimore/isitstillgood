@@ -302,6 +302,7 @@ router.post('/attribution', requireAuth, [
   body('referrer').optional().isString(),
   body('landed_on').optional().isString(),
   body('landed_at').optional().isString(),
+  body('session_id').optional().isString(),
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
@@ -322,31 +323,77 @@ router.post('/attribution', requireAuth, [
       const s = String(v ?? '').trim().slice(0, n);
       return s || null;
     };
-    const landedAt = a.landed_at ? new Date(a.landed_at) : null;
-    const referrer = str(a.referrer, 500);
+    let landedAt = a.landed_at ? new Date(a.landed_at) : null;
+    let referrer = str(a.referrer, 500);
+    let claim = {
+      source:   str(a.utm_source, 120),
+      medium:   str(a.utm_medium, 120),
+      campaign: str(a.utm_campaign, 200),
+      content:  str(a.utm_content, 200),
+      term:     str(a.utm_term, 200),
+      rdtCid:   str(a.rdt_cid, 255),
+      fbclid:   str(a.fbclid, 255),
+      landedOn: str(a.landed_on, 300),
+    };
+    let resolvedFrom = 'client';
+
+    // The browser's copy is not reliable. analytics.js keeps first touch in
+    // localStorage and falls back to the CURRENT page when that is empty —
+    // and this call fires after registration, from a page with no campaign
+    // parameters on it, so the fallback reports "direct". An in-app browser
+    // (most of this traffic arrives inside Reddit's) routinely gives back an
+    // empty localStorage while sessionStorage still works, which is exactly
+    // how a real ad signup came to be recorded as direct.
+    //
+    // VisitLog is ours and server-side, so when the claim carries no campaign
+    // we ask it instead: the earliest row of this session that arrived with a
+    // source on it. Only consulted when the client has nothing to say, so a
+    // genuine direct visit is still recorded as direct.
+    const sessionId = str(a.session_id, 64);
+    if (!claim.source && sessionId) {
+      const landing = await prisma.visitLog.findFirst({
+        where: { sessionId, source: { not: null } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (landing) {
+        claim = {
+          source:   landing.source,
+          medium:   landing.medium,
+          campaign: landing.campaign,
+          content:  landing.content,
+          term:     null,
+          rdtCid:   landing.clickNetwork === 'reddit' ? landing.clickId : null,
+          fbclid:   landing.clickNetwork === 'meta'   ? landing.clickId : null,
+          landedOn: landing.path,
+        };
+        if (!referrer && landing.referrerHost) referrer = landing.referrerHost;
+        landedAt = landing.createdAt;
+        resolvedFrom = 'visit_log';
+      }
+    }
 
     // A visit that carried no campaign parameters still has an answer worth
     // storing — "a link from somewhere" and "typed it in" are different
     // things, and both are more use than null.
-    const source = str(a.utm_source, 120) || (referrer ? 'referral' : 'direct');
+    const source = claim.source || (referrer ? 'referral' : 'direct');
 
     await prisma.user.update({
       where: { id: req.user.id },
       data: {
         attrSource:        source,
-        attrMedium:        str(a.utm_medium, 120),
-        attrCampaign:      str(a.utm_campaign, 200),
-        attrContent:       str(a.utm_content, 200),
-        attrTerm:          str(a.utm_term, 200),
-        attrRedditClickId: str(a.rdt_cid, 255),
-        attrMetaClickId:   str(a.fbclid, 255),
+        attrMedium:        claim.medium,
+        attrCampaign:      claim.campaign,
+        attrContent:       claim.content,
+        attrTerm:          claim.term,
+        attrRedditClickId: claim.rdtCid,
+        attrMetaClickId:   claim.fbclid,
         attrReferrer:      referrer,
-        attrLandedOn:      str(a.landed_on, 300),
+        attrLandedOn:      claim.landedOn,
         attrLandedAt:      landedAt && !isNaN(landedAt) && landedAt.getTime() <= Date.now() ? landedAt : null,
         attrCapturedAt:    new Date(),
       },
     });
-    res.json({ recorded: true, source });
+    res.json({ recorded: true, source, resolvedFrom });
   } catch (err) { next(err); }
 });
 
