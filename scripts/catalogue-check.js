@@ -117,6 +117,48 @@ async function media() {
     console.log(`     shared: ${shared.join(', ')}\n`);
   }
   if (!shown) console.log(`  none (${pairs.length} near-identical pairs, none sharing a creator)`);
+
+  // The edit-distance check above only catches a slip of a letter or two.
+  // It misses the commoner shape entirely, because the two titles are not
+  // close at all: "The Lightning Thief" against "The Percy Jackson and the
+  // Olympians, Book One: Lightning Thief". Every meaningful word of the
+  // shorter title is present in the longer one, which is the tell.
+  //
+  // Restricted hard — same type, same release year, a shared creator — and
+  // still not proof. An omnibus legitimately contains a work's title
+  // ("Works (Leader of the People / Of Mice and Men / ...)"), and a sequel
+  // legitimately extends one ("The Boss Baby and Tim's Treasure Hunt"). So
+  // this reports; it never merges.
+  line('One title is the other plus extra words (same creator and year)');
+  const STOP = new Set(['the','a','an','and','of','or','in','on','to','for',
+                        'book','vol','volume','part','one','two','three','series']);
+  const toks = (t) => new Set((t || '').split(' ')
+    .filter(w => w && !STOP.has(w) && !/^\d+$/.test(w)));
+  const subset = await prisma.$queryRawUnsafe(`
+    WITH c AS (SELECT "A" mid,"B" pid FROM "_AuthoredBy"
+               UNION ALL SELECT "A","B" FROM "_DirectedBy")
+    SELECT DISTINCT a.title ta, a.slug sa, a."normalizedTitle" na,
+                    b.title tb, b.slug sb, b."normalizedTitle" nb,
+                    a."mediaType" mt, a."releaseYear" yr
+    FROM "MediaItem" a JOIN c ca ON ca.mid = a.id
+    JOIN c cb ON cb.pid = ca.pid AND cb.mid <> a.id
+    JOIN "MediaItem" b ON b.id = cb.mid
+    WHERE a."mediaType" = b."mediaType" AND a.id < b.id
+      AND a."releaseYear" IS NOT DISTINCT FROM b."releaseYear"`);
+  let subShown = 0, subTotal = 0;
+  for (const r of subset) {
+    const A = toks(r.na), B = toks(r.nb);
+    if (!A.size || !B.size) continue;
+    const [small, big] = A.size <= B.size ? [A, B] : [B, A];
+    if (small.size < 2 || small.size === big.size) continue;
+    if (![...small].every(w => big.has(w))) continue;
+    subTotal++;
+    if (subShown++ >= LIMIT) continue;
+    console.log(`  [${r.mt} ${r.yr}] "${r.ta}"  [${r.sa}]`);
+    console.log(`                 vs "${r.tb}"  [${r.sb}]`);
+  }
+  if (!subTotal) console.log('  none');
+  else if (subTotal > LIMIT) console.log(`  … ${subTotal - LIMIT} more — raise --limit`);
 }
 
 async function people() {
