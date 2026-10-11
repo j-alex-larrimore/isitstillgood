@@ -491,7 +491,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // below lets the TV-specific structural filters (parent-only, person-search
     // season inclusion) apply equally in the combined view — they're harmless
     // no-ops against movie rows since parentId is always null on those anyway.
-    const includesTV = type === 'TV_SHOW' || type === 'SCREEN';
+    // No type at all means every type, which includes TV — so it gets the
+    // same parent/season handling as the explicit TV views below. It used to
+    // be left out and then patched further down by excluding parent shows
+    // outright, which meant an untyped search could never return a show:
+    // "Mary Mouser" gave her four films and none of her four series, and
+    // "Cobra Kai" gave six season rows and no Cobra Kai.
+    const includesTV = !type || type === 'TV_SHOW' || type === 'SCREEN';
     if (type === 'SCREEN')                andClauses.push({ mediaType: { in: ['MOVIE', 'TV_SHOW'] } });
     else if (type)                         andClauses.push({ mediaType: type });
     // TV filtering: normally show only parent shows (parentId: null).
@@ -665,7 +671,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // restriction above scoped via statusTargetUserId, or 'all' deliberately means no
     // restriction — so reviewedBy becomes pure rating-comparison enrichment instead.
     if (reviewedByIds !== undefined && reviewStatus === null) andClauses.push({ id: { in: reviewedByIds.length ? reviewedByIds : ['__none__'] } });
-    if (!type) andClauses.push({ NOT: { AND: [{ mediaType: 'TV_SHOW' }, { parentId: null }] } });
+    // (An untyped search used to drop every parent TV show here, to stop
+    // parents and seasons both appearing. includesTV above now gives it the
+    // real rule instead — parents only, unless a person or text match hits a
+    // season its parent missed, with the dedupe further down.)
 
     const where = andClauses.length > 0 ? { AND: andClauses } : {};
 
