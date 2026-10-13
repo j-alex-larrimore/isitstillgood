@@ -29,7 +29,8 @@ const VS_BATTLES = [
   { category: 'actor', a: 'christian-bale',     b: 'joaquin-phoenix' },
   { category: 'actor', a: 'keanu-reeves',       b: 'nicolas-cage' },
   { category: 'actor', a: 'emma-stone',         b: 'jennifer-lawrence' },
-  { category: 'actor', a: 'harrison-ford',      b: 'sylvester-stallone' },
+  { category: 'actor', a: 'arnold-schwarzenegger', b: 'sylvester-stallone' },
+  { category: 'actor', a: 'harrison-ford',      b: 'james-earl-jones' },
   { category: 'actor', a: 'viola-davis',        b: 'octavia-spencer' },
 
   // ── Directors ─────────────────────────────────────────────────────────
