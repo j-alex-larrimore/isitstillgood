@@ -514,13 +514,36 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // BUT when searching by person/text (which can match an actor), also allow
     // seasons — a guest actor in one season should surface that specific season.
     // We dedupe below: if the parent show already matches, we drop its seasons.
+    // NOTE: personFilter is the ?person=<name> text search only. A ?personId=
+    // lookup sets personIdFilter instead and is deliberately NOT counted here,
+    // which is what keeps the VS tab showing whole shows rather than seasons.
+    // That is a quiet dependency, so VS also asks for it outright via
+    // seriesOnly below — adding personIdFilter to this line would otherwise
+    // change a different page's results without anyone noticing.
     const tvPersonSearch = (personFilter || (textFilter && q)) && includesTV;
+    // onePerShow=1: a show may occupy at most one row, whatever matched.
+    //
+    // The VS cards weigh one body of work against another, so a show that
+    // appears six times outvotes six of the other side's films on its own.
+    // The rule is one row per show, picked in this order:
+    //   - the show itself, when the person is credited on it (main cast);
+    //   - otherwise the earliest season they are actually in, so a guest
+    //     spot still counts for something and reads as the one appearance
+    //     it was.
+    // Collapsed after the query rather than in it, because which season is
+    // earliest is only knowable once the matches are in hand. See the block
+    // near finalItems below.
+    const onePerShow = req.query.onePerShow === '1' || req.query.onePerShow === 'true';
     // individual-seasons toggle is TV_SHOW-only (not exposed in the combined
     // SCREEN view — see browse.html), so it's deliberately excluded from this
     // condition for type==='SCREEN' — otherwise a stray ?individual=true would
     // skip the parent-only restriction and flood the combined view with every
     // season of every show, unfiltered.
-    if (includesTV && !(type === 'TV_SHOW' && req.query.individual) && !tvPersonSearch) {
+    // onePerShow opts out of the parent-only restriction on purpose: it wants
+    // the seasons in the result set so it can pick one, and it guarantees the
+    // no-clutter outcome itself by collapsing them afterwards.
+    if (includesTV && !(type === 'TV_SHOW' && req.query.individual)
+        && !tvPersonSearch && !onePerShow) {
       andClauses.push({ parentId: null });
     }
     // Individual-seasons toggle is TV_SHOW-only (not exposed in the combined
@@ -1107,13 +1130,31 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // main cast so the show matches, and also in specific seasons), keep only the parent
     // show and drop its seasons to avoid clutter. Seasons whose parent did NOT match
     // (guest actor not in main cast) are kept.
-    if (tvPersonSearch) {
+    if (tvPersonSearch || onePerShow) {
       const matchedParentIds = new Set(
         finalItems.filter(i => i.mediaType === 'TV_SHOW' && !i.parentId).map(i => i.id)
       );
       finalItems = finalItems.filter(i =>
         !(i.parentId && matchedParentIds.has(i.parentId))
       );
+
+      // What is left are seasons whose show did not match — a guest spot.
+      // One of those per show: the earliest they are in, which is where the
+      // appearance started. Without this a recurring guest across six
+      // seasons fills six rows and outweighs six films on the other side of
+      // the card. A season with no number sorts last; it is the odd row out
+      // and should not beat a real season 1.
+      if (onePerShow) {
+        const pick = new Map();
+        for (const i of finalItems) {
+          if (!i.parentId) continue;
+          const n = i.seasonNumber == null ? Infinity : i.seasonNumber;
+          const held = pick.get(i.parentId);
+          if (!held || n < held.n) pick.set(i.parentId, { n, id: i.id });
+        }
+        const keep = new Set([...pick.values()].map(p => p.id));
+        finalItems = finalItems.filter(i => !i.parentId || keep.has(i.id));
+      }
     }
 
     // Compute avg rating per item.
