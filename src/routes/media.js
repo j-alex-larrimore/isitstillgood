@@ -306,8 +306,14 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // Person ids (picked from /api/media/search-suggestions) instead of name
     // strings, sidestepping the substring-match ambiguity `person` above has
     // (e.g. "Tom Holland" also matching "Tom Hollander").
-    // Comma-separated for multiple people, AND-combined — the item must
-    // feature every one of them (in any of the three role relations).
+    // Comma-separated for multiple people. AND by default — the item must
+    // feature every one of them (in any of the three role relations) —
+    // because that is what two chips in the Filter box have always meant.
+    //
+    // personMatch=any switches to OR, for the case where the two names are
+    // rivals rather than collaborators. The VS tab needs it: "more titles
+    // from Damon and Affleck" under AND returns the four films they made
+    // together, which is the opposite of more.
     let personIdFilter = undefined;
     if (req.query.personId) {
       const personIds = req.query.personId.split(',').map(s => s.trim()).filter(Boolean);
@@ -318,7 +324,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
           { authors:   { some: { id } } },
         ],
       }));
-      personIdFilter = personIdClauses.length === 1 ? personIdClauses[0] : { AND: personIdClauses };
+      const anyOf = req.query.personMatch === 'any';
+      personIdFilter = personIdClauses.length === 1
+        ? personIdClauses[0]
+        : (anyOf ? { OR: personIdClauses } : { AND: personIdClauses });
     }
 
     // Exact-person EXCLUDE filter — the negated counterpart of personId
