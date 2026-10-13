@@ -131,6 +131,13 @@ router.post('/', requireAuth, [
     // otherwise leave as null — the field is optional
     const consumed = dateConsumed ? new Date(dateConsumed) : null;
 
+    // "Not mentioned" and "deliberately cleared" are different answers, and
+    // the update below has to tell them apart. A caller that never names the
+    // field — the head-to-head builder, which only ever sends a rating —
+    // must leave an existing date alone; a caller that sends it empty is
+    // clearing it on purpose.
+    const dateWasSubmitted = Object.prototype.hasOwnProperty.call(req.body, 'dateConsumed');
+
     if (consumed) {
       if (consumed.getTime() > Date.now()) {
         return res.status(422).json({ error: 'Date consumed cannot be in the future' });
@@ -227,7 +234,9 @@ router.post('/', requireAuth, [
           // sync even if the representative shifted since the last edit.
           mediaItemId,
           rating: newRating,
-          dateConsumed: consumed,
+          // Omitted entirely when the caller said nothing about it, so
+          // Prisma leaves the stored date alone instead of nulling it.
+          ...(dateWasSubmitted ? { dateConsumed: consumed } : {}),
           reviewText, spoilerText, visibility: vis, verdict,
           isDraft: saveAsDraft,
           // A draft being saved over isn't a revisit — that only means "I
