@@ -4,6 +4,7 @@ const { query } = require('express-validator');
 const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
 const { providersFor, REGIONS } = require('../lib/streamingRegions');
+const { VS_BATTLES, CATEGORY_TYPE } = require('../lib/vsBattles');
 
 // Which country the "available on Netflix/Disney+/…" browse filter searches.
 // streamingProviders is keyed by country now, so this path has to name one.
@@ -1606,6 +1607,50 @@ router.get('/', optionalAuth, async (req, res, next) => {
 // Declared above /:slug deliberately: Express matches in order, and the
 // catch-all below would otherwise swallow "people" as a media slug.
 const PEOPLE_LOOKUP_MAX = 8;
+
+// ─── GET /api/media/vs-battles ──────────────────────────────────────────────
+// The curated matchups behind the VS tab, with their people resolved.
+//
+// Slugs live in src/lib/vsBattles.js; this turns them into the ids Browse's
+// person filters actually run on, so the page does not have to resolve each
+// pair as the reader cycles through them. A pair whose people cannot both be
+// found is dropped rather than served half-built — a battle with one side
+// is not a battle.
+//
+// Cached in memory: the list is a static file and resolving it is ~70 person
+// lookups, which has no business running on every page load.
+let vsBattlesCache = { at: 0, data: null };
+const VS_BATTLES_TTL = 60 * 60 * 1000;
+
+router.get('/vs-battles', async (req, res, next) => {
+  try {
+    if (vsBattlesCache.data && Date.now() - vsBattlesCache.at < VS_BATTLES_TTL) {
+      return res.json(vsBattlesCache.data);
+    }
+    const slugs = [...new Set(VS_BATTLES.flatMap(b => [b.a, b.b]))];
+    const people = await prisma.person.findMany({
+      where: { slug: { in: slugs } },
+      select: { id: true, name: true, slug: true },
+    });
+    const bySlug = Object.fromEntries(people.map(p => [p.slug, p]));
+
+    const battles = VS_BATTLES
+      .map(b => ({ category: b.category, mediaType: CATEGORY_TYPE[b.category] || null,
+                   a: bySlug[b.a], b: bySlug[b.b] }))
+      .filter(b => b.a && b.b);
+    const missing = VS_BATTLES
+      .filter(b => !bySlug[b.a] || !bySlug[b.b])
+      .map(b => (!bySlug[b.a] ? b.a : b.b));
+
+    const data = { battles, categories: [...new Set(battles.map(b => b.category))] };
+    // Surfaced rather than swallowed: a slug that stops resolving means a
+    // Person was merged or renamed, and the list needs editing.
+    if (missing.length) data.unresolved = missing;
+
+    vsBattlesCache = { at: Date.now(), data };
+    res.json(data);
+  } catch (err) { next(err); }
+});
 
 router.get('/people', async (req, res, next) => {
   try {
