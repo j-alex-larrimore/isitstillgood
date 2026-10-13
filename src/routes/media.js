@@ -1661,6 +1661,75 @@ router.get('/vs-battles', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── GET /api/media/vs-people?role=actor&q=hanks ────────────────────────────
+// Anyone the catalogue knows in a given role, so a matchup is not limited to
+// the curated list.
+//
+// The curated battles in vsBattles.js are the spine of the VS tab and stay
+// that way, because there is no signal in this database for who is worth
+// comparing. There are 183,000 Person rows, none with a photo and none with
+// a vote count, so the only thing left to sort them by is how many credits
+// they have — and that ranks Frank Welker (92) and Jim Cummings (81) above
+// Tom Hanks (67). A roster built that way would be voice actors and
+// character actors, which is not an argument anybody wants to settle.
+//
+// A name search has no such problem: the reader already knows who they
+// meant. So the curated pairs are what you cycle through, and this is what
+// you reach for when you want someone else. Credits are returned with each
+// person so the picker can say "67 films" next to Tom Hanks and "3 films"
+// next to someone thin — a two-title side makes a bad card, and that is
+// better shown than enforced.
+//
+// Counted per role against the join tables directly: a person's acting
+// credits say nothing about whether they have ever directed, and offering
+// an actor under "directors" would produce an empty column.
+const VS_ROLES = {
+  actor:    { table: '_AppearedIn', mediaType: 'SCREEN' },
+  director: { table: '_DirectedBy', mediaType: 'SCREEN' },
+  author:   { table: '_AuthoredBy', mediaType: 'BOOK' },
+};
+const VS_PEOPLE_MIN_CREDITS = 2;
+const VS_PEOPLE_LIMIT = 10;
+
+router.get('/vs-people', async (req, res, next) => {
+  try {
+    const role = VS_ROLES[String(req.query.role || '').toLowerCase()];
+    if (!role) return res.status(400).json({ error: 'role must be actor, director or author' });
+
+    const q = String(req.query.q || '').trim();
+    // No query: hand back the people already curated for this role, so the
+    // picker opens on recognisable names rather than an empty box.
+    if (q.length < 2) {
+      const slugs = [...new Set(VS_BATTLES.filter(b => b.category === req.query.role)
+        .flatMap(b => [b.a, b.b]))];
+      const people = await prisma.person.findMany({
+        where: { slug: { in: slugs } },
+        select: { id: true, name: true, slug: true },
+        orderBy: { name: 'asc' },
+      });
+      return res.json({ people, mediaType: role.mediaType, suggested: true });
+    }
+
+    // LIKE wildcards in a name would quietly turn this into a scan for
+    // everyone, so they are escaped rather than passed through.
+    const safe = q.replace(/[\\%_]/g, c => '\\' + c);
+    // Matched at the start of any word, not anywhere in the string: typing
+    // "hanks" should find Tom Hanks, and "an" should not find everyone.
+    const people = await prisma.$queryRawUnsafe(`
+      SELECT pe.id, pe.name, pe.slug, COUNT(m.id)::int AS credits
+      FROM "Person" pe
+      JOIN "${role.table}" r ON r."B" = pe.id
+      JOIN "MediaItem" m ON m.id = r."A" AND m.verified = true
+      WHERE pe.name ILIKE $1 ESCAPE '\\' OR pe.name ILIKE $2 ESCAPE '\\'
+      GROUP BY pe.id, pe.name, pe.slug
+      HAVING COUNT(m.id) >= ${VS_PEOPLE_MIN_CREDITS}
+      ORDER BY credits DESC, pe.name ASC
+      LIMIT ${VS_PEOPLE_LIMIT}`, safe + '%', '% ' + safe + '%');
+
+    res.json({ people, mediaType: role.mediaType });
+  } catch (err) { next(err); }
+});
+
 router.get('/people', async (req, res, next) => {
   try {
     const slugs = String(req.query.slugs || '')
