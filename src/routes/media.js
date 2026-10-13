@@ -1594,6 +1594,37 @@ router.get('/', optionalAuth, async (req, res, next) => {
 // search live as you type, so a title suggestion here would just be
 // re-offering what's already typed rather than adding precision the way a
 // genre/tag spelling or a specific person's id does.
+// ─── GET /api/media/people?slugs=matt-damon,ben-affleck ─────────────────────
+// Resolve person slugs to the ids the chip filters run on.
+//
+// Exists so a comparison can live in a URL. Browse's person chips carry an
+// internal id, which is fine for a chip the reader just picked and useless
+// for a link somebody has to write down — an ad destination, a shared card,
+// a post. A slug is already how Person records are keyed for uniqueness, so
+// it is the stable public handle this was missing.
+//
+// Declared above /:slug deliberately: Express matches in order, and the
+// catch-all below would otherwise swallow "people" as a media slug.
+const PEOPLE_LOOKUP_MAX = 8;
+
+router.get('/people', async (req, res, next) => {
+  try {
+    const slugs = String(req.query.slugs || '')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      .slice(0, PEOPLE_LOOKUP_MAX);
+    if (!slugs.length) return res.json({ people: [] });
+
+    const found = await prisma.person.findMany({
+      where: { slug: { in: slugs } },
+      select: { id: true, name: true, slug: true },
+    });
+    // Returned in the order asked for, because the caller's first slug is
+    // the left-hand side of a comparison and the second is the right.
+    const bySlug = Object.fromEntries(found.map(p => [p.slug, p]));
+    res.json({ people: slugs.map(s => bySlug[s]).filter(Boolean) });
+  } catch (err) { next(err); }
+});
+
 router.get('/search-suggestions', async (req, res, next) => {
   try {
     const q = (req.query.q || '').trim();
