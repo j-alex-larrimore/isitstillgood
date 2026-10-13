@@ -1,0 +1,11 @@
+mediaType,title,year,author,seriesName,seriesNumber,tags,genres
+BOOK,Pebble in the Sky,1950,Isaac Asimov,Galactic Empire,1,,Science Fiction
+BOOK,"The Stars, Like Dust",1951,Isaac Asimov,Galactic Empire,2,,Science Fiction
+BOOK,The Currents of Space,1952,Isaac Asimov,Galactic Empire,3,,Science Fiction
+BOOK,Second Foundation,1953,Isaac Asimov,Foundation,3,,Science Fiction
+BOOK,Fantastic Voyage,1966,Isaac Asimov,,,,Science Fiction;Adventure
+BOOK,The Robots of Dawn,1983,Isaac Asimov,Robot,4,,Science Fiction;Mystery
+BOOK,Robots and Empire,1985,Isaac Asimov,Robot,5,,Science Fiction
+BOOK,Prelude to Foundation,1988,Isaac Asimov,Foundation,6,,Science Fiction
+BOOK,Nemesis,1989,Isaac Asimov,,,,Science Fiction
+BOOK,Forward the Foundation,1993,Isaac Asimov,Foundation,7,,Science Fiction
