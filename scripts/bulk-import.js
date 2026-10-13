@@ -316,6 +316,19 @@ async function main() {
         continue;
       }
 
+      // The lookup's own title is whatever the external source happens to
+      // hold, and for books that is frequently mis-cased or padded —
+      // "fear nothing " and "False memory" both came back that way in one
+      // run. Trim it always, and when the row supplied a title that is the
+      // same work by the search-normalised comparison, keep the curated
+      // spelling instead. A genuinely different title is left alone, since
+      // the source may be supplying a fuller or more correct one.
+      data.title = String(data.title || '').trim();
+      if (row.title && normalizeTitleForSearch(row.title) === normalizeTitleForSearch(data.title)
+          && row.title !== data.title) {
+        data.title = row.title;
+      }
+
       const duplicate = await findDuplicate({
         title:         data.title,
         mediaType:     row.mediaType,
