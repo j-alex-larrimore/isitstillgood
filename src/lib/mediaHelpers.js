@@ -696,6 +696,24 @@ async function findDuplicate({ title, mediaType, tmdbId, igdbId, openLibraryId, 
       });
       const authorMatch = byAuthor.find(b => bookTitlesMatch(b.title, title));
       if (authorMatch) return authorMatch;
+
+      // Nothing by this author matches, and for a book that settles it.
+      // Two novels sharing a title is ordinary — Koontz's "Quicksilver"
+      // (2022) was silently dropped because Callie Hart published one in
+      // 2024 and the year guard below is ±2 — whereas two editions of one
+      // novel always share an author. Falling through would cost a real
+      // book, which is the worse error of the two and an invisible one.
+      //
+      // The exception is a row with no author recorded at all: that cannot
+      // be compared on author, so let it reach the title check below.
+      const untitledAuthorRow = await prisma.mediaItem.findFirst({
+        where: {
+          title: { equals: title.trim(), mode: 'insensitive' },
+          mediaType: 'BOOK',
+          authors: { none: {} },
+        },
+      });
+      return untitledAuthorRow || null;
     }
 
     const titleMatch = await prisma.mediaItem.findFirst({

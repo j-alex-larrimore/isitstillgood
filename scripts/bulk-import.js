@@ -90,6 +90,29 @@ function normalizeRow(row) {
   };
 }
 
+// Two spellings of one writer. Editions disagree about middle names —
+// "Dean Koontz", "Dean R. Koontz" and "Dean Ray Koontz" are one man, and
+// "J. R. R. Tolkien" is the same person as "John Ronald Reuel Tolkien".
+// Matching on the first and last name only, with a bare initial allowed to
+// stand for a full first name, covers all of those.
+//
+// It is deliberately only used to pick between a name the caller supplied
+// and the name the source returned for that same search, never to merge two
+// arbitrary people: on its own, "John Smith" and "John Adam Smith" matching
+// would be a guess.
+function nameParts(n) {
+  return String(n || '').toLowerCase().replace(/[.,]/g, ' ')
+    .split(/\s+/).filter(Boolean);
+}
+function sameAuthor(a, b) {
+  const x = nameParts(a), y = nameParts(b);
+  if (!x.length || !y.length) return false;
+  if (x[x.length - 1] !== y[y.length - 1]) return false;      // surname must match
+  const [fx, fy] = [x[0], y[0]];
+  if (fx === fy) return true;
+  return (fx.length === 1 || fy.length === 1) && fx[0] === fy[0];
+}
+
 // ─── Best-match selection ─────────────────────────────────────────────────
 // Popular/heavily-republished titles return a lot of noise in search results —
 // translations, study guides, abridged/split editions, "Title by Author"
@@ -327,6 +350,17 @@ async function main() {
       if (row.title && normalizeTitleForSearch(row.title) === normalizeTitleForSearch(data.title)
           && row.title !== data.title) {
         data.title = row.title;
+      }
+
+      // Same fault, one field over: the source's author name is whatever
+      // that edition's cover said. One Koontz run filed six of fifty books
+      // under "Dean Ray Koontz" and "Dean R. Koontz", splitting him across
+      // three Person records and leaving each fragment looking thin. When
+      // the row named an author and the source's differs only in middle
+      // names or initials, it is the same writer — take the curated name,
+      // which is the one the rest of the catalogue already uses.
+      if (row.author && Array.isArray(data.authors)) {
+        data.authors = data.authors.map(a => (sameAuthor(a, row.author) ? row.author : a));
       }
 
       const duplicate = await findDuplicate({
