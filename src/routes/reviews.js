@@ -1,5 +1,6 @@
 // src/routes/reviews.js
 const router = require('express').Router();
+const { randomUUID } = require('crypto');
 const { body, validationResult } = require('express-validator');
 const prisma = require('../lib/prisma');
 const { syncBadges, presentBadge, EARLY_REVIEW_LIMIT } = require('../lib/badges');
@@ -117,14 +118,32 @@ router.post('/', requireAuth, [
   body('hiddenFromProfile').optional().isBoolean(),
 ], async (req, res, next) => {
   if (!ok(req, res)) return;
-  const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit, isDraft } = req.body;
-  const saveAsDraft = isDraft === true || isDraft === 'true';
   try {
+    const saved = await saveReview({ user: req.user, body: req.body });
+    if (saved.error) return res.status(saved.status).json({ error: saved.error });
+    const earnedBadges = await earnBadges(req.user.id);
+    res.status(saved.created ? 201 : 200)
+       .json(earnedBadges?.length ? { ...saved.review, earnedBadges } : saved.review);
+  } catch (err) { next(err); }
+});
+
+// Write one review. Shared by POST / and POST /batch so the two cannot drift
+// — everything below (first-review credit, the book-series cluster lookup,
+// draft handling, revisit detection) is the kind of logic that goes subtly
+// wrong in a second copy nobody remembers to update.
+//
+// batchId / isBatchLead are set by the batch caller only. notify is off for
+// the followers of a batch: friends hear once about the batch, not once per
+// title, which is the same rule imports.js already applies.
+async function saveReview({ user, body, batchId = null, isBatchLead = false, notify = true }) {
+  const { mediaItemId, rating, seasonNumber, dateConsumed, reviewText, spoilerText, visibility, isRevisit, isDraft } = body;
+  const saveAsDraft = isDraft === true || isDraft === 'true';
+  {
     const media = await prisma.mediaItem.findUnique({ where: { id: mediaItemId }, include: { authors: { select: { id: true } } } });
-    if (!media) return res.status(404).json({ error: 'Media item not found' });
+    if (!media) return { error: 'Media item not found', status: 404 };
 
     const verdict = ratingToVerdict(parseInt(rating));
-    const vis = visibility || req.user.defaultVisibility || 'PUBLIC';
+    const vis = visibility || user.defaultVisibility || 'PUBLIC';
     const season = (seasonNumber !== null && seasonNumber !== undefined && seasonNumber !== '') ? parseInt(seasonNumber) : null;
 
     // Convert dateConsumed string to a real Date object if provided,
@@ -136,14 +155,14 @@ router.post('/', requireAuth, [
     // field — the head-to-head builder, which only ever sends a rating —
     // must leave an existing date alone; a caller that sends it empty is
     // clearing it on purpose.
-    const dateWasSubmitted = Object.prototype.hasOwnProperty.call(req.body, 'dateConsumed');
+    const dateWasSubmitted = Object.prototype.hasOwnProperty.call(body, 'dateConsumed');
 
     if (consumed) {
       if (consumed.getTime() > Date.now()) {
-        return res.status(422).json({ error: 'Date consumed cannot be in the future' });
+        return { error: 'Date consumed cannot be in the future', status: 422 };
       }
       if (media.releaseYear && consumed.getFullYear() < media.releaseYear) {
-        return res.status(422).json({ error: `Date consumed cannot be before this was released (${media.releaseYear})` });
+        return { error: `Date consumed cannot be before this was released (${media.releaseYear})`, status: 422 };
       }
     }
 
@@ -174,14 +193,14 @@ router.post('/', requireAuth, [
       // an existing draft would miss it here and try to INSERT a second row,
       // tripping the user+item+season unique constraint.
       existing = await prismaWithDrafts.review.findFirst({
-        where: { userId: req.user.id, mediaItemId: { in: clusterIds }, seasonNumber: 0 },
+        where: { userId: user.id, mediaItemId: { in: clusterIds }, seasonNumber: 0 },
       });
     } else {
       // Draft-aware: reads through `prisma` can't see drafts, so saving over
       // an existing draft would miss it here and try to INSERT a second row,
       // tripping the user+item+season unique constraint.
       existing = await prismaWithDrafts.review.findFirst({
-        where: { userId: req.user.id, mediaItemId, seasonNumber: season },
+        where: { userId: user.id, mediaItemId, seasonNumber: season },
       });
     }
 
@@ -195,12 +214,12 @@ router.post('/', requireAuth, [
     // hiddenFromProfile implies hiddenFromFeed — absent from a profile but
     // present in the feed would be incoherent, so the stronger choice wins
     // rather than the client being trusted to send both.
-    const hiddenFromProfile = req.body.hiddenFromProfile === undefined
+    const hiddenFromProfile = body.hiddenFromProfile === undefined
       ? (existing ? existing.hiddenFromProfile : false)
-      : !!req.body.hiddenFromProfile;
-    const hiddenFromFeed = hiddenFromProfile || (req.body.hiddenFromFeed === undefined
+      : !!body.hiddenFromProfile;
+    const hiddenFromFeed = hiddenFromProfile || (body.hiddenFromFeed === undefined
       ? (existing ? existing.hiddenFromFeed : false)
-      : !!req.body.hiddenFromFeed);
+      : !!body.hiddenFromFeed);
 
     let isFirstReview = !!(existing && existing.isFirstReview);
     let isEarlyReview = !!(existing && existing.isEarlyReview);
@@ -211,7 +230,7 @@ router.post('/', requireAuth, [
       const priorPublic = await prisma.review.count({
         where: {
           mediaItemId, isDraft: false, visibility: 'PUBLIC',
-          NOT: { userId: req.user.id },
+          NOT: { userId: user.id },
         },
       });
       isFirstReview = priorPublic === 0;
@@ -245,20 +264,24 @@ router.post('/', requireAuth, [
           previousRating: existing.isDraft ? null : (ratingChanged ? existing.rating : existing.previousRating),
           isFirstReview,
           hiddenFromFeed, hiddenFromProfile,
+          // Re-rating something inside a batch moves it into that batch, so
+          // the feed shows it under the save that changed it rather than
+          // leaving a stale separate card from whenever it was first rated.
+          ...(batchId ? { batchId, isBatchLead } : {}),
         },
         include: reviewInclude,
       });
       // Publishing a draft is the moment friends should hear about it — the
       // create branch below never fired for this review, because it already
       // existed as a draft.
-      if (existing.isDraft && !saveAsDraft) {
-        await notifyFriends(req.user.id, review.id, media.title).catch(console.error);
+      if (notify && existing.isDraft && !saveAsDraft) {
+        await notifyFriends(user.id, review.id, media.title).catch(console.error);
       }
     } else {
       // Create a brand new review
       review = await prisma.review.create({
         data: {
-          userId: req.user.id, mediaItemId,
+          userId: user.id, mediaItemId,
           rating: parseInt(rating),
           seasonNumber: season,
           dateConsumed: consumed,        // store when they consumed it
@@ -266,35 +289,119 @@ router.post('/', requireAuth, [
           isDraft: saveAsDraft,
           isFirstReview,
           hiddenFromFeed, hiddenFromProfile,
+          batchId, isBatchLead,
         },
         include: reviewInclude,
       });
       // Nobody is told about an unpublished review.
-      if (!saveAsDraft) {
-        await notifyFriends(req.user.id, review.id, media.title).catch(console.error);
+      if (notify && !saveAsDraft) {
+        await notifyFriends(user.id, review.id, media.title).catch(console.error);
       }
     }
 
-    // Badges are recognition, not bookkeeping: a failure here must never cost
-    // someone the review they just wrote, so it is awaited (the response should
-    // reflect what they earned) but never allowed to reject.
-    const earned = await syncBadges(prisma, req.user.id).catch(err => {
-      console.error('badge sync failed', err);
-      return [];
-    });
+    return { review, created: !existing, feedEligible: !saveAsDraft && !hiddenFromFeed && vis !== 'PRIVATE' };
+  }
+}
 
-    // Returned ready to display — label, blurb and all. The page celebrating
-    // this should not have to re-derive "Pathfinder II" from a code and a
-    // tier, because then the rules would live in two places and drift.
-    let earnedBadges;
-    if (earned.length) {
-      const rows = await prisma.userBadge.findMany({
-        where: { userId: req.user.id, code: { in: earned.map(e => e.code) } },
-      });
-      earnedBadges = rows.map(presentBadge).filter(Boolean);
+// Badges are recognition, not bookkeeping: a failure here must never cost
+// someone the review they just wrote, so it is awaited (the response should
+// reflect what they earned) but never allowed to reject.
+//
+// Returned ready to display — label, blurb and all. The page celebrating
+// this should not have to re-derive "Pathfinder II" from a code and a
+// tier, because then the rules would live in two places and drift.
+//
+// Run once per request, not once per review: a twenty-title batch would
+// otherwise re-derive every badge twenty times and report the same one
+// earned on each pass.
+async function earnBadges(userId) {
+  const earned = await syncBadges(prisma, userId).catch(err => {
+    console.error('badge sync failed', err);
+    return [];
+  });
+  if (!earned.length) return undefined;
+  const rows = await prisma.userBadge.findMany({
+    where: { userId, code: { in: earned.map(e => e.code) } },
+  });
+  return rows.map(presentBadge).filter(Boolean);
+}
+
+// ─── POST /api/reviews/batch ──────────────────────────────────────────────
+// Several ratings saved as one action — what saving a VS card is.
+//
+// Two problems this solves, both of which are the same problem. Rating ten
+// titles used to be ten requests, which is a burst of writes this Postgres
+// has fallen over under before (see the Railway volume note in CLAUDE.md),
+// and ten feed cards and ten friend notifications, which buries everyone
+// else's actual reviews. imports.js already decided the principle: one
+// event about a person, not N events about N films.
+//
+// So: one request, written sequentially, sharing a batchId, with exactly
+// one row marked isBatchLead for the feed to hang the group on, and one
+// notification.
+//
+// Partial success is reported rather than rolled back. If eight of ten
+// land, those eight are real opinions the person expressed and throwing
+// them away to punish the two would be the worse outcome — the response
+// names what failed so the client can keep those and retry.
+const BATCH_MAX = 50;
+
+router.post('/batch', requireAuth, [
+  body('reviews').isArray({ min: 1, max: BATCH_MAX })
+    .withMessage(`reviews must be an array of 1 to ${BATCH_MAX} items`),
+], async (req, res, next) => {
+  if (!ok(req, res)) return;
+  try {
+    const batchId = randomUUID();
+    const saved = [], failed = [];
+    let leadAssigned = false;
+
+    for (const item of req.body.reviews) {
+      if (!item || typeof item !== 'object' || !item.mediaItemId) {
+        failed.push({ mediaItemId: item && item.mediaItemId, error: 'mediaItemId is required' });
+        continue;
+      }
+      const n = parseInt(item.rating, 10);
+      if (!Number.isInteger(n) || n < 1 || n > 10) {
+        failed.push({ mediaItemId: item.mediaItemId, error: 'rating must be 1-10' });
+        continue;
+      }
+      try {
+        // The lead has to be a review the feed would actually show. Handing
+        // it to a draft, a private rating or one hidden from the feed would
+        // hide the whole group behind it.
+        const result = await saveReview({
+          user: req.user, body: item, batchId,
+          isBatchLead: !leadAssigned, notify: false,
+        });
+        if (result.error) { failed.push({ mediaItemId: item.mediaItemId, error: result.error }); continue; }
+        if (!leadAssigned && result.feedEligible) leadAssigned = true;
+        else if (!leadAssigned) {
+          // Provisionally marked lead but not feed-eligible after all; clear
+          // it so a later eligible row in this batch can take the role.
+          await prisma.review.update({ where: { id: result.review.id }, data: { isBatchLead: false } });
+          result.review.isBatchLead = false;
+        }
+        saved.push(result.review);
+      } catch (err) {
+        console.error('batch review failed', item.mediaItemId, err.message);
+        failed.push({ mediaItemId: item.mediaItemId, error: 'could not be saved' });
+      }
     }
 
-    res.status(existing ? 200 : 201).json(earnedBadges?.length ? { ...review, earnedBadges } : review);
+    // One notification for the batch, pointing at the lead — the row the
+    // feed will show. Nothing to announce if nothing in it was publishable.
+    const lead = saved.find(r => r.isBatchLead);
+    if (lead) {
+      await notifyFriends(req.user.id, lead.id, lead.mediaItem ? lead.mediaItem.title : '').catch(console.error);
+    }
+
+    const earnedBadges = await earnBadges(req.user.id);
+    res.status(saved.length ? 201 : 422).json({
+      batchId, saved: saved.length, failed,
+      reviews: saved,
+      ...(earnedBadges?.length ? { earnedBadges } : {}),
+    });
   } catch (err) { next(err); }
 });
 

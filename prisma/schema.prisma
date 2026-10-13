@@ -400,6 +400,28 @@ model Review {
   // or they could never find it again to change it back.
   hiddenFromProfile Boolean @default(false)
 
+  // Reviews written in one go — saving a VS card rates up to twenty titles
+  // at once — share a batchId so the feed can show them as the single thing
+  // that happened rather than twenty things. Same reasoning as isImported
+  // above ("one event about a person, not N events about N films"), but the
+  // opposite remedy: an import is hidden because nobody chose to broadcast
+  // it, where this was deliberate and belongs in the feed exactly once.
+  //
+  // Unlike isImported/hiddenFromFeed this is NOT a visibility flag. Every
+  // review in a batch is fully public and behaves normally everywhere else:
+  // on the title's page, on the author's profile, in the title's score, in
+  // badge counts. Only the feed collapses them.
+  //
+  // isBatchLead marks the one row that carries the group. It exists because
+  // the feed is paginated and counted: picking the lead in SQL would need a
+  // DISTINCT ON that Prisma cannot express over a nullable column (its
+  // `distinct` would fold every null batchId into a single row), and
+  // grouping after the fact would break both `take` and the total when a
+  // batch straddles a page boundary. One flag, decided at write time,
+  // keeps the feed query an ordinary paginated query.
+  batchId       String?
+  isBatchLead   Boolean @default(false)
+
   @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])
   @@index([mediaItemId])
@@ -407,6 +429,8 @@ model Review {
   @@index([createdAt])
   // Fetching a user's own drafts is the one hot path that filters on isDraft.
   @@index([userId, isDraft])
+  // The feed loads a lead review's siblings by batchId on every page.
+  @@index([batchId])
 }
 
 model Reaction {

@@ -98,6 +98,12 @@ router.get('/', optionalAuth, [
       // Chosen by the reviewer: reviewed, counted, on the title's page, but
       // deliberately not broadcast. See Review.hiddenFromFeed.
       hiddenFromFeed: false,
+      // Ratings saved in one action — a VS card can be twenty at once — get
+      // one card between them, not twenty. Only the lead of a batch is a
+      // feed row; the rest are attached to it below. Filtered here rather
+      // than grouped afterwards so `take` and the total still mean what they
+      // say when a batch straddles a page boundary.
+      OR: [{ batchId: null }, { isBatchLead: true }],
     };
 
     // Sort by most recently created or edited — edits always bubble to the top
@@ -171,6 +177,39 @@ router.get('/', optionalAuth, [
       }
     }
 
+    // ── Batch siblings ───────────────────────────────────────────────────
+    // A lead review stands for everything saved alongside it, so the card can
+    // say "rated 9 titles" and show them rather than claiming one rating and
+    // silently dropping eight. Only the display fields are loaded: these are
+    // not feed rows of their own and carry no reactions or comments, which
+    // belong to the one card the group occupies.
+    //
+    // Visibility is re-filtered rather than inherited from the lead — a
+    // batch can legitimately mix a public rating with a private one, and the
+    // private one must not ride along on its neighbour's card.
+    const batchIds = reviews.filter(r => r.batchId && r.isBatchLead).map(r => r.batchId);
+    const siblingsByBatch = {};
+    if (batchIds.length) {
+      const siblings = await prisma.review.findMany({
+        where: {
+          batchId: { in: batchIds },
+          isBatchLead: false,
+          hiddenFromFeed: false,
+          visibility: where.visibility,
+          mediaItem: { verified: true },
+        },
+        select: {
+          id: true, rating: true, batchId: true, seasonNumber: true,
+          mediaItem: {
+            select: { id: true, title: true, slug: true, mediaType: true,
+                      releaseYear: true, imageUrl: true, seriesName: true },
+          },
+        },
+        orderBy: { rating: 'desc' },
+      });
+      for (const s of siblings) (siblingsByBatch[s.batchId] ||= []).push(s);
+    }
+
     const enriched = reviews.map(r => {
       const isBookSeriesReview =
         r.mediaItem.mediaType === 'BOOK' && !!r.mediaItem.seriesName && r.seasonNumber === 0;
@@ -194,6 +233,13 @@ router.get('/', optionalAuth, [
           // ?book=1 for an individual book (see renderReviewCard in index.html).
           isSeries: isBookSeriesReview || undefined,
         },
+        // Present only on a card that stands for several ratings, so the
+        // client can treat its absence as "an ordinary single review" and
+        // every existing card keeps rendering exactly as it did.
+        batchItems: r.isBatchLead && siblingsByBatch[r.batchId]?.length
+          ? siblingsByBatch[r.batchId] : undefined,
+        batchCount: r.isBatchLead && siblingsByBatch[r.batchId]?.length
+          ? siblingsByBatch[r.batchId].length + 1 : undefined,
         myReaction: req.user ? (r.reactions.find(rx => rx.userId === req.user.id)?.emoji || null) : null,
         myRatingForItem: myRatingByItem[r.mediaItemId] ?? null,
         reactionSummary: r.reactions.reduce((acc, { emoji }) => {
