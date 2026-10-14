@@ -22,8 +22,8 @@
 
 require('dotenv').config();
 const prisma = require('../src/lib/prisma');
-const { slugify, uniqueSlug, connectPersons, connectCast, normalizeGenres, findDuplicate } = require('../src/lib/mediaHelpers');
-const { discoverNewMovies, getTmdbDetail } = require('../src/services/mediaLookup');
+const { slugify, uniqueSlug, connectPersons, connectCast, normalizeGenres, findDuplicate, settingGenresFor } = require('../src/lib/mediaHelpers');
+const { discoverNewMovies, getTmdbDetail, getMovieKeywords } = require('../src/services/mediaLookup');
 
 const STUDIO_NAMES = [
   'Walt Disney Pictures', 'Marvel Studios', 'Pixar', '20th Century Studios',
@@ -103,6 +103,13 @@ async function main() {
       }
 
       const slug = await uniqueSlug(slugify(detail.title, releaseYear));
+      // Setting genres from TMDB keywords, the same heuristic sync-new-tv.js
+      // has always run (settingGenresFor in src/lib/mediaHelpers.js). This
+      // script never did, so no film added by the weekly sync has ever
+      // carried Schools, Police, Legal, Courtroom, Medical or Cooking --
+      // only the shows did. getMovieKeywords was already written and
+      // exported for exactly this and simply was not called.
+      const keywords = await getMovieKeywords(detail.tmdbId);
       const castData = await connectCast(detail.cast || []);
       await prisma.mediaItem.create({
         data: {
@@ -113,7 +120,7 @@ async function main() {
           verified: true, // auto-publish — see file header comment
           description: detail.description || null,
           imageUrl: detail.imageUrl || null,
-          genres: normalizeGenres(detail.genres || []),
+          genres: normalizeGenres([...(detail.genres || []), ...settingGenresFor(keywords)]),
           tmdbId: detail.tmdbId,
           tmdbRating: detail.tmdbRating || null,
           directors: await connectPersons(detail.directors || []),

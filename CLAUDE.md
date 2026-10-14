@@ -133,7 +133,7 @@ New releases sync weekly (Mondays) via `.github/workflows/sync-new-releases.yml`
 running `scripts/sync-new-releases.js` (movies) and `scripts/sync-new-tv.js`
 (TV shows) against a curated list of major studios/networks/streamers —
 see each script's header comment for the studio/network/provider lists and
-the setting-genre (Schools/Police/Legal/Courtroom/Medical) keyword heuristic
+the setting-genre (Schools/Police/Legal/Courtroom/Medical/Cooking) keyword heuristic
 they apply. Both auto-publish (`verified: true`) rather than queuing for
 review, a deliberate exception to the bulk-import default — see "Adding
 media" below. The workflow needs a `TMDB_READ_ACCESS_TOKEN` secret in GitHub

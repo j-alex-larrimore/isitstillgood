@@ -453,6 +453,25 @@ const SETTING_GENRE_VOCAB = {
   Legal: ['lawyer', 'law firm', 'legal drama', 'criminal law', 'corporate law', 'paralegal', 'attorney', 'district attorney', 'prosecutor'],
   Courtroom: ['courtroom drama', 'courtroom', 'trial', 'court case', 'jury'],
   Medical: ['medical', 'medicine', 'hospital', 'medical drama', 'emergency room'],
+  // Chosen by measuring each candidate against TMDB rather than guessing,
+  // because the obvious words are the bad ones. Checked by pulling the
+  // keywords off sixteen known cooking titles (Ratatouille, The Menu,
+  // Burnt, Tampopo, Boiling Point…) and then asking TMDB what else carries
+  // each term:
+  //   restaurant (366 films) → Five Nights at Freddy's, Final Destination
+  //   food       (576)       → A Bug's Life, Sausage Party, Garfield
+  //   bakery     (101)       → Get Smart, Despicable Me 2, Howl's Moving Castle
+  //   kitchen    (54)        → Hell House LLC II, Cannibal Kitchen
+  //   cook       (23)        → The Holdovers, First Cow
+  // All rejected: they name a place or a job that appears in the film, not
+  // a film about cooking. What survives is specific — 'fine dining' returns
+  // The Bear and Chef's Table, 'cooking competition' returns Top Chef,
+  // Chopped and MasterChef. 'chef' is kept broad on purpose: word-boundary
+  // matching means it also picks up sous chef, pastry chef and celebrity
+  // chef without listing each.
+  Cooking: ['chef', 'cooking', 'cookery', 'cookbook', 'culinary arts', 'fine dining',
+            'haute cuisine', 'gourmet', 'food critic', 'food truck', 'sushi',
+            'cooking show', 'cooking competition'],
 };
 
 // Same idea as SETTING_GENRE_VOCAB but for movies/TV already tagged "War" —
