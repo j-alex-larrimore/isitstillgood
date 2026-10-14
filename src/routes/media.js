@@ -441,7 +441,12 @@ router.get('/', optionalAuth, async (req, res, next) => {
       friendIds = friendships.map(f =>
         f.initiatorId === req.user.id ? f.receiverId : f.initiatorId
       );
-      friendIds.push(req.user.id);
+      // Deliberately NOT including req.user.id. "Friends" is a question
+      // about other people — what the people you added think of this — and
+      // folding your own rating into that average answers a question you
+      // already know the answer to, while pulling the number toward it.
+      // On a small circle one of your own scores can be a third of the
+      // result.
 
       // Apply excluded friends — look up their user IDs by email. Email, not
       // username: excludedFriends stores email now that a username can be
@@ -456,9 +461,24 @@ router.get('/', optionalAuth, async (req, res, next) => {
         friendIds = friendIds.filter(id => !excludedIds.has(id));
       }
     }
-    const friendFilter = friendsOnly && friendIds.length
-      ? { userId: { in: friendIds } }
+    /* No friends yet means no friend reviews, not every review on the
+       site. The old shape fell through to an empty filter when the list
+       was empty, which only ever happened to be harmless because the
+       viewer's own id was pushed in above and kept the length at one.
+       Take that out and the same line would have shown the whole
+       catalogue to anyone who clicked Friends before adding any. */
+    const friendFilter = friendsOnly && req.user
+      ? { userId: { in: friendIds.length ? friendIds : ['__none__'] } }
       : {};
+    /* The same list for the raw rating aggregates below, which cannot use
+       friendFilter. They used to switch on `friendIds.length`, so somebody
+       in Friends mode with nobody added fell through to the sitewide
+       average and was shown the whole site's opinion under a heading that
+       said it was their friends'. An empty circle has no ratings in it;
+       the sentinel says so instead of guessing. */
+    const friendScope = friendsOnly && req.user
+      ? (friendIds.length ? friendIds : ['__none__'])
+      : null;
 
     // Reviewed-item ids for whichever person reviewStatus is scoped to — the
     // reviewedBy target when Browse's "select a friend" dropdown picked one,
@@ -990,8 +1010,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // via GET /api/media?sort=rating with no other params). Passing the
       // array itself as a single bind parameter has no such limit regardless
       // of catalog size.
-      const idRatings = idList.length === 0 ? [] : (friendsOnly && friendIds.length
-        ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendIds}) GROUP BY "mediaItemId"`
+      const idRatings = idList.length === 0 ? [] : (friendScope
+        ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendScope}) GROUP BY "mediaItemId"`
         : await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg FROM "Review" WHERE "mediaItemId" = ANY(${idList}) AND visibility = 'PUBLIC' GROUP BY "mediaItemId"`);
       const idRatingMap = Object.fromEntries(idRatings.map(r => [r.mediaItemId, r.avg]));
 
@@ -1013,8 +1033,8 @@ router.get('/', optionalAuth, async (req, res, next) => {
         const seasonIds = seasons.map(s => s.id);
         const seasonToParent = Object.fromEntries(seasons.map(s => [s.id, s.parentId]));
         if (seasonIds.length) {
-          const seasonRatings = friendsOnly && friendIds.length
-            ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg, COUNT(rating)::int AS cnt FROM "Review" WHERE "mediaItemId" = ANY(${seasonIds}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendIds}) GROUP BY "mediaItemId"`
+          const seasonRatings = friendScope
+            ? await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg, COUNT(rating)::int AS cnt FROM "Review" WHERE "mediaItemId" = ANY(${seasonIds}) AND visibility = 'PUBLIC' AND "userId" = ANY(${friendScope}) GROUP BY "mediaItemId"`
             : await prisma.$queryRaw`SELECT "mediaItemId", AVG(rating)::float AS avg, COUNT(rating)::int AS cnt FROM "Review" WHERE "mediaItemId" = ANY(${seasonIds}) AND visibility = 'PUBLIC' GROUP BY "mediaItemId"`;
           const parentAccum = {};
           for (const r of seasonRatings) {
@@ -1624,7 +1644,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       total: preCountedTotal ? total : fullFetchMode ? finalItems.length : total,
       page: parseInt(page),
       pages: preCountedTotal ? Math.ceil(total / take) : fullFetchMode ? Math.ceil(finalItems.length / take) : Math.ceil(total / take),
-      friendsOnly: friendsOnly && friendIds.length > 0,
+      friendsOnly: friendsOnly && !!req.user,   // the mode is on even with nobody added yet
       searchAvgRating,
       searchAvgIsFriend: !!req.reviewedByRatings,
     });
