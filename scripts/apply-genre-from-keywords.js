@@ -32,13 +32,31 @@ const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
 const genreArg = args.find(a => a.startsWith('--genre='));
 const GENRE = genreArg ? genreArg.slice('--genre='.length) : null;
-const MAX_PAGES = 25;                    // 500 titles per term per media type
+// 20 titles a page. Sorted by popularity, so the early pages are the ones
+// most likely to be in our catalogue at all and the tail is mostly titles
+// we do not carry — but a broad term like "lawyer" has well over a
+// thousand, and stopping at 500 quietly truncated it. --pages raises it
+// where that matters; even at 100 this is a few hundred requests against
+// the 29,526 that reading our own rows would cost.
+const pagesArg = args.find(a => a.startsWith('--pages='));
+const MAX_PAGES = pagesArg ? Math.max(1, parseInt(pagesArg.slice('--pages='.length), 10)) : 60;
 
 if (!GENRE || !SETTING_GENRE_VOCAB[GENRE]) {
   console.error('Usage: node scripts/apply-genre-from-keywords.js --genre=<Genre> [--apply]');
   console.error('Known genres: ' + Object.keys(SETTING_GENRE_VOCAB).join(', '));
   process.exit(1);
 }
+
+/* --without=hospital,medicine — drop terms for this run only.
+   The vocabulary was tuned against TV keywords, where "hospital" means a
+   hospital show. On film it is just a location: it offers Bean, Bullitt
+   and Click alongside Awakenings and 50/50. Rather than weaken the term
+   for TV, where it works, a backfill across films can leave it out.
+   Nothing about the stored vocabulary changes. */
+const withoutArg = args.find(a => a.startsWith('--without='));
+const WITHOUT = new Set(
+  (withoutArg ? withoutArg.slice('--without='.length) : '')
+    .split(',').map(t => t.trim().toLowerCase()).filter(Boolean));
 
 const TOKEN = process.env.TMDB_READ_ACCESS_TOKEN;
 if (!TOKEN) { console.error('TMDB_READ_ACCESS_TOKEN is not set'); process.exit(1); }
@@ -78,8 +96,12 @@ async function titlesFor(id, kind) {
 }
 
 (async () => {
-  const terms = SETTING_GENRE_VOCAB[GENRE];
-  console.log(`${GENRE}: ${terms.length} keyword(s)${APPLY ? '' : ' — dry run, nothing will be written'}\n`);
+  const all = SETTING_GENRE_VOCAB[GENRE];
+  const terms = all.filter(t => !WITHOUT.has(t.toLowerCase()));
+  const dropped = all.filter(t => WITHOUT.has(t.toLowerCase()));
+  console.log(`${GENRE}: ${terms.length} keyword(s)${APPLY ? '' : ' — dry run, nothing will be written'}`);
+  if (dropped.length) console.log(`  (not using: ${dropped.join(', ')})`);
+  console.log('');
 
   // tmdbId -> the terms that produced it, kept so the report can show why
   // a title matched and a wrong one is traceable to the term to drop.
