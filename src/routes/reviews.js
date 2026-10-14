@@ -383,8 +383,7 @@ router.post('/batch', requireAuth, [
   if (!ok(req, res)) return;
   try {
     const batchId = randomUUID();
-    const saved = [], failed = [];
-    let leadAssigned = false;
+    const saved = [], failed = [], eligible = [];
 
     for (const item of req.body.reviews) {
       if (!item || typeof item !== 'object' || !item.mediaItemId) {
@@ -397,21 +396,11 @@ router.post('/batch', requireAuth, [
         continue;
       }
       try {
-        // The lead has to be a review the feed would actually show. Handing
-        // it to a draft, a private rating or one hidden from the feed would
-        // hide the whole group behind it.
         const result = await saveReview({
-          user: req.user, body: item, batchId,
-          isBatchLead: !leadAssigned, notify: false,
+          user: req.user, body: item, batchId, isBatchLead: false, notify: false,
         });
         if (result.error) { failed.push({ mediaItemId: item.mediaItemId, error: result.error }); continue; }
-        if (!leadAssigned && result.feedEligible) leadAssigned = true;
-        else if (!leadAssigned) {
-          // Provisionally marked lead but not feed-eligible after all; clear
-          // it so a later eligible row in this batch can take the role.
-          await prisma.review.update({ where: { id: result.review.id }, data: { isBatchLead: false } });
-          result.review.isBatchLead = false;
-        }
+        if (result.feedEligible) eligible.push(result.review);
         saved.push(result.review);
       } catch (err) {
         console.error('batch review failed', item.mediaItemId, err.message);
@@ -419,9 +408,23 @@ router.post('/batch', requireAuth, [
       }
     }
 
+    /* The lead is the highest rating in the batch, picked after the writes
+       rather than handed to whichever row happened to go in first.
+       The feed card shows the lead at the top and the rest beneath it in
+       rating order, so a lead chosen by write order breaks the sequence at
+       exactly the place a reader looks first — one card led with Saving
+       Private Ryan at 9 while Top Gun: Maverick sat at 10 further down.
+       It must also be a row the feed would show: a draft, a private rating
+       or one hidden from the feed would take the whole group with it. */
+    let lead = null;
+    if (eligible.length) {
+      lead = eligible.reduce((best, r) => (r.rating > best.rating ? r : best), eligible[0]);
+      await prisma.review.update({ where: { id: lead.id }, data: { isBatchLead: true } });
+      lead.isBatchLead = true;
+    }
+
     // One notification for the batch, pointing at the lead — the row the
     // feed will show. Nothing to announce if nothing in it was publishable.
-    const lead = saved.find(r => r.isBatchLead);
     if (lead) {
       await notifyFriends(req.user.id, lead.id, lead.mediaItem ? lead.mediaItem.title : '').catch(console.error);
     }
