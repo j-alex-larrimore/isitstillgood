@@ -278,7 +278,16 @@ async function saveReview({ user, body, batchId = null, isBatchLead = false, not
         await notifyFriends(user.id, review.id, media.title).catch(console.error);
       }
     } else {
-      // Create a brand new review
+      // Create a brand new review.
+      //
+      // The existence check above is a read followed by a write, so two
+      // requests for the same item can both find nothing and both insert.
+      // That is no longer silent — the unique index now covers a null
+      // seasonNumber (see the NULLS NOT DISTINCT migration) — but a
+      // rejection is not something to hand back to someone who only tried
+      // to rate a film. P2002 means the other request got there first, so
+      // take what it wrote and apply this rating to it.
+      try {
       review = await prisma.review.create({
         data: {
           userId: user.id, mediaItemId,
@@ -293,6 +302,27 @@ async function saveReview({ user, body, batchId = null, isBatchLead = false, not
         },
         include: reviewInclude,
       });
+      } catch (e) {
+        if (e.code !== 'P2002') throw e;
+        const winner = await prismaWithDrafts.review.findFirst({
+          where: { userId: user.id, mediaItemId, seasonNumber: season },
+        });
+        if (!winner) throw e;
+        review = await prisma.review.update({
+          where: { id: winner.id },
+          data: {
+            rating: parseInt(rating),
+            reviewText, spoilerText, visibility: vis, verdict,
+            isDraft: saveAsDraft, hiddenFromFeed, hiddenFromProfile,
+            ...(dateWasSubmitted ? { dateConsumed: consumed } : {}),
+            ...(batchId ? { batchId, isBatchLead } : {}),
+          },
+          include: reviewInclude,
+        });
+        // The other request already announced it; saying so twice is the
+        // thing this whole path exists to avoid.
+        return { review, created: false, feedEligible: !saveAsDraft && !hiddenFromFeed && vis !== 'PRIVATE' };
+      }
       // Nobody is told about an unpublished review.
       if (notify && !saveAsDraft) {
         await notifyFriends(user.id, review.id, media.title).catch(console.error);

@@ -422,6 +422,14 @@ model Review {
   batchId       String?
   isBatchLead   Boolean @default(false)
 
+  // One review per person per thing. Read the migration
+  // 20261013234500_review_unique_nulls_not_distinct before trusting this
+  // line: Postgres treats NULLs as distinct, so as Prisma generates it
+  // this index does NOT stop two reviews of the same film by the same
+  // person — seasonNumber is NULL for every film, book and game. The
+  // index is rebuilt there with NULLS NOT DISTINCT, which Prisma cannot
+  // express here and does not notice is there. Regenerating this index
+  // from scratch without that migration reopens the hole.
   @@unique([userId, mediaItemId, seasonNumber])
   @@index([userId])
   @@index([mediaItemId])
