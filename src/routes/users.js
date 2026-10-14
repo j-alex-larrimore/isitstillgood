@@ -31,13 +31,34 @@ router.patch('/me', requireAuth, [
   } catch (err) { next(err); }
 });
 
+// A media type, or a comma-separated set of them. BOARD_GAME is accepted
+// because the enum still carries it; the site itself deals in four.
+const MEDIA_TYPES = ['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME'];
+function parseMediaTypes(raw) {
+  if (!raw) return null;
+  const list = [...new Set(String(raw).split(',').map(t => t.trim()).filter(Boolean))]
+    .filter(t => MEDIA_TYPES.includes(t));
+  // Every type selected is the same question as none selected, and saying
+  // so here keeps an `in` of all five out of the query.
+  if (!list.length || list.length === MEDIA_TYPES.length) return null;
+  return list;
+}
+function isMediaTypeList(raw) {
+  const parts = String(raw).split(',').map(t => t.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every(t => MEDIA_TYPES.includes(t));
+}
+
 // ─── GET /api/users/:username/reviews ─── Their review timeline ────────────
 router.get('/:username/reviews', optionalAuth, [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 20 }),
   query('rating').optional().isInt({ min: 1, max: 10 }),
-  query('type').optional().isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
-  query('mediaType').optional().isIn(['MOVIE', 'BOOK', 'TV_SHOW', 'BOARD_GAME', 'VIDEO_GAME']),
+  // One type or several, comma-separated: "MOVIE", "MOVIE,TV_SHOW". The
+  // profile's filter is a set of toggles, so asking for films and series
+  // together has to be one request rather than two merged on the client,
+  // or pagination and the total stop meaning anything.
+  query('type').optional().custom(isMediaTypeList),
+  query('mediaType').optional().custom(isMediaTypeList),
   query('seasonNumber').optional().custom(v => v === 'null' || /^-?\d+$/.test(v)),
 ], async (req, res, next) => {
   try {
@@ -78,8 +99,9 @@ router.get('/:username/reviews', optionalAuth, [
       visibilityFilter = areFriends ? { in: ['PUBLIC', 'FRIENDS_ONLY'] } : { equals: 'PUBLIC' };
     }
 
-    // Support both ?type= and ?mediaType= for media type filtering
-    const typeFilter = req.query.type || req.query.mediaType;
+    // Support both ?type= and ?mediaType= for media type filtering, each
+    // taking one value or a comma-separated set.
+    const typeFilter = parseMediaTypes(req.query.type || req.query.mediaType);
     const where = {
       userId: target.id,
       visibility: visibilityFilter,
@@ -88,7 +110,9 @@ router.get('/:username/reviews', optionalAuth, [
       // toward the title's score and still appears on that title's page.
       ...(isSelf ? {} : { hiddenFromProfile: false }),
       ...(req.query.rating && { rating: parseInt(req.query.rating) }),
-      ...(typeFilter && { mediaItem: { is: { mediaType: typeFilter } } }),
+      // `in` for one as well as several — a single-element list behaves
+      // identically, so there is no second code path to keep in step.
+      ...(typeFilter && { mediaItem: { is: { mediaType: { in: typeFilter } } } }),
       // seasonNumber: 0 is the book-series sentinel — passed explicitly by
       // the rating-comparison widget when the item being rated is a series,
       // so it compares against the user's other series-level reviews rather
