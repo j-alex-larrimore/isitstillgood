@@ -7,6 +7,7 @@ const { body, validationResult } = require('express-validator');
 const prisma   = require('../lib/prisma');
 const { signAccessToken, issueRefreshToken, rotateRefreshToken, setAuthCookies, clearAuthCookies } = require('../lib/tokens');
 const { requireAuth } = require('../middleware/auth');
+const { generateUsername } = require('../lib/usernames');
 const { sendVerificationEmail, sendEmailChangeConfirmation, sendEmailChangeNotice } = require('../services/email');
 
 const CLIENT_URL = process.env.CLIENT_URL || 'https://isitstillgood.com';
@@ -89,7 +90,12 @@ async function sendAuthResponse(res, user) {
 router.post('/register', registerLimiter, [
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-  body('username').matches(/^[a-zA-Z0-9_]{3,30}$/).withMessage('Username: 3-30 chars, letters/numbers/underscores only'),
+  // Optional. Left out, it is derived from the display name — "Annie
+  // Hooper" becomes AnnieH, numbered if that is taken. One fewer field
+  // between someone and the card they just built, and the one most likely
+  // to dead-end them on "username taken" halfway through.
+  body('username').optional({ checkFalsy: true })
+    .matches(/^[a-zA-Z0-9_]{3,30}$/).withMessage('Username: 3-30 chars, letters/numbers/underscores only'),
   body('displayName').trim().isLength({ min: 1, max: 60 }),
 ], async (req, res, next) => {
   // Honeypot: join.html has a "website" field hidden off-screen that a real
@@ -100,7 +106,11 @@ router.post('/register', registerLimiter, [
     return res.status(200).json({ message: 'Registration received' });
   }
   if (!validate(req, res)) return;
-  const { email, password, username, displayName } = req.body;
+  const { email, password, displayName } = req.body;
+  // Generated only when they did not choose one. generateUsername already
+  // guarantees it is free, so it cannot collide in the check below.
+  const chosenUsername = (req.body.username || '').trim();
+  const username = chosenUsername || await generateUsername(displayName, email);
   try {
     const exists = await prisma.user.findFirst({
       where: { OR: [{ email: email.toLowerCase() }, { username }] },

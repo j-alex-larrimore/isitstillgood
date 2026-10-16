@@ -4,6 +4,7 @@ const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
 const { Strategy: LocalStrategy }  = require('passport-local');
 const bcrypt = require('bcryptjs');
 const prisma  = require('../lib/prisma');
+const { generateUsername } = require('../lib/usernames');
 
 // ─── Serialize / Deserialize (for session — only used during OAuth handshake) ─
 passport.serializeUser((user, done) => done(null, user.id));
@@ -105,14 +106,12 @@ passport.use(new GoogleStrategy(
         return done(null, user);
       }
 
-      // 3. Brand new user — create account
-      // Generate a unique username from their name
-      const baseUsername = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
-      let username = baseUsername;
-      let suffix = 1;
-      while (await prisma.user.findUnique({ where: { username } })) {
-        username = `${baseUsername}${suffix++}`;
-      }
+      // 3. Brand new user — create account.
+      // Shared with the registration form so the site has one convention:
+      // "Annie Hooper" becomes AnnieH either way. This used to produce
+      // annie_hooper here while the form demanded a username up front, so
+      // the two paths named people differently.
+      const username = await generateUsername(name, email);
 
       user = await prisma.user.create({
         data: {
