@@ -1,0 +1,70 @@
+name: Refresh External Ratings
+
+# Nightly, 2,000 items a run.
+#
+# refreshStaleRatings() existed for months but nothing ever called it — no
+# cron, no route, no startup hook — so the only external ratings ever written
+# came from someone pressing sync on a single item in the admin UI. 40,141 of
+# the 42,190 refreshable items had never been touched, and the most recent
+# refresh of any kind was 7 July 2026.
+#
+# Never-refreshed items come first, so the backlog drains rather than starving
+# behind rows that already have a value. At 2,000 a night the first full pass
+# takes about three weeks; after that the same query naturally becomes a
+# rolling refresh of whatever is oldest.
+#
+# ~250ms between items, which is IGDB's documented ~4 requests/second ceiling.
+# 2,000 items is therefore roughly 8 minutes of deliberate waiting plus API
+# time — call it 15-25 minutes, well inside the 6-hour job limit.
+#
+# Films and TV come from TMDB, games from IGDB. Books are not covered: none
+# carries an external id and fetchExternalRatings has no book branch, so there
+# is nothing to fetch yet.
+#
+# 03:00 UTC deliberately: the backup runs at 08:00 and the weekly sync at
+# 09:00 Mondays, and a job that writes thousands of rows should not overlap a
+# pg_dump of the same database.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'How many items to refresh this run'
+        required: false
+        default: '2000'
+      days:
+        description: 'Treat a rating as stale after this many days'
+        required: false
+        default: '7'
+      dry_run:
+        description: 'List what would be refreshed without writing'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refresh external ratings
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          IGDB_CLIENT_ID: ${{ secrets.IGDB_CLIENT_ID }}
+          IGDB_CLIENT_SECRET: ${{ secrets.IGDB_CLIENT_SECRET }}
+        run: |
+          node scripts/refresh-external-ratings.js \
+            --limit "${{ github.event.inputs.limit || '2000' }}" \
+            --days "${{ github.event.inputs.days || '7' }}" \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}

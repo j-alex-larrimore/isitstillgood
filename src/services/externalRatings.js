@@ -108,17 +108,72 @@ async function fetchExternalRatings(mediaItemId) {
   return item;
 }
 
-async function refreshStaleRatings() {
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const stale = await prisma.mediaItem.findMany({
-    where: {
-      externalRatingsUpdatedAt: { lt: sevenDaysAgo },
-      OR: [{ tmdbId: { not: null } }, { openCriticId: { not: null } }],
-    },
-    select: { id: true },
-    take: 50,
+/* Refreshes the oldest external ratings, never-refreshed ones first.
+ *
+ * Three things were wrong with this before, and the first is why 40,141 of
+ * the 42,190 refreshable items had never been touched:
+ *
+ *   1. `externalRatingsUpdatedAt: { lt: cutoff }` never matches NULL — in SQL
+ *      NULL < anything is unknown, not true. So the query could only ever
+ *      revisit rows that had already been refreshed at least once, and an
+ *      item that had never been synced was permanently invisible to it.
+ *   2. take: 50 with no caller and no schedule. Nothing imported this
+ *      function at all; the only writes came from the per-item
+ *      POST /api/media/:id/sync-ratings, pressed by hand.
+ *   3. No pacing. IGDB allows about 4 requests a second and will start
+ *      refusing beyond that, so an unthrottled loop fails most of its calls
+ *      and looks like a data problem.
+ *
+ * Books are deliberately absent: no book carries tmdbId or openCriticId, and
+ * fetchExternalRatings has no book branch, so there is nothing to refresh
+ * yet. fetchOpenLibraryData exists but is not wired to anything.
+ */
+async function refreshStaleRatings({
+  limit = 200,
+  olderThanDays = 7,
+  mediaTypes = null,
+  delayMs = 250,          // ~4/sec, IGDB's documented ceiling
+  dryRun = false,
+  onProgress = null,
+} = {}) {
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+  const where = {
+    AND: [
+      { OR: [{ tmdbId: { not: null } }, { openCriticId: { not: null } }] },
+      { OR: [{ externalRatingsUpdatedAt: null }, { externalRatingsUpdatedAt: { lt: cutoff } }] },
+    ],
+  };
+  if (mediaTypes && mediaTypes.length) where.mediaType = { in: mediaTypes };
+
+  const due = await prisma.mediaItem.count({ where });
+  const batch = await prisma.mediaItem.findMany({
+    where,
+    select: { id: true, title: true, mediaType: true, externalRatingsUpdatedAt: true },
+    // Never-refreshed first, then oldest. Without nulls:'first' the backlog
+    // would stay at the back of the queue indefinitely.
+    orderBy: { externalRatingsUpdatedAt: { sort: 'asc', nulls: 'first' } },
+    take: limit,
   });
-  for (const item of stale) await fetchExternalRatings(item.id).catch(console.error);
+
+  const stats = { due, attempted: batch.length, updated: 0, unchanged: 0, failed: 0, dryRun };
+  if (dryRun) return { ...stats, sample: batch.slice(0, 10) };
+
+  for (const item of batch) {
+    try {
+      const before = item.externalRatingsUpdatedAt;
+      const after = await fetchExternalRatings(item.id);
+      // fetchExternalRatings returns the row untouched when the provider gave
+      // it nothing usable, so compare rather than assume success.
+      if (after && String(after.externalRatingsUpdatedAt) !== String(before)) stats.updated++;
+      else stats.unchanged++;
+    } catch (err) {
+      stats.failed++;
+      if (onProgress) onProgress({ item, error: err });
+    }
+    if (onProgress) onProgress({ item, stats });
+    if (delayMs) await new Promise(r => setTimeout(r, delayMs));
+  }
+  return stats;
 }
 
 module.exports = { fetchExternalRatings, refreshStaleRatings, fetchTmdbData, fetchIgdbData, fetchOpenLibraryData, getIgdbToken };
